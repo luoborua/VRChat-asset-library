@@ -380,7 +380,7 @@ select.input, .toolbar select {
   border-radius: var(--radius-sm); padding: 0 8px; font-family: inherit; font-size: 12.5px; cursor: pointer; outline: none;
 }
 .toolbar #sortSelect { width: 178px; }
-.toolbar #pageSizeSelect { width: 92px; }
+.toolbar #pageSizeSelect { width: 112px; }
 
 /* 批量条 */
 .bulk-bar {
@@ -479,7 +479,9 @@ select.input, .toolbar select {
 }
 .sel-mark.on { background: var(--primary); }
 
-.card-body { padding: 9px 11px 11px; display: flex; flex-direction: column; gap: 5px; flex: 1; }
+.card-body { padding: 9px 11px 11px; display: flex; flex-direction: column; gap: 5px; flex: 1 1 auto;
+  /* v4.8：卡片高度固定，避免标签多少把卡片撑成不同长度；多出来的行裁掉 */
+  height: 152px; overflow: hidden; }
 .card-title {
   font-weight: 600; font-size: 13.5px; line-height: 1.35;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
@@ -495,7 +497,7 @@ select.input, .toolbar select {
 }
 /* v4.7：标题开头的 [xxx] 不许在括号中间断开，好让断行落在「] 之后」 */
 .card-title .tt-prefix { white-space: nowrap; }
-.card-chips, .card-avatars, .card-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.card-chips, .card-avatars, .card-tags { display: flex; flex-wrap: nowrap; gap: 4px; overflow: hidden; max-height: 22px; }
 .card-tags { margin-top: auto; }
 
 .chip {

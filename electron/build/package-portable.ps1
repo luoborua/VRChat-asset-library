@@ -1,10 +1,21 @@
 ﻿# Portable build: Electron runtime + app dir + launcher bat.
 param(
   [string]$OutDir = "dist",
-  [string]$Version = "1.0.0"
+  [string]$Version = ""            # 留空 = 自动读 00-data.js 里的 version
 )
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+
+# 版本号：调用方可以不传；不传就读 00-data.js 的 version，包名不会再和程序版本脱节。
+if (-not $Version) {
+  $dataFile = Join-Path $repo 'electron\renderer\js\00-data.js'
+  if (Test-Path $dataFile) {
+    $m = [regex]::Match([System.IO.File]::ReadAllText($dataFile), "version:\s*'([0-9]+\.[0-9]+(?:\.[0-9]+)?)'")
+    if ($m.Success) { $Version = $m.Groups[1].Value }
+  }
+}
+$Version = ("$Version").TrimStart('v','V')
+if (-not $Version) { $Version = '1.0.0' }
 $rt = Join-Path $repo 'electron\node_modules\electron\dist'
 if (-not (Test-Path (Join-Path $rt 'electron.exe'))) { throw "Electron runtime not found: $rt" }
 $work = Join-Path $repo 'runtime\_u\build'

@@ -25,11 +25,25 @@ jobs:
 
       - name: Build portable zip
         shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File electron/build/package-portable.ps1
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File electron/build/package-portable.ps1 -Version "${{ github.ref_name }}"
 
       - name: Show artifact
         shell: powershell
         run: Get-ChildItem dist | Format-Table Name, Length
+
+      - name: Drop stale zip assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          want="vrchat-asset-library_v${tag#v}_win-x64.zip"
+          gh release view "$tag" --json assets -q '.assets[].name' 2>/dev/null | while read -r name; do
+            if [ -n "$name" ] && [ "$name" != "$want" ]; then
+              echo "removing stale asset: $name"
+              gh release delete-asset "$tag" "$name" -y || true
+            fi
+          done
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2

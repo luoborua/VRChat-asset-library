@@ -644,6 +644,43 @@ var App = {
     });
     return asset;
   },
+  /** v5.6（用户要求）：统一的「改标题」入口 —— 右键菜单和编辑页保存都最终走同一套逻辑。
+   *  顺序：校验重名 → 改磁盘目录 → 同步存储路径 → 落库 → 刷新卡片与已打开的详情页。 */
+  renameAssetTo: function (id, newTitle) {
+    var live = (App.assets || []).filter(function (x) { return x.id === id; })[0];
+    if (!live) return Promise.resolve({ ok: false, reason: '素材不存在' });
+    var t = String(newTitle == null ? '' : newTitle).trim();
+    if (!t) return Promise.resolve({ ok: false, reason: '标题不能为空' });
+    if (t === live.title) return Promise.resolve({ ok: true, changed: false });
+    /* 重名预检：App.save 里还有同一道检查（防止别处绕过），这里先拦是为了能说清「和谁重名」。 */
+    var next = Object.assign({}, live, { title: t });
+    var want = App.folderName(next);
+    var clash = App.assets.filter(function (x) {
+      return x.id !== id && App.folderName(x).toLowerCase() === want.toLowerCase();
+    })[0];
+    if (clash) return Promise.resolve({ ok: false, reason: '已存在同名素材「' + (clash.title || clash.id) + '」，换个标题或角色名' });
+    var beforePath = ((live.paths || [])[0] || {}).path || '';
+    next.updatedAt = nowISO();
+    /* 真正的改名 / 路径同步 / 落库都在 App.save 里（编辑页保存走的也是它），这里只负责预检与界面刷新。 */
+    return App.save(next).then(function (saved) {
+      var afterPath = (((saved || next).paths || [])[0] || {}).path || '';
+      App.refreshAssetView(saved || next);
+      return { ok: true, changed: true, renamed: !!(beforePath && afterPath && beforePath !== afterPath) };
+    }).catch(function (e) {
+      return { ok: false, reason: (e && e.message) || String(e) };
+    });
+  },
+
+  /** 卡片 + 已打开的详情页一起刷新（详情页里显示着存储路径，目录改名后必须跟着变）。 */
+  refreshAssetView: function (asset) {
+    if (!asset || !asset.id) return;
+    try { UI.refreshCard(asset.id); } catch (e) {}
+    var top = (typeof Modal !== 'undefined' && Modal.stack && Modal.stack.length) ? Modal.stack[Modal.stack.length - 1] : null;
+    if (top && top.kind === 'detail' && App.detailAssetId === asset.id && typeof Modals !== 'undefined' && Modals.detail) {
+      Modals.detail(asset.id, top, { noAutoEnrich: true });
+    }
+  },
+
   syncCharacterConfigs: function (list, scope) {
     list = list || App.assets;
     var cfgChanged = false;
@@ -2022,9 +2059,16 @@ var App = {
   },
 
   /** 分页（借鉴商品列表分页逻辑；pageSize=0 表示不分页） */
+  /** v5.0：每页数量不再让用户选 —— 按卡片大小换算，保证一页占的「面积」大致等于中号 24 张。
+   *  小 34（170px 宽）/ 中 24（220px）/ 大 15（290px），允许有少量浮动。 */
+  pageSizeFor: function () {
+    var map = { s: 34, m: 24, l: 15 };
+    return map[App.settings.cardSize] || 24;
+  },
+
   pageInfo: function () {
     var all = App.filtered();
-    var size = App.settings.pageSize || 0;
+    var size = App.pageSizeFor();
     var pages = size > 0 ? Math.max(1, Math.ceil(all.length / size)) : 1;
     if (App.page > pages) App.page = pages;
     if (App.page < 1) App.page = 1;
@@ -2160,30 +2204,6 @@ var App = {
     return (ep && ep.value != null) ? ep.value : null;
   },
 
-  /** 花费统计：好友分享 / 获赠不计；只统计**真的买过**的素材（v2.5.5 修复见下） */
-  spending: function () {
-    var byCur = Object.create(null);
-    var cnyTotal = 0, counted = 0, unknown = 0;
-    var rates = App.settings.fxRates || {};
-    App.assets.forEach(function (a) {
-      if (App.isFriend(a)) return;                 // 好友分享不做统计
-      if (a.gifted) return;                        // 获赠：没花钱，不算花费
-      /* v2.5.5 修复（用户报「未购买的商品也被计入价格统计」）：
-       * v2.5.2 起 effectivePrice 对**未购买**素材会取「未购变体的当前价」（那是商品价，不是花费），
-       * 于是花费统计把它们也算进去了。这里加上「未购买一律不计」——统计口径 = 真花掉的钱。 */
-      if (!App.hasPurchaseProof(a)) return;          // v2.5.11：没凭据 = 没花过钱（含未购买 / 只有商品价）
-      var ep = App.effectivePrice(a);
-      if (!ep || ep.value == null || ep.value <= 0) return;
-      var cur = ep.currency || 'UNKNOWN';
-      byCur[cur] = byCur[cur] || { sum: 0, count: 0 };
-      byCur[cur].sum += ep.value; byCur[cur].count++;
-      counted++;
-      var rate = rates[cur];
-      if (rate != null) cnyTotal += ep.value * rate; else unknown += ep.value;
-    });
-    return { byCur: byCur, cnyTotal: cnyTotal, counted: counted, unknownValue: unknown, rates: rates };
-  },
-
   /** 统计各维度数量 */
   stats: function () {
     var s = { total: App.assets.length, categories: {}, sources: {}, avatars: {}, tags: {},
@@ -2290,6 +2310,15 @@ var App = {
     var pre = Promise.resolve();
     var existedBefore = !!old;
     if (old && App.folderName(old) !== App.folderName(a)) {
+      /* v5.6（用户要求）：改名/改标题前先查重 —— 素材库里已有别的素材占用了同一个文件夹名就拒绝，
+       * 否则两个素材会争同一个目录，后面的写入互相覆盖。 */
+      var wantFolder = App.folderName(a);
+      var clash = App.assets.filter(function (x) {
+        return x.id !== a.id && App.folderName(x).toLowerCase() === wantFolder.toLowerCase();
+      })[0];
+      if (clash) {
+        return Promise.reject(new Error('已存在同名素材「' + (clash.title || clash.id) + '」，换个标题或角色名再保存'));
+      }
       /* v2.5.16：旧段名取**磁盘上的实际名字**（存储路径末段）——否则「导入后改过标题 / 翻译过标题」的素材
        * （真实库 398 条里 293 条如此）会因为路径对不上而改名失败、路径也更新不了。 */
       var realOld = '';
@@ -2299,6 +2328,10 @@ var App = {
       var newFolder = App.folderName(a);
       pre = FS.renameAssetFolder(oldFolder, newFolder, App.categoryLabel(a.category), old).then(function (renamed) {
         if (renamed) App.updatePathsForFolderName(a, oldFolder, newFolder);
+      }).catch(function (e) {
+        /* v5.4：改名是「尽力而为」，失败也绝不能让保存卡住或整体失败 */
+        if (typeof console !== 'undefined' && console.warn) console.warn('[rename] 跳过：' + ((e && e.message) || e));
+        return false;
       });
     }
     return pre.then(function () { return Store.putAsset(a); }).then(function (saved) {
@@ -2412,6 +2445,25 @@ var UI = {
    */
   /** v2.5.2：把某张卡片标成「当前素材」（蓝色边框 + 外扩光晕，没有多选那样的勾选标记）——
    *  常驻而不是闪一下：这样刷新/重渲染之后你仍然看得出刚才打开/改的是哪一个。 */
+  /** v5.2（用户要求）：只重画这一张卡，不动整页、不重置滚动、不重播入场动画。
+   *  返回 false = 这张卡当前不在屏幕上（被筛掉 / 不在本页），交给调用方决定要不要整体刷新。 */
+  refreshCard: function (id) {
+    var sel = '.card[data-id="' + String(id).replace(/"/g, '') + '"]';
+    var node = document.querySelector(sel);
+    if (!node) return false;
+    var asset = (App.assets || []).filter(function (x) { return x.id === id; })[0];
+    if (!asset) return false;
+    /* 改完之后如果它已经不符合当前筛选 / 不在本页，就交回整体渲染（该消失就消失）。 */
+    var pi = App.pageInfo();
+    var onPage = (pi.items || []).some(function (x) { return x.id === id; });
+    if (!onPage) { UI.renderAll(); return true; }
+    var fresh = UI.card(asset);
+    fresh.style.animation = 'none';
+    if (node.parentNode) node.parentNode.replaceChild(fresh, node);
+    if (App.activeAssetId === id) UI.flashCard(id);
+    return true;
+  },
+
   flashCard: function (id) {
     App.activeAssetId = id || '';
     var cards = document.querySelectorAll('.card');
@@ -2473,7 +2525,7 @@ var UI = {
     var idx = -1;
     for (var i = 0; i < all.length; i++) { if (all[i].id === id) { idx = i; break; } }
     if (idx < 0) { UI.scrollTo(y); return; }               // 被筛掉 → 位置不动
-    var size = App.settings.pageSize || 0;
+    var size = App.pageSizeFor();
     var target = size > 0 ? (Math.floor(idx / size) + 1) : 1;
     if (target !== (App.page || 1)) {
       App.page = target;
@@ -2552,9 +2604,8 @@ var UI = {
       el('div', { class: 'stat-item' }, [el('b', { text: String(st.favorite) }), el('span', { text: '喜欢' })]),
       el('div', { class: 'stat-item' }, [el('b', { text: String(st.withPath) }), el('span', { text: '已关联路径' })])
     ]));
-// 价格/花费统计已按需求移除（v1.0 精简）：侧栏不再显示合计与币种明细浮窗。
 
-    // 状态：也不单独分组，正常大小紧跟花费统计之后（下拉式，直接显示标签文案，v2.3.1 起不再套「状态：…的素材」）
+    // 状态：紧跟概览之后（下拉式，直接显示标签文案，v2.3.1 起不再套「状态：…的素材」）
     var statusSelect = el('select', {
       class: 'input status-select', id: 'statusFilter', title: '按状态筛选素材',
       onchange: function () { App.filters.status = statusSelect.value; App.page = 1; UI.renderAll(); }
@@ -2595,11 +2646,6 @@ var UI = {
 
     // 标签（免费 / 付费 / 分享 / 获赠 / R18 / 已下架 作为特殊标签置顶；特殊标签无论有没有素材都显示；其余按数量排序）
     var priceFacets = [
-      { id: '__price_free__', label: '免费', count: st.price.free, active: App.filters.price === 'free', pinned: true, cls: 'facet-free' },
-      { id: '__price_paid__', label: '付费', count: st.price.paid, active: App.filters.price === 'paid', pinned: true, cls: 'facet-paid' },
-      { id: '__price_unpurchased__', label: '未购买', count: st.price.unpurchased, active: App.filters.price === 'unpurchased', pinned: true, cls: 'facet-unpurchased' },
-      { id: '__price_share__', label: '分享', count: st.price.share, active: App.filters.price === 'share', pinned: true, cls: 'facet-share' },
-      { id: '__price_gift__', label: '获赠', count: st.price.gift, active: App.filters.price === 'gift', pinned: true, cls: 'facet-gift' },
       { id: '__r18__', label: 'R18', count: st.r18, active: !!App.filters.r18, pinned: true, cls: 'facet-r18' },
       { id: '__delisted__', label: '已下架', count: st.delisted, active: !!App.filters.delisted, pinned: true, cls: 'facet-delisted' },
       { id: '__wishlist__', label: '心愿单', count: st.wishlist, active: !!App.filters.wishlist, pinned: true, cls: 'facet-wishlist' }
@@ -2611,11 +2657,6 @@ var UI = {
         return { id: t, label: t, count: st.tags[t], active: tstate === 'in', cls: tstate === 'out' ? 'tag-out' : '', state: tstate, title: UI.tagFilterTitle(t, tstate) };
       }));
     root.appendChild(UI.filterGroup('标签', tagItems, function (id) {
-      if (id === '__price_free__') { App.filters.price = App.filters.price === 'free' ? 'all' : 'free'; App.page = 1; UI.renderAll(); return; }
-      if (id === '__price_paid__') { App.filters.price = App.filters.price === 'paid' ? 'all' : 'paid'; App.page = 1; UI.renderAll(); return; }
-      if (id === '__price_unpurchased__') { App.filters.price = App.filters.price === 'unpurchased' ? 'all' : 'unpurchased'; App.page = 1; UI.renderAll(); return; }
-      if (id === '__price_share__') { App.filters.price = App.filters.price === 'share' ? 'all' : 'share'; App.page = 1; UI.renderAll(); return; }
-      if (id === '__price_gift__') { App.filters.price = App.filters.price === 'gift' ? 'all' : 'gift'; App.page = 1; UI.renderAll(); return; }
       if (id === '__r18__') { App.filters.r18 = !App.filters.r18; App.page = 1; UI.renderAll(); return; }
       if (id === '__delisted__') { App.filters.delisted = !App.filters.delisted; App.page = 1; UI.renderAll(); return; }
       if (id === '__wishlist__') { App.filters.wishlist = !App.filters.wishlist; App.page = 1; UI.renderAll(); return; }
@@ -2805,79 +2846,41 @@ var UI = {
           ? '没有符合当前筛选条件的素材，试试重置筛选。'
           : '素材库还是空的，点击右上角「+ 添加素材」开始建立；别人给你的 .vrcpack 素材包、zip / unitypackage 素材，直接拖进窗口就能导入。';
       }
-      /* 空库也算「首屏已呈现」——分步渲染的启动屏撤下 / 分段计时标记照常走 */
       if (opts && opts.onFirstPaint) opts.onFirstPaint();
       if (opts && opts.onDone) opts.onDone();
       return;
     }
     if (empty) empty.style.display = 'none';
 
-    // 轮转分栏：第 1 张进第 1 栏、第 2 张进第 2 栏……第 n+1 张回到第 1 栏。
-    // 因此 6 栏时：1 栏=1,7,13…；2 栏=2,8,14…；3 栏=3,9,15…，以此类推。
-    var n = isList ? 0 : UI.masonryColumnCount(grid.clientWidth);
-    var cols = [];
-    if (!isList) {
-      for (var ci = 0; ci < n; ci++) cols.push(el('div', { class: 'masonry-col' }));
-      // 先挂空列（列容器自身不产生布局回读）
-      var fragCols = document.createDocumentFragment();
-      cols.forEach(function (c) { fragCols.appendChild(c); });
-      grid.appendChild(fragCols);
-    }
-    var sumH = 0, countH = 0;
-    /* v2.5.7（性能，实测驱动）：原实现每放一张卡都要把**所有列**的 lastElementChild
-     * 读一遍 offsetTop+offsetHeight —— 425 张 × n 列 = 上千次**强制同步布局**。
-     * 改成「列底高度记在缓存数组里、只量刚插入的那一张」：每张卡恒定 1 次强制布局，
-     * 分栏结果与原来逐字一致（offsetParent/相对基准完全没变）。 */
-    var bottoms = new Array(n);
-    for (var b0 = 0; b0 < n; b0++) bottoms[b0] = 0;
-    // 阈值 = 已放卡片平均高度的一半（半张卡高），避免单张特高/特矮卡干扰。
-    function halfCardH() {
-      var avg = countH > 0 ? sumH / countH : 220;
-      return Math.max(60, Math.round(avg / 2));
-    }
-    var chunkFrag = null;
-    function renderOne(a, idx) {
-      var card = UI.card(a);
-      if (isList) {                                  // 列表视图：凑一块再挂（少一次重排）
-        if (!chunkFrag) chunkFrag = document.createDocumentFragment();
-        chunkFrag.appendChild(card);
-        return;
-      }
-      var ti = idx % n;
-      // 追加规则：保持轮转分栏；自第 n+1 张起，若轮转目标列比最低列高出
-      // 半张卡高，则优先补到最低列（多个同低时按轮转顺序取靠左者）。
-      if (idx >= n) {
-        var targetBottom = bottoms[ti];
-        var minBottom = Infinity, minIdx = ti;
-        for (var j = 0; j < n; j++) {
-          if (bottoms[j] < minBottom - 0.5) { minBottom = bottoms[j]; minIdx = j; }
-        }
-        if (targetBottom - minBottom >= halfCardH()) ti = minIdx;
-      }
-      cols[ti].appendChild(card);
-      var h = card.offsetHeight;                    // 唯一一次强制布局：量刚插入的这张
-      if (h > 0) { sumH += h; countH++; }
-      bottoms[ti] = card.offsetTop + h;             // 布局此刻已干净，本次读取不再触发重排
-    }
-    function nowMs() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
+    /* v5.0：不再自己轮转分栏。列数交给 CSS grid 按「容器宽度 / 固定卡宽」算：
+     * 收起侧栏 → 容器变宽 → 自动多排几列，卡片尺寸不变；
+     * 同一行里最高的卡决定行高，其余卡撑满这一行。 */
     var doneCb = function () { if (opts && opts.onDone) opts.onDone(); };
-    /* 一次渲染到底（默认路径，与旧实现逐字一致） */
+    var frag = document.createDocumentFragment();
+    var animIdx = 0;
+    function renderOne(a) {
+      var card = UI.card(a);
+      /* 入场错峰：最多 14 张累加，每张 18ms，避免大页等太久 */
+      card.style.animationDelay = (Math.min(animIdx, 14) * 18) + 'ms';
+      animIdx++;
+      frag.appendChild(card);
+    }
+    function flush() { grid.appendChild(frag); frag = document.createDocumentFragment(); }
     if (!opts || !opts.progressive) {
-      for (var k = 0; k < list.length; k++) renderOne(list[k], k);
-      if (chunkFrag) grid.appendChild(chunkFrag);
+      for (var k = 0; k < list.length; k++) renderOne(list[k]);
+      flush();
       doneCb();
       return;
     }
-    /* 分步渲染：首批同步入 DOM，其余按 budgetMs 时间片分帧续渲。
-     * 每张卡走的是同一个 renderOne、同一个序号、同一个 bottoms 数组 —— 最终布局与一次性渲染一致。 */
+    /* 分步渲染：首批同步入 DOM，其余按 budgetMs 时间片分帧续渲；最终顺序与一次性渲染一致。 */
     var firstChunk = Math.max(1, opts.firstChunk || 24);
     var budget = opts.budgetMs || 12;
     var at = 0;
-    function flush() { if (chunkFrag) { grid.appendChild(chunkFrag); chunkFrag = null; } }
-    for (; at < list.length && at < firstChunk; at++) renderOne(list[at], at);
+    for (; at < list.length && at < firstChunk; at++) renderOne(list[at]);
     flush();
     if (opts.onFirstPaint) opts.onFirstPaint();
     if (at >= list.length) { doneCb(); return; }
+    function nowMs() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
     function nextFrame(fn) {
       var fired = false;
       function go() { if (fired) return; fired = true; fn(); }
@@ -2887,11 +2890,9 @@ var UI = {
     (function step() {
       nextFrame(function () {
         var t0 = nowMs();
-        while (at < list.length && nowMs() - t0 < budget) { renderOne(list[at], at); at++; }
+        while (at < list.length && nowMs() - t0 < budget) { renderOne(list[at]); at++; }
         flush();
         if (at >= list.length) { doneCb(); return; }
-        /* 时间片逐片加倍（封顶 150ms）：首片小 → 首屏先出、不卡交互；尾部片大 → 少等几帧、尽快收口。
-         * 每张卡仍走同一个 renderOne / 同一个序号，最终分栏与一次性渲染一致。 */
         budget = Math.min(budget * 2, 150);
         step();
       });
@@ -2902,6 +2903,7 @@ var UI = {
   renderPager: function (pi) {
     var box = $('#pager'); if (!box) return;
     box.innerHTML = '';
+    document.body.classList.toggle('has-pager', !!(pi && pi.pages > 1));
     if (!pi || pi.pages <= 1) { box.style.display = 'none'; return; }
     box.style.display = '';
     function go(n) { App.page = n; UI.renderMain(); UI.scrollToSmooth(0); }
@@ -2947,6 +2949,9 @@ var UI = {
       img.onerror = function () {
         cover.classList.remove('has-img');
       };
+      /* v5.2：封面图不允许被拖走 —— 以前拖它到别的卡片上，会走「拖图设封面」逻辑，
+       * 把别人卡片的封面换掉。 */
+      img.draggable = false;
       img.src = url;
       cover.appendChild(img);
     });
@@ -2984,52 +2989,18 @@ var UI = {
     ]);
     if (corner.children.length) cover.appendChild(corner);
 
-    // 右上角价格丝带：获赠 > 分享（好友分享）> 免费 / 付费（未记录价格不显示）
-    var friend = App.isFriend(a);
-    var ep = App.effectivePrice(a);
-    function ribbonClick(value) { return function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { App.filters.price = App.filters.price === value ? 'all' : value; }); }; }
-    var priceZero = !!(ep && ep.value === 0);
-    if (a.gifted) {
-      cover.appendChild(el('span', {
-        class: 'price-ribbon ribbon-gift', title: '获赠素材' + (ep && ep.text && !priceZero ? '（价格：' + ep.text + '）' : '') + '，点击只看获赠',
-        onclick: ribbonClick('gift')
-      }, '获赠'));
-    } else if (friend) {
-      cover.appendChild(el('span', {
-        class: 'price-ribbon ribbon-share', title: '好友分享素材' + (ep && ep.text && !priceZero ? '（价格：' + ep.text + '）' : '') + '，点击只看好友分享',
-        onclick: ribbonClick('share')
-      }, '分享'));
-    } else if (a.extra && a.extra.wishlist && !App.isPurchased(a)) {
-      // 心愿单丝带：只对「还没买」的素材显示——已购/已付费的素材要显示价格丝带（实测 114 个心愿单里 31 个其实已购）
+    /* v5.2：价格字段已移除 —— 卡片上不再画价格丝带（免费 / 付费 / 未购买 / 分享 / 获赠）。
+     * 只保留与价格无关的两枚：心愿单、开源。 */
+    if (a.extra && a.extra.wishlist && !App.isPurchased(a)) {
       cover.appendChild(el('span', {
         class: 'price-ribbon ribbon-wishlist', title: 'BOOTH 心愿单商品，点击只看心愿单',
         onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { App.filters.wishlist = !App.filters.wishlist; }); }
       }, '心愿单'));
     } else if (App.isGitHubSource(a)) {
-      // v2.3.22：开源素材（GitHub 仓库）——点击按来源筛选（不是价格筛选，避免筛出空结果）
       cover.appendChild(el('span', {
         class: 'price-ribbon ribbon-oss', title: '开源素材（GitHub 仓库），点击只看 GitHub 来源',
         onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { App.filters.sources = ['github']; }); }
       }, '开源'));
-    } else if (App.purchaseState(a) === 'unpurchased') {
-      // 没有免费变体、且全部变体均未购买：不显示「免费」，显示「未购买」特殊标签
-      cover.appendChild(el('span', {
-        class: 'price-ribbon ribbon-unpurchased', title: '该素材没有免费变体，且所有变体均未购买，点击只看未购买',
-        onclick: ribbonClick('unpurchased')
-      }, '未购买'));
-    } else if (App.priceBucket(a) === 'free') {
-      /* v2.5.14（用户批复 A）：免费 = isFree===true，**或「没有购买凭据但有免费变体」**——
-       * 后者原先会掉到下面的付费分支，于是「明明有免费变体、也没买」的素材被标成「付费」。 */
-      cover.appendChild(el('span', {
-        class: 'price-ribbon ribbon-free', title: '免费素材，点击只看免费',
-        onclick: ribbonClick('free')
-      }, '免费'));
-    } else if (App.priceBucket(a) === 'paid' && !priceZero) {
-      // v2.5.14（用户批复 A）：「付费」只给确实有购买凭据（手填购买价 / 订单链接）的素材
-      cover.appendChild(el('span', {
-        class: 'price-ribbon ribbon-paid', title: '付费素材' + (ep && ep.text ? '：' + ep.text : '') + '，点击只看付费',
-        onclick: ribbonClick('paid')
-      }, '付费'));
     }
 
     // 封面右下角：发布 / 上架日期（有记录才显示）
@@ -3072,8 +3043,6 @@ var UI = {
           onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { App.filters.categories = [a.category]; }); }
         }, [App.categoryIcon(a.category, { size: 13 }), document.createTextNode(App.categoryLabel(a.category))]),
         srcTag,
-        (ep && ep.text && !priceZero && (friend || a.gifted || a.isFree === false))
-          ? el('span', { class: 'chip chip-price', title: '价格：' + ep.text }, ep.text) : null
       ]),
       (a.avatars || []).length ? el('div', { class: 'card-avatars' },
         App.normalizeAvatarIds(App.filterAvatars(a)).slice(0, 4).map(function (v) {
@@ -3090,22 +3059,28 @@ var UI = {
               App.normalizeAvatarIds(App.filterAvatars(a)).slice(4).map(App.avatarLabel).join('、')
           }, '+' + (a.avatars.length - 4))] : [])
       ) : null,
-      App.displayTags(a).length ? el('div', { class: 'card-tags' },
-        App.displayTags(a).slice(0, 5).map(function (t) {
+      (function () {
+        var all = App.displayTags(a);
+        if (!all.length) return null;
+        /* v5.2（用户反馈「卡片标签显示有问题」）：原来固定塞 5 枚进一行 nowrap，
+         * 装不下时 flex 会把每枚都压扁成「短」「猫」这种一两个字 —— 读不了。
+         * 现在最多 3 枚；超过 3 枚只放 2 枚 + 「+N」，每枚不参与压缩，长标签自己省略号。 */
+        var shown = all.length > 3 ? all.slice(0, 2) : all.slice(0, 3);
+        var moreN = all.length - shown.length;
+        var nodes = shown.map(function (t) {
           var tstate = UI.tagFilterState(t);
           return el('span', {
             class: 'tag tag-click' + (Smart.isUntranslated(t) ? ' tag-untrans' : '') + UI.tagFilterClass(tstate),
             title: UI.tagFilterTitle(t, tstate),
-            /* v3.0.0（用户要求）：三态推进；仍走 filterFromCard —— 卡片内筛选保持 v2.5.9 的「不回顶、最小滚动定位」 */
             onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { UI.cycleTagFilter(t, { render: false }); }); }
           }, t + (Smart.isUntranslated(t) ? '（待翻译）' : ''));
-        })
-          /* v2.3.28：原来第 5 个之后的标签直接没了，连数量提示都没有；补 +N 并让悬停能看到全部 */
-          .concat(App.displayTags(a).length > 5 ? [el('span', {
-            class: 'tag tag-more',
-            title: '另有 ' + (App.displayTags(a).length - 5) + ' 个标签：' + App.displayTags(a).slice(5).join('、')
-          }, '+' + (App.displayTags(a).length - 5))] : [])
-      ) : null
+        });
+        if (moreN > 0) nodes.push(el('span', {
+          class: 'tag tag-more',
+          title: '另有 ' + moreN + ' 个标签：' + all.slice(shown.length).join('、')
+        }, '+' + moreN));
+        return el('div', { class: 'card-tags' }, nodes);
+      })(),
     ]);
 
     var card = el('div', {

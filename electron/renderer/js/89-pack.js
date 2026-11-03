@@ -166,16 +166,6 @@ var Packer = (function () {
             el('span', { class: 'pack-dim', text: '（备注常写私下信息，默认不带）' })
           ])
         ]),
-        el('label', { class: 'pack-check' }, [
-          el('input', {
-            type: 'checkbox', checked: opt.withPrice,
-            onchange: function () { opt.withPrice = this.checked; }
-          }),
-          el('span', {}, [
-            el('span', { text: '包含购买价格' }),
-            el('span', { class: 'pack-dim', text: '（你的购买记录，默认不带）' })
-          ])
-        ]),
         /* 对方想要「我库里都有啥」时，只要这份清单就够了 —— 一键切到纯清单模式，不用逐项取消 */
         el('div', { class: 'btn-row' }, [
           el('button', {
@@ -276,7 +266,7 @@ var Packer = (function () {
             withFiles: opt.withFiles,
             withCovers: opt.withCovers,
             withNote: opt.withNote,
-            withPrice: opt.withPrice,
+            withPrice: false,
             exporter: {
               deviceId: (App.settings.deviceId || ''),
               nickname: String(signName || '').trim()
@@ -456,6 +446,10 @@ var Packer = (function () {
     function hasFiles(e) {
       var dt = e && e.dataTransfer;
       if (!dt || !dt.types) return false;
+      /* v5.2：页面内拖出来的图片也会带 Files，但同时带 text/html —— 那不是「拖文件进来」 */
+      for (var j = 0; j < dt.types.length; j++) {
+        if (dt.types[j] === 'text/html' || dt.types[j] === 'text/uri-list') return false;
+      }
       for (var i = 0; i < dt.types.length; i++) if (dt.types[i] === 'Files') return true;
       return false;
     }

@@ -45,6 +45,14 @@ ipcMain.on('titlebar:colors', function (_event, opt) {
   try { win.setBackgroundColor(color); } catch (e) {}
 });
 
+/* v4.9：页面自绘窗口按钮（最小化 / 最大化 / 关闭）。只认这三个固定动作，不开放其它能力。 */
+ipcMain.on('win:action', function (_event, action) {
+  if (!win || win.isDestroyed()) return;
+  if (action === 'min') win.minimize();
+  else if (action === 'max') { if (win.isMaximized()) win.unmaximize(); else win.maximize(); }
+  else if (action === 'close') win.close();
+});
+
 const iconImage = () => nativeImage.createFromBuffer(makeIconPng(32));
 
 function logBoot(line) {
@@ -59,20 +67,17 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1380,
     height: 920,
-    minWidth: 940,
+    minWidth: 1160,   // v5.2：940 太窄，顶栏「设置」等按钮会被裁掉
     minHeight: 620,
     show: false,
     backgroundColor: '#0e1014',
-    title: 'VRChat 改模素材管理库 · v1.0',
+    title: 'VRChat 改模素材管理库 · v1.1',
     icon: iconImage(),
     autoHideMenuBar: true,
     /* v4.4：不要系统标题栏，只保留系统窗口按钮（覆盖层）。颜色随后由页面主题同步过来。 */
     titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: TITLEBAR_DARK.color,
-      symbolColor: TITLEBAR_DARK.symbolColor,
-      height: TITLEBAR_H
-    },
+    /* v4.9：关掉系统窗口按钮覆盖层（那块不透明矩形和顶栏渐变对不上，像脏遮罩）。改由页面自绘 .win-controls。 */
+    titleBarOverlay: false,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -86,6 +91,11 @@ function createWindow() {
   });
 
   win.setMenuBarVisibility(false);
+
+/* v4.9：最大化状态回传，页面按钮在 □ / ❐ 间切换 */
+['maximize', 'unmaximize'].forEach(function (ev) {
+  win.on(ev, function () { try { win.webContents.send('win:state', win.isMaximized()); } catch (e) {} });
+});
 
   win.once('ready-to-show', () => {
     win.show();

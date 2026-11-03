@@ -45,7 +45,22 @@
     });
   }
 
-  function bindEvents() {
+  /* v5.1：侧栏收起 = 宽度真的归零（内联样式兜底，避免样式表优先级打架）；
+ * .sidebar 上有 width/flex-basis 的过渡，所以是平滑收回、内容区同时变宽。
+ * 放在顶层：bindEvents() 和 boot() 都要用。 */
+function applySidebarState(open) {
+  document.body.classList.toggle('sidebar-hidden', !open);
+  var sb = document.querySelector('.sidebar');
+  if (!sb) return;
+  sb.style.width = open ? '' : '0px';
+  sb.style.flexBasis = open ? '' : '0px';
+  sb.style.paddingLeft = open ? '' : '0px';
+  sb.style.paddingRight = open ? '' : '0px';
+  sb.style.overflow = open ? '' : 'hidden';
+  sb.style.minWidth = open ? '' : '0px';
+}
+
+function bindEvents() {
     // 搜索
     var search = $('#searchInput');
     search.addEventListener('input', debounce(function () {
@@ -73,6 +88,9 @@
       }, true);
     }
     $('#searchClear').addEventListener('click', function () {
+      /* v5.2（用户要求）：搜索框本来就是空的时，点 × 只是把焦点放回去，
+       * 不重排卡片、不动页码、不触发入场动画。 */
+      if (search.value === '' && !App.filters.q) { search.focus(); return; }
       search.value = ''; App.filters.q = ''; UI.renderAll(); UI.scrollTopInstant(); search.focus();
     });
     // v2.2.12 模糊搜索开关（搜索框右侧）
@@ -88,7 +106,9 @@
     syncFuzzyBtn();
     if (btnFuzzy) btnFuzzy.addEventListener('click', function () {
       App.settings.fuzzySearch = !App.settings.fuzzySearch;
-      App.saveSettings(); syncFuzzyBtn(); UI.renderMain();
+      App.saveSettings(); syncFuzzyBtn();
+      /* v5.2（用户要求）：没有搜索词时，模糊开关只改设置，不重排卡片。 */
+      if (String(App.filters.q || '').trim()) UI.renderMain();
       Toast.info(App.settings.fuzzySearch ? '模糊搜索已开启（同义词 + 错别字容错）' : '模糊搜索已关闭');
     });
 
@@ -111,9 +131,10 @@
       App.applyTheme(); App.saveSettings();
       Toast.info('主题：' + themeMeta(App.settings.theme).label);
     });
+
     $('#btnSidebar').addEventListener('click', function () {
-      document.body.classList.toggle('sidebar-hidden');
-      App.settings.sidebarOpen = !document.body.classList.contains('sidebar-hidden');
+      App.settings.sidebarOpen = document.body.classList.contains('sidebar-hidden');
+      applySidebarState(App.settings.sidebarOpen);
       App.saveSettings();
       UI.renderMain();
     });
@@ -124,15 +145,39 @@
       App.settings.sort = this.value; App.page = 1; App.saveSettings(); UI.renderMain();
       UI.scrollTopInstant();                 // v2.5.9（用户要求）：排序 → 瞬间回顶部
     });
-    $('#pageSizeSelect').addEventListener('change', function () {
-      App.settings.pageSize = +this.value; App.page = 1; App.saveSettings(); UI.renderMain();
-    });
+    /* v5.0：网格按钮兼任卡片大小开关 —— 已在网格视图时点它，按 中 → 大 → 小 循环；
+     * 在列表视图时点它只切回网格（大小不变）。侧栏收起/展开不碰这个预设。 */
+    function sizeLabel(x) { return ({ s: '小', m: '中', l: '大' })[x] || '中'; }
+    function cycleCardSize() {
+      var order = ['m', 'l', 's'];
+      var i = order.indexOf(App.settings.cardSize || 'm');
+      App.settings.cardSize = order[(i + 1) % 3];
+      App.page = 1;
+      App.saveSettings();
+      UI.renderMain();
+      UI.scrollTopInstant();
+      Toast.info('卡片大小：' + sizeLabel(App.settings.cardSize) + '（每页 ' + App.pageSizeFor() + ' 个）', 2500);
+    }
     $$('.view-btn').forEach(function (b) {
       b.addEventListener('click', function () {
-        App.settings.view = b.dataset.view; App.saveSettings(); UI.renderMain();
+        if (b.dataset.view === 'grid' && App.settings.view === 'grid') { cycleCardSize(); return; }
+        App.settings.view = b.dataset.view; App.page = 1; App.saveSettings(); UI.renderMain();
       UI.scrollTopInstant();                 // v2.5.9（用户要求）：网格/列表切换 → 瞬间回顶部
       });
     });
+
+    /* v5.2（用户要求）：网格按钮右边加一个刷新按钮 —— 重新从磁盘读一遍素材库再重画。 */
+    var btnRefresh = $('#btnRefresh');
+    if (btnRefresh) {
+      btnRefresh.addEventListener('click', function () {
+        if (btnRefresh.classList.contains('spinning')) return;
+        btnRefresh.classList.add('spinning');
+        Promise.resolve(App.reload())
+          .then(function () { UI.renderAll(); Toast.ok('已刷新'); })
+          .catch(function (e) { Toast.err('刷新失败：' + ((e && e.message) || e)); })
+          .then(function () { setTimeout(function () { btnRefresh.classList.remove('spinning'); }, 720); });
+      });
+    }
 
     // 多选模式
     $('#btnSelectMode').addEventListener('click', function () {
@@ -318,6 +363,80 @@
     });
   }
 
+  /* ---------------- v5.0：布局调试用示例素材 ---------------- */
+  /* 12 条差异化的样例：短标题/超长标题、0~8 个标签、0~3 个角色、免费/付费/未购买、六种分类。
+   * 封面用 canvas 现场画一张渐变图，走 Store.putCover 存进封面库（和手动补封面同一条路）。 */
+  function sampleAssetList() {
+    var mk = function (t, cat, tags, avs, price, extra) {
+      var o = {
+        title: t, category: cat, source: 'booth',
+        tags: tags || [], rawTags: tags || [], avatars: avs || [],
+        author: '示例工房', itemId: '', price: price || '',
+        description: '示例素材，用于查看卡片布局与筛选效果，可以随时删除。',
+        links: [{ url: 'https://booth.pm/ja/items/0000000', label: '商品页' }]
+      };
+      if (extra) Object.keys(extra).forEach(function (k) { o[k] = extra[k]; });
+      return o;
+    };
+    return [
+      mk('毛绒围巾', 'clothing', [], [], ''),
+      mk('【シフォン用】ふわもこニットセット', 'clothing', ['毛衣', '冬季', '可爱'], ['chiffon'], '¥1,500', { originalTitle: 'ふわもこニットセット' }),
+      mk('超长标题测试：这一条故意写得很长，用来观察两行截断之后是否会把分类和标签顶下去，[加上一个方括号前缀]', 'clothing', ['长标题', '两行', '截断'], ['manuka', 'shinano'], '¥2,800'),
+      mk('八标签测试', 'textures', ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'], [], ''),
+      mk('三角色适配', 'gimmicks', ['表情', '菜单'], ['moe', 'rurune', 'lime'], ''),
+      mk('lilToon 着色器', 'shaders', ['着色器', '免费'], ['universal'], '0'),
+      mk('双马尾长发（PhysBone）', 'hair', ['发型', 'PhysBone'], ['manuka'], '¥800'),
+      mk('技能图标一套 24 枚', 'textures', ['图标', 'UI'], [], '¥500'),
+      mk('通用改模工具合集', 'gimmicks', ['工具', '合集', '通用', '免费', '常用'], [], '0'),
+      mk('冬季短裙', 'clothing', ['裙子', '冬季'], ['chiffon'], '¥1,200'),
+      mk('表情菜单组件', 'gimmicks', ['表情'], ['universal'], '¥300'),
+      mk('头像用整体改模', 'avatar', ['整合', '角色模型', '进阶'], ['moe'], '¥6,000')
+    ];
+  }
+  function sampleCover(a, i) {
+    return new Promise(function (resolve) {
+      try {
+        var c = document.createElement('canvas');
+        c.width = 600; c.height = 450;
+        var g = c.getContext('2d');
+        var hue = (i * 41) % 360;
+        var lg = g.createLinearGradient(0, 0, 600, 450);
+        lg.addColorStop(0, 'hsl(' + hue + ',70%,74%)');
+        lg.addColorStop(1, 'hsl(' + ((hue + 38) % 360) + ',64%,52%)');
+        g.fillStyle = lg; g.fillRect(0, 0, 600, 450);
+        g.globalAlpha = .16; g.fillStyle = '#fff';
+        g.beginPath(); g.arc(475, 105, 150, 0, Math.PI * 2); g.fill();
+        g.beginPath(); g.arc(120, 380, 110, 0, Math.PI * 2); g.fill();
+        g.globalAlpha = .92; g.fillStyle = '#fff';
+        g.textAlign = 'center'; g.textBaseline = 'middle';
+        g.font = '600 168px system-ui, "Microsoft YaHei", sans-serif';
+        g.fillText(String(a.title || '?').slice(0, 1), 300, 235);
+        g.globalAlpha = .6; g.font = '500 26px system-ui, "Microsoft YaHei", sans-serif';
+        g.fillText('示例封面', 300, 392);
+        if (c.toBlob) c.toBlob(function (b) { resolve(b); }, 'image/png');
+        else resolve(null);
+      } catch (e) { resolve(null); }
+    });
+  }
+  function seedSamples() {
+    var list = sampleAssetList().map(function (d) { return Store.normalizeAsset(d); });
+    var chain = Promise.resolve();
+    list.forEach(function (a, i) {
+      chain = chain.then(function () {
+        return sampleCover(a, i).then(function (b) {
+          if (!b) return null;
+          a.hasCover = true;
+          return Store.putCover(a.id, b);
+        });
+      });
+    });
+    return chain
+      .then(function () { return Store.putAssets(list); })
+      .then(function () { return App.reload(); })
+      .then(function () { UI.renderAll(); Toast.ok('已加入 ' + list.length + ' 条示例素材（含封面），可逐条删除'); })
+      .catch(function (e) { Toast.err('加入示例失败：' + ((e && e.message) || e)); });
+  }
+
   /* ---------------- 启动 ---------------- */
   function boot() {
     /* v2.3.27：启动分段计时，事后可查（控制台 `__bootPerf` 或 `?debug=1`）——优化启动速度要有据可依 */
@@ -342,15 +461,12 @@
       var searchReset = $('#searchInput'); if (searchReset) searchReset.value = '';
       App.applyTheme();
       AI.normalizeConfig();
-      if (!App.settings.sidebarOpen) document.body.classList.add('sidebar-hidden');
+      applySidebarState(App.settings.sidebarOpen !== false);
       var ss = $('#sortSelect');
       SORTS.forEach(function (s) {
         ss.appendChild(el('option', { value: s.id, selected: App.settings.sort === s.id }, s.label));
       });
-      var ps = $('#pageSizeSelect');
-      PAGE_SIZES.forEach(function (s) {
-        ps.appendChild(el('option', { value: String(s.id), selected: String(App.settings.pageSize) === String(s.id) }, s.label));
-      });
+      /* v5.0：每页数量不再由用户选 —— 跟着卡片大小走（App.pageSizeFor()） */
       return App.bootLocalData();
     }).then(function () {
       bmark('localData');
@@ -492,6 +608,32 @@
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
 
-  window.VRCLib = { App: App, UI: UI, Store: Store, FS: FS, Fetchers: Fetchers, Smart: Smart, Tools: Tools, seedDemo: seedDemo };
+  /* v4.9：自绘窗口按钮（最小化 / 最大化 / 关闭）+ 双击顶栏切换最大化 */
+  (function () {
+    var bar = document.getElementById('winControls');
+    if (!bar) return;
+    var api = window.vrcElectron;
+    if (!api || typeof api.winAction !== 'function') { bar.style.display = 'none'; return; }
+    var bMin = document.getElementById('winMin');
+    var bMax = document.getElementById('winMax');
+    var bClose = document.getElementById('winClose');
+    if (bMin) bMin.onclick = function () { api.winAction('min'); };
+    if (bMax) bMax.onclick = function () { api.winAction('max'); };
+    if (bClose) bClose.onclick = function () { api.winAction('close'); };
+    if (bMax && typeof api.onWinState === 'function') {
+      api.onWinState(function (m) {
+        bMax.textContent = m ? '\uE923' : '\uE922';   /* ❐ 还原 / □ 最大化：Windows 标题栏同款字形 */
+        bMax.title = m ? '还原' : '最大化';
+        bar.classList.toggle('is-max', !!m);
+      });
+    }
+    var top = document.querySelector('.topbar');
+    if (top) top.addEventListener('dblclick', function (e) {
+      if (e.target.closest('.win-controls, button, input, select, a, .chip')) return;
+      api.winAction('max');
+    });
+  })();
+
+  window.VRCLib = { App: App, UI: UI, Store: Store, FS: FS, Fetchers: Fetchers, Smart: Smart, Tools: Tools, seedDemo: seedDemo, seedSamples: seedSamples };
 })();
 

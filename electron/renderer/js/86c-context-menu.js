@@ -280,15 +280,22 @@ var AssetMenu = (function () {
       .catch(function () { Toast.err('复制失败'); });
   }
 
+  /* v5.6（用户要求）：右键改名不再自己拼一套逻辑 —— 统一交给 App.renameAssetTo：
+   * 查重 → 改磁盘目录 → 更新存储路径 → 落库 → 刷新卡片与详情页。 */
   function rename(a) {
-    Modal.prompt('新的标题（留空 / 取消 = 不改）', a.title || '', {
+    var live = liveOf(a);
+    Modal.prompt('新的标题（留空 / 取消 = 不改）', live.title || '', {
       title: '重命名素材',
-      hint: '改标题会同步重命名素材库里的文件夹（已关联本地路径时由程序自动改）。'
+      hint: '改标题会同步重命名素材库里的文件夹并更新存储路径；与库里其它素材重名时会被拒绝。'
     }).then(function (v) {
       if (v == null) return;
       var t = String(v).trim();
-      if (!t || t === a.title) return;
-      commit(a, function (x) { x.title = t; }, '已重命名为「' + t + '」');
+      if (!t) return;
+      App.renameAssetTo(live.id, t).then(function (r) {
+        if (!r || !r.ok) { Toast.warn((r && r.reason) || '重命名失败', 5200); return; }
+        if (!r.changed) { Toast.info('标题没有变化', 2400); return; }
+        Toast.ok('已重命名为「' + t + '」' + (r.renamed ? '，目录已同步改名' : '（目录未改：原路径不存在）'), 3800);
+      });
     });
   }
 

@@ -33,6 +33,22 @@ contextBridge.exposeInMainWorld('vrcElectron', {
       return true;
     } catch (e) { return false; }
   },
+  /* v4.9：页面自绘窗口按钮用。只允许 min / max / close 三个动作。 */
+  winAction: function (action) {
+    try {
+      const a = String(action || '');
+      if (['min', 'max', 'close'].indexOf(a) < 0) return false;
+      ipcRenderer.send('win:action', a);
+      return true;
+    } catch (e) { return false; }
+  },
+  onWinState: function (cb) {
+    try {
+      if (typeof cb !== 'function') return false;
+      ipcRenderer.on('win:state', function (_e, max) { try { cb(!!max); } catch (e) {} });
+      return true;
+    } catch (e) { return false; }
+  },
   /* v4.4：窗口用的是「隐藏系统标题栏 + 系统窗口按钮覆盖层」（titleBarOverlay），
    * 覆盖层颜色由主进程设置，页面切主题时把底色/符号色报过去即可。
    * 只传颜色字符串，不涉及任何文件或执行能力。 */

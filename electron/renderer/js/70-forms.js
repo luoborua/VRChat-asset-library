@@ -18,6 +18,14 @@ var Modals = {
      * 不换页、不滚动、不抢视线（用户原话：不会触发排序变化时就不要从头定位）。
      * 只有它被筛掉 / 被排到别的页了，才走 revealAsset 去把它找出来。 */
     var wasOnPage = !!(target && target.id && document.querySelector('.card[data-id="' + target.id + '"]'));
+    /* v5.2（用户要求）：编辑一条素材时，只要那张卡还在屏幕上，就只换这一张，不动整页。 */
+    if (wasOnPage && !opts.keepModal && target && target.id && UI.refreshCard && UI.refreshCard(target.id)) {
+      /* v5.7：只换卡片也要把编辑弹窗关掉；关掉之后若底下还压着这条素材的详情页，
+       * 详情页里的「存储路径 / 标题」也得跟着重建 —— 否则看到的还是改名前的旧路径。 */
+      Modal.closeTop();
+      if (App.refreshAssetView) App.refreshAssetView(target);
+      return;
+    }
     var keepY = (typeof window !== 'undefined') ? (UI.sY()) : 0;   // v2.5.2：重渲染前记住滚动位置
     UI.renderAll();
     var stillOnPage = !!(target && target.id && document.querySelector('.card[data-id="' + target.id + '"]'));
@@ -45,6 +53,8 @@ var Modals = {
       else UI.revealAsset(target.id);                              // 换页/被筛掉才重新定位
     }
     Modal.closeTop();
+    /* 同上：整页重渲染的路径里，压在编辑弹窗下面的详情页也要重建一次 */
+    if (target && target.id && App.refreshAssetView) App.refreshAssetView(target);
     if (opts.reopenDetail && target && target.id) Modals.detail(target.id);
   },
 
@@ -252,15 +262,8 @@ var Modals = {
     })).concat([
       a.gifted ? el('span', { class: 'chip chip-gift' }, '获赠')
         : friendDetail ? el('span', { class: 'chip chip-share' }, '分享')
-        : App.isGitHubSource(a) ? el('span', { class: 'chip chip-oss', title: '开源素材（GitHub 仓库，star 数显示在价格位置）' }, (epDetail && epDetail.text) || '开源')
-        : App.purchaseState(a) === 'unpurchased' ? el('span', { class: 'chip chip-dim', title: '没有免费变体，且所有变体均未购买' }, '未购买')
-        /* v2.5.14（用户批复 A）：头部的 免费/付费 chip 与卡片丝带共用 App.priceBucket ——
-         * 没有购买凭据的素材不再显示「付费」（有免费变体 → 免费；否则走上面的「未购买」）。 */
-        : App.priceBucket(a) === 'free' ? el('span', { class: 'chip chip-ok' }, '免费')
-        // v2.5.2：价格 chip 与卡片丝带同源（统计价 = 已购变体价合计 / 未购变体当前价），不再用「付费」字样顶替
-        : (epDetail && epDetail.text)
-          ? el('span', { class: 'chip chip-price', title: '统计价格：已购变体价合计，或未购变体的当前价' }, epDetail.text)
-          : (App.priceBucket(a) === 'paid' ? el('span', { class: 'chip chip-price' }, '付费') : null),
+        : App.isGitHubSource(a) ? el('span', { class: 'chip chip-oss', title: '开源素材（GitHub 仓库）' }, '开源')
+        : null,
       (a.extra && a.extra.wishlist && !App.isPurchased(a)) ? el('span', { class: 'chip chip-wish', title: '来自 BOOTH 心愿单（已购买的素材不再显示）' }, '心愿单') : null,
       a.delisted ? el('span', { class: 'chip chip-dim', title: '商品已下架 / 无法获取信息' }, '已下架') : null,
       a.hidden ? el('span', { class: 'chip' }, '已隐藏') : null
@@ -438,32 +441,10 @@ var Modals = {
     // v2.5.2：按钮上移到「版本与下载」标题右侧（右对齐），这里不再需要「已购买版本 / 版本·变体」副标签
     var verSectionNode = purchasedVer.length ? el('div', { class: 'ver-section' }, [
       el('div', { class: 'ver-list' }, purchasedVer.map(function (v) {
-        /* v2.5.2（用户格式）：价格一律「货币 购买价/当前价」，同一行右对齐；
-         * 购买价与当前价相同时只显示一个。未购变体没有购买价 → 只显示当前价。 */
-        var vCurOne = derivePrice(String(v.price || ''));
-        var vBuyVal = (v.purchasePrice != null && isFinite(Number(v.purchasePrice))) ? Number(v.purchasePrice) : null;
-        var vCurVal = (vCurOne && vCurOne.value != null) ? Number(vCurOne.value) : null;
-        var vCurCode = (vCurOne && vCurOne.currency) || '';
-        /* v2.5.14：变体价若存成「裸数字」（BOOTH 商品页内嵌 JSON 的 price 就是数字），币种按**商店来源**兜底
-         * （BOOTH=JPY / Gumroad=USD），不再让 codePriceText 默认成 CNY；0 价变体直接显示「免费」。 */
-        var vShopCode = App.sourceCurrency(a);
-        var vCode = v.purchaseCurrency || vCurCode || vShopCode;
-        var vPriceText = '';
-        if (vBuyVal != null) {
-          vPriceText = App.codePriceText(vBuyVal, vCode);
-          if (vCurVal != null && Math.abs(vCurVal - vBuyVal) > 0.009) {
-            vPriceText += '/' + String(App.codePriceText(vCurVal, vCode)).replace(/^[A-Za-z]{3}\s*/, '');
-          }
-        } else if (vCurVal != null) {
-          vPriceText = (vCurVal === 0) ? '免费' : App.codePriceText(vCurVal, vCurCode || vShopCode);
-        } else {
-          vPriceText = v.price || '';
-        }
         return el('div', { class: 'ver-item on' }, [
           el('div', { class: 'ver-main' }, [
             el('b', { text: v.name || v.fileName || '（未命名版本）' }),
             el('span', { class: 'grow' }),   // v2.5.2：价格靠右对齐（同一行，不占多行）
-            vPriceText ? el('span', { class: 'chip chip-price', title: vBuyVal != null ? '购买价（订单实付）/ 当前价' : '该变体当前价' }, vPriceText) : null,
             el('div', { class: 'field-hint mono' }, [
               el('a', { href: v.orderUrl, target: '_blank', rel: 'noopener', title: v.orderUrl }, '订单链接')
             ])
@@ -1169,7 +1150,6 @@ var Modals = {
     var meta = el('div', { class: 'kv-list' }, [
       !isAvatar ? kv('支持角色', avatarChips || '未指定')
                 : kv('角色名', [a.charNameZh, a.charNameJa, a.charNameEn].filter(Boolean).join(' / ') || ''),
-      kv('购买价格', a.purchasePrice != null ? App.codePriceText(a.purchasePrice, a.purchaseCurrency) : null),
       // v2.5.2：商品价不再显示（价格看变体）
       kv('商店链接', linksNode || '无'),
       kv('作者 / 店铺', shopKV),
@@ -1609,31 +1589,6 @@ var Modals = {
         setScalarBase('shopPrice', ptext); markAuto('shopPrice');
         log(pp.sum ? ('\u2714 BOOTH 商品价已按已购买版本计算：' + ptext) : '\u2714 BOOTH 商品价已按已购买版本计算：0（未购买任何变体）');
       }
-      // 变体双价格：商品价（页面价）vs 购买价（订单实付价）。不一致时自动把订单价填为购买价格。
-      if ((isBoothSource || isGumroadSource) && versionsProcessed && canAuto('purchasePrice') && canAuto('purchaseCurrency')) {
-        var orderSum = 0, orderCur = '', pageSum = 0, priceMismatch = false;
-        versionEditor.getValue().forEach(function (v) {
-          if (!v.orderUrl || v.special) return;
-          var pd = derivePrice(v.price);
-          if (pd.value != null) pageSum += pd.value;
-          if (v.purchasePrice != null) {
-            orderSum += v.purchasePrice;
-            orderCur = v.purchaseCurrency || orderCur;
-            if (Math.abs(v.purchasePrice - (pd.value || 0)) > 0.009) priceMismatch = true;
-          }
-        });
-        // Gumroad 登录后 purchase 给出的是实付价：即使与页面价一致也自动填入购买价（用户可改）；
-        // BOOTH 仍只在订单价与页面价不一致时自动填。
-        var gumroadAutoPurchase = isGumroadSource && orderSum > 0 && purchaseValueInput.value.trim() === '';
-        if (priceMismatch || gumroadAutoPurchase) {
-          purchaseValueInput.value = String(orderSum);
-          purchaseCurSelect.value = orderCur || purchaseCurSelect.value;
-          setScalarBase('purchasePrice', String(orderSum));
-          setScalarBase('purchaseCurrency', purchaseCurSelect.value);
-          markAuto('purchasePrice'); markAuto('purchaseCurrency');
-          log('\u26A0 订单实付价与商品页价格不一致：已自动把订单价填为购买价格（' + App.priceText(orderSum, orderCur) + '）');
-        }
-      }
       if (info.coverURL) {
         var curCover = coverState.removed ? '[removed]' : (coverState.blob ? '[local]' : coverState.url);
         if (!manualCoverEdit && canAuto('cover')) {
@@ -1970,7 +1925,7 @@ var Modals = {
       }));
     var srcCustom = el('input', { class: 'input', value: a.sourceCustom, placeholder: '自定义来源名称' });
     var srcCustomRow = el('div', { style: { display: 'none', marginTop: '6px' } }, [srcCustom]);
-    function onSourceChange() { srcCustomRow.style.display = srcSelect.value === 'other' ? '' : 'none'; renderPriceNodes(); }
+    function onSourceChange() { srcCustomRow.style.display = srcSelect.value === 'other' ? '' : 'none'; }
     function onCategoryChange() {
       var field = $('#avatarField');
       var charField = $('#charNameField');
@@ -1999,23 +1954,6 @@ var Modals = {
     var authorInput = el('input', { class: 'input', value: a.author || a.shop, placeholder: '作者 / 店铺名' });
     // v2.2.12 网盘字段（仅记录 + 角标；远端读写走 webdav:// 路径）
     var cloudInput = el('input', { class: 'input', value: a.cloudUrl || '', placeholder: '网盘路径或分享链接（例：百度网盘 / 我的应用数据/xxx，或 https://pan.baidu.com/s/…）' });
-    // v2.1 价格模型：购买价（所有来源可手填，币种+数值）；商品价只读（BOOTH 用变体计算价，其他来源为抓取到的商店价）
-    var purchaseCurSelect = el('select', { class: 'input input-sm' }, ['CNY', 'JPY', 'USD', 'EUR'].map(function (c) {
-      return el('option', { value: c, selected: (a.purchaseCurrency || 'CNY') === c }, c === 'CNY' ? '¥ 人民币' : (c === 'JPY' ? '¥ 日元' : (c === 'USD' ? '$ 美元' : '€ 欧元')));
-    }));
-    var purchaseValueInput = el('input', { class: 'input input-sm', type: 'number', min: 0, step: '0.01',
-      value: (a.purchasePrice != null && isFinite(Number(a.purchasePrice))) ? String(a.purchasePrice) : '',
-      placeholder: '实际支付金额（没有则留空）' });
-    var shopPriceNode = el('div', { class: 'field-hint' });
-    function renderPriceNodes() {
-      var isBooth = srcSelect.value === 'booth';
-      var shopCode = (a.shopPriceValue != null && isFinite(Number(a.shopPriceValue)))
-        ? App.codePriceText(a.shopPriceValue, a.shopPriceCurrency) : (a.shopPrice || '');
-      shopPriceNode.textContent = isBooth
-        ? (shopCode ? '商品价（变体计算，只读）：' + shopCode : '商品价（变体计算，只读）：未解析到已购变体时为 0')
-        : (shopCode ? '商店价（获取，只读）：' + shopCode : '未获取到商店价（不显示商品价格）');
-    }
-    renderPriceNodes();
     var descInput = el('textarea', { class: 'input textarea', rows: 8, placeholder: '商品简介（自动获取或手动填写）' });
     descInput.value = a.description || '';
     var noteInput = el('textarea', { class: 'input textarea', rows: 4, placeholder: '改模注意事项、依赖的着色器、使用心得等' });
@@ -2171,8 +2109,6 @@ var Modals = {
           ]),
           Field.row('商店链接', linkEditor, '可添加多个链接'),
           Field.row('作者 / 店铺', authorInput),
-          Field.row('购买价格', el('div', { class: 'price-row' }, [purchaseCurSelect, purchaseValueInput]),
-            '实际支付价格：币种 + 数值，所有来源都可手填；留空时价格按变体价现算（好友分享不计统计）'),
 
           /* v2.3.28：状态 / 上架日期 从右栏上移到「商品价格」与「商品简介」之间 */
           /* v2.3.29：备注移到「商品简介」之后（原来的顺序是 备注 → 商品描述） */
@@ -2278,7 +2214,25 @@ var Modals = {
         return;
       }
       saving = true;
+      saving = true;
+      /* v5.5（用户要求）：标题/角色名变了会连磁盘上的素材文件夹一起改名，
+       * 改名期间按钮必须锁住 —— 否则连点两次会在「旧名→新名」还没完成时又按旧名算一遍。
+       * delay > 0 时额外冷却一会儿再放开，确保目录那边真的落定。 */
+      function resetSaving(delay) {
+        if (!saveBtn) { saving = false; return; }
+        saveBtn.disabled = true;
+        setTimeout(function () {
+          saving = false;
+          if (saveBtn) { saveBtn.disabled = false; ICONS.apply(saveBtn, ('\u{1F4BE} 保存')); }
+        }, delay > 0 ? delay : 0);
+      }
       if (saveBtn) { saveBtn.disabled = true; ICONS.apply(saveBtn, ('\u23F3 保存中 …')); }
+      /* 30 秒兜底：真遇上死等也把按钮放回来，不会永远「保存中」 */
+      var saveWatchdog = setTimeout(function () {
+        if (!saving) return;
+        resetSaving(0);
+        Toast.warn('保存耗时异常，已中止等待；请检查素材库目录后重试', 6000);
+      }, 30000);
       a.title = titleInput.value.trim();
       a.originalTitle = titleOrig.value.trim();
       a.source = srcSelect.value;
@@ -2299,19 +2253,6 @@ var Modals = {
       if (srcSelect.value === 'booth') {
         // v2.5.2：商品价不再记录（变体价现算）——这里只提示，不再写 shopPrice*
       }
-      // 购买价：币种 + 数值（留空 = 没有手填购买价）
-      var pvRaw = purchaseValueInput.value.trim();
-      /* v4.3.2：以前 Math.max(0, Number(x) || 0) 会把 -100 和 “abc” 都静默变成 0 元，
-       * 价格统计和「免费/付费」跟着失真，用户毫不知情。 */
-      if (pvRaw === '') { a.purchasePrice = null; }
-      else {
-        var pvNum = Number(pvRaw);
-        if (!isFinite(pvNum) || pvNum < 0) {
-          Toast.warn('购买价格「' + pvRaw + '」不是有效的非负数，已按「未填写」处理', 5000);
-          a.purchasePrice = null;
-        } else { a.purchasePrice = pvNum; }
-      }
-      a.purchaseCurrency = purchaseCurSelect.value;
       // 有效价格：购买价优先；否则 BOOTH 用变体商品价；其他来源商品价仅展示
       var eff = App.effectivePrice(Store.normalizeAsset(a));
       var allUnpurchased = App.purchaseState(Store.normalizeAsset(a)) === 'unpurchased';
@@ -2342,6 +2283,9 @@ var Modals = {
       /* v4.3.2：清空上架日期以前会退回旧值，等于日期永远删不掉（只能改不能删）。 */
       a.publishedAt = publishedAtInput.value ? new Date(publishedAtInput.value + 'T00:00:00').toISOString() : '';
       a.coverURL = coverState.removed ? '' : (coverState.url || '');
+      /* 是否会动磁盘目录：只有老素材、且文件夹名真的变了才算 */
+      var renaming = !isNew && orig && App.folderName(orig) !== App.folderName(a);
+      if (renaming && saveBtn) ICONS.apply(saveBtn, ('\u23F3 改名中 …'));
 
       // 字段级「用户修改」标记：与打开时（或上次自动填充后）的基线比较，变化就标记 userEdited
       a.userEdited = a.userEdited || {};
@@ -2388,11 +2332,11 @@ var Modals = {
           return t;
         });
         return step.then(function (t) { return App.save(t); }).then(function () {
+          clearTimeout(saveWatchdog); resetSaving(renaming ? 900 : 0);
           Modals.refreshAfterChange(target);
           Toast.ok(isNew ? '已添加素材「' + target.title + '」' : '已保存修改');
         }).catch(function (e) {
-          saving = false;
-          if (saveBtn) { saveBtn.disabled = false; ICONS.apply(saveBtn, ('\u{1F4BE} 保存')); }
+          clearTimeout(saveWatchdog); resetSaving(0);
           Toast.err('保存失败：' + (e.message || e));
         });
       }

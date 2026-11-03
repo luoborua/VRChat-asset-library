@@ -604,14 +604,39 @@ var FS = (function () {
     }
     var newAbs = joinWinPath(parentDir, [newName]);
     if (oldAbs.toLowerCase() === newAbs.toLowerCase()) return Promise.resolve(false);
-    return Host.ensure().then(function (ok) {
+    /* v5.4：改名只是「顺手同步磁盘目录」，绝不能拖住保存 —— 宿主 8 秒不应答就放行，
+     * 旧目录本来就缺失（ENOENT）时也只提示一句，不拿红字吓人。 */
+    var TIMEOUT = { timeout: true };
+    function withTimeout(promise, ms) {
+      return Promise.race([
+        Promise.resolve(promise),
+        new Promise(function (res) { setTimeout(function () { res(TIMEOUT); }, ms); })
+      ]);
+    }
+    return withTimeout(Host.ensure(), 8000).then(function (ok) {
+      if (ok === TIMEOUT) {
+        if (typeof Toast !== 'undefined' && Toast.info) Toast.info('宿主没有应答，文件夹未改名；素材信息照常保存', 5000);
+        return false;
+      }
       if (!ok) return browserRename();                       // 宿主确实离线 → 才用浏览器实现
-      return Host.move(oldAbs, newAbs).then(function () { return true; }, function (err) {
+      return withTimeout(Host.move(oldAbs, newAbs), 8000).then(function (r) {
+        if (r === TIMEOUT) {
+          if (typeof console !== 'undefined' && console.warn) console.warn('[rename] 宿主改名超时：' + oldAbs + ' → ' + newAbs);
+          if (typeof Toast !== 'undefined' && Toast.info) Toast.info('文件夹改名没完成（宿主没有应答），素材信息已保存', 5000);
+          return false;
+        }
+        return true;
+      }, function (err) {
         /* 宿主在线却失败：**不再静默**换成浏览器复制+删除（旧路径不存在时那只会留下半成品），
          * 把宿主给的原因显示出来，让用户知道文件夹没改成。 */
         var msg = (err && err.message) || String(err);
         if (typeof console !== 'undefined' && console.warn) console.warn('[rename] 宿主改名失败：' + msg + '（' + oldAbs + ' → ' + newAbs + '）');
-        if (typeof Toast !== 'undefined' && Toast.warn) Toast.warn('文件夹改名没成功（宿主：' + msg + '）：素材库里的目录仍是旧名，可手动改名后重新登记路径。', 6000);
+        if (/ENOENT|not found|不存在|no such file/i.test(msg)) {
+          /* 旧目录本来就不在磁盘上（多半已被手动改名/移走）：不算故障，保存照常进行 */
+          if (typeof Toast !== 'undefined' && Toast.info) Toast.info('旧目录不在磁盘上（可能已手动改名），本次只保存素材信息，路径未改动。', 5200);
+        } else if (typeof Toast !== 'undefined' && Toast.warn) {
+          Toast.warn('文件夹改名没成功（宿主：' + msg + '）：素材库里的目录仍是旧名，可手动改名后重新登记路径。', 6000);
+        }
         return false;
       });
     });
@@ -762,7 +787,7 @@ var FS = (function () {
   /** 导出 CSV（Excel 友好，带 BOM） */
   function downloadCSV(assets) {
     var head = ['自定义标题', '原标题', '来源', '分类', '标签', '支持角色', '商店链接', '本地路径',
-      '购买价格', '商品价格', '上架日期', '作者/店铺', '喜欢', '备注', '添加时间', 'ID'];
+      '上架日期', '作者/店铺', '喜欢', '备注', '添加时间', 'ID'];
     var lines = [head.map(csvCell).join(',')];
     assets.forEach(function (a) {
       lines.push([
@@ -771,8 +796,6 @@ var FS = (function () {
         (a.avatars || []).map(App.avatarLabel).join(' / '),
         (a.links || []).map(function (l) { return l.url; }).join(' | '),
         (a.paths || []).map(function (p) { return p.path; }).join(' | '),
-        a.purchasePrice != null ? App.priceText(a.purchasePrice, a.purchaseCurrency) : '',
-        a.shopPrice || '',
         a.publishedAt ? fmtDate(a.publishedAt) : '',
         a.author || a.shop || '', a.favorite ? '是' : '否',
         (a.note || '').replace(/\r?\n/g, ' '), fmtDate(a.createdAt, true), a.id

@@ -16,7 +16,6 @@ var Settings = {
       { id: 'icons',      label: ICONS.label('\u{1F3A8} 图标') },
       { id: 'ai',         label: ICONS.label('\u{1F916} AI 与模糊搜索') },
       { id: 'library',    label: ICONS.label('\u{1F4C1} 本地库与整理') },
-      { id: 'price',      label: ICONS.label('\u{1F4B0} 价格与统计') },
       { id: 'data',       label: ICONS.label('\u{1F4BE} 数据管理') },
       { id: 'about',      label: ICONS.label('\u2139 关于与帮助') }
     ];
@@ -63,7 +62,7 @@ var Settings = {
     ]));
 
     var sizeSel = el('select', { class: 'input', onchange: function () {
-      App.settings.cardSize = sizeSel.value; App.saveSettings(); UI.renderMain();
+      App.settings.cardSize = sizeSel.value; App.page = 1; App.saveSettings(); UI.renderMain();
     } }, [
       el('option', { value: 's', selected: App.settings.cardSize === 's' }, '小卡片（更密集）'),
       el('option', { value: 'm', selected: App.settings.cardSize === 'm' }, '中卡片（默认）'),
@@ -71,12 +70,8 @@ var Settings = {
     ]);
     box.appendChild(Field.row('卡片尺寸', sizeSel));
 
-    var pageSel = el('select', { class: 'input', onchange: function () {
-      App.settings.pageSize = +pageSel.value; App.page = 1; App.saveSettings(); UI.renderMain();
-    } }, PAGE_SIZES.map(function (s) {
-      return el('option', { value: String(s.id), selected: String(App.settings.pageSize) === String(s.id) }, s.label);
-    }));
-    box.appendChild(Field.row('每页数量', pageSel, '素材较多时分页可显著提升渲染速度'));
+    /* v5.0：每页数量不再让用户选 —— 按卡片大小自动换算，保持一页占的面积差不多 */
+    box.appendChild(Field.row('每页数量', el('span', { class: 'field-hint', text: '跟随卡片大小自动决定：小 34 / 中 24 / 大 15，翻页条数量也随卡片大小变化' })));
 
     [['autoTranslateTags', '获取信息后自动翻译标签为中文'],
      ['autoDetectAvatar', '自动识别支持的角色'],
@@ -1651,41 +1646,6 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
   },
 
   /* ---------------- 数据管理 ---------------- */
-  /* ---------------- 价格与统计 ---------------- */
-  tab_price: function () {
-    var box = el('div', { class: 'settings-pane' });
-
-    box.appendChild(el('h3', { text: '汇率（花费统计 CNY 换算用）' }));
-    var fxRows = el('div', { class: 'inline-row' });
-    var fxDefs = [['JPY', '日元'], ['USD', '美元'], ['EUR', '欧元']];   // v2.3.28：CNY 是基准币种，不再列「CNY→CNY」
-    fxDefs.forEach(function (fx) {
-      var label = el('span', { class: 'field-hint', text: fx[0] + '→CNY' });
-      var input = el('input', {
-        class: 'input input-sm', type: 'number', step: '0.0001', style: { width: '110px' },
-        value: (App.settings.fxRates || {})[fx[0]] != null ? App.settings.fxRates[fx[0]] : '',
-        title: '1 ' + fx[0] + ' = ? CNY',
-        onchange: function () {
-          App.settings.fxRates = App.settings.fxRates || {};
-          App.settings.fxRates[fx[0]] = parseFloat(input.value) || 0;
-          App.saveSettings().then(function () { UI.renderAll(); });
-        }
-      });
-      fxRows.appendChild(el('div', { class: 'fx-item' }, [label, input]));
-    });
-    box.appendChild(fxRows);
-    box.appendChild(el('div', { class: 'field-hint', text: '合计以人民币（￥）显示；修改后侧栏立即重新换算，未配置汇率的币种不计入合计（CNY 是基准币种，无需填汇率）。' }));
-
-    box.appendChild(el('h3', { text: '已购记录（喂给花费统计与「已下载」识别）' }));
-    box.appendChild(el('p', { class: 'field-hint', text: '获取「已购买的素材列表 + 下载直链」有两条路：推荐用随附的用户脚本（借用你浏览器已登录的会话，无需把账号密码交给任何程序）；也可以在启动内置宿主并保存 Cookie 后由工具直接同步。' }));
-    box.appendChild(el('div', { class: 'btn-row' }, [
-      el('button', { class: 'btn btn-sm btn-primary', onclick: function () { Modal.closeTop(); Importer.bridgeImportDialog(); } }, ICONS.label('\u{1F4E5} 从用户脚本导入')),
-      el('button', { class: 'btn btn-sm', onclick: function () { Modal.closeTop(); Importer.syncLibraryDialog(); } }, ICONS.label('\u{1F504} 同步我的 BOOTH 已购')),
-      el('button', { class: 'btn btn-sm', onclick: function () { Settings.completeAllAssetsInfo(); } }, ICONS.label('\u{1F504} 补全所有素材的信息')),
-      el('button', { class: 'btn btn-sm', onclick: function () { Settings.userscriptHelp(); } }, ICONS.label('\u2139 用户脚本怎么装'))
-    ]));
-
-    return box;
-  },
 
   /* ---------------- 数据管理 ---------------- */
   tab_data: function () {
@@ -1701,7 +1661,13 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
     box.appendChild(el('div', { class: 'btn-row' }, [
       el('button', { class: 'btn btn-sm btn-primary', onclick: function () { FS.downloadJSON(true); } }, ICONS.label('\u2B07 导出完整备份（含封面）')),
       el('button', { class: 'btn btn-sm', onclick: function () { FS.downloadJSON(false); } }, ICONS.label('\u2B07 导出数据（不含封面）')),
-      el('button', { class: 'btn btn-sm', onclick: function () { FS.downloadCSV(App.assets); } }, ICONS.label('\u2B07 导出全部为 CSV'))
+      el('button', { class: 'btn btn-sm', onclick: function () { FS.downloadCSV(App.assets); } }, ICONS.label('\u2B07 导出全部为 CSV')),
+      el('button', { class: 'btn btn-sm', onclick: function () {
+        Modal.confirm('会向当前素材库追加 12 条带封面的示例素材，用来看卡片布局；之后可以逐条删除。继续？', { okText: '加入示例' }).then(function (ok) {
+          if (!ok) return;
+          if (window.VRCLib && typeof window.VRCLib.seedSamples === 'function') window.VRCLib.seedSamples();
+        });
+      } }, ICONS.label('\u2B07 载入示例素材（12 条，带封面）'))
     ]));
 
     box.appendChild(el('h3', { text: '导入' }));

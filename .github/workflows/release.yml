@@ -1,0 +1,39 @@
+name: Build portable package
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Electron
+        working-directory: electron
+        run: npm ci
+
+      - name: Build portable zip
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File electron/build/package-portable.ps1
+
+      - name: Show artifact
+        shell: powershell
+        run: Get-ChildItem dist | Format-Table Name, Length
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true

@@ -2552,37 +2552,7 @@ var UI = {
       el('div', { class: 'stat-item' }, [el('b', { text: String(st.favorite) }), el('span', { text: '喜欢' })]),
       el('div', { class: 'stat-item' }, [el('b', { text: String(st.withPath) }), el('span', { text: '已关联路径' })])
     ]));
-
-    // 花费统计：不再单独分组，作为小字直接放在概览下方
-    var sp = App.spending();
-    var spendBox = el('div', { class: 'side-spend side-spend-inline' });
-    var spendLines = Object.keys(sp.byCur).sort().map(function (cur) {
-      var s = sp.byCur[cur];
-      return { label: (cur === 'UNKNOWN' ? '未知币种' : cur), sum: s.sum, count: s.count };
-    });
-    function money(n) { return n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
-    function spendRows() {
-      return spendLines.map(function (l) {
-        return el('div', { class: 'side-spend-line' }, [
-          el('span', { class: 'side-spend-cur', text: l.label }),
-          el('span', { text: l.sum.toLocaleString() + '（' + l.count + ' 件）' })
-        ]);
-      });
-    }
-    var spendTip = spendLines.length
-      ? spendLines.map(function (l) { return l.label + ' ' + l.sum.toLocaleString() + '（' + l.count + ' 件）'; }).join('\n') +
-        '\n\n合计（按汇率换算，未配置汇率的币种不计入）：\uFFE5' + money(sp.cnyTotal)
-      : '暂无花费记录';
-    /* v2.3.28：侧栏只留一行「合计：￥x,xxx.xx」；悬停出提示（含件数），点击出浮窗看各币种明细 */
-    spendBox.appendChild(el('div', {
-      class: 'side-spend-cny side-spend-total', title: spendTip,
-      onclick: function () {
-        Modal.open({ title: '花费统计', size: 'sm', body: el('div', { class: 'side-spend side-spend-pop' }, spendRows().concat([
-          el('div', { class: 'side-spend-cny', text: '合计：\uFFE5' + money(sp.cnyTotal) })
-        ])) });
-      }
-    }, '合计：\uFFE5' + money(sp.cnyTotal)));
-    root.appendChild(spendBox);
+// 价格/花费统计已按需求移除（v1.0 精简）：侧栏不再显示合计与币种明细浮窗。
 
     // 状态：也不单独分组，正常大小紧跟花费统计之后（下拉式，直接显示标签文案，v2.3.1 起不再套「状态：…的素材」）
     var statusSelect = el('select', {

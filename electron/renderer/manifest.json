@@ -1,0 +1,87 @@
+[
+  {
+    "name": "00-brand.js",
+    "lines": 22,
+    "bytes": 16370
+  },
+  {
+    "name": "00-data.js",
+    "lines": 508,
+    "bytes": 40336
+  },
+  {
+    "name": "05-icons.js",
+    "lines": 271,
+    "bytes": 108803
+  },
+  {
+    "name": "10-util.js",
+    "lines": 312,
+    "bytes": 12258
+  },
+  {
+    "name": "15-secure.js",
+    "lines": 80,
+    "bytes": 3604
+  },
+  {
+    "name": "20-store.js",
+    "lines": 778,
+    "bytes": 41068
+  },
+  {
+    "name": "30-fetch.js",
+    "lines": 1592,
+    "bytes": 88331
+  },
+  {
+    "name": "40-fs.js",
+    "lines": 915,
+    "bytes": 48956
+  },
+  {
+    "name": "50-app.js",
+    "lines": 3028,
+    "bytes": 170757
+  },
+  {
+    "name": "60-modal.js",
+    "lines": 507,
+    "bytes": 24143
+  },
+  {
+    "name": "70-forms.js",
+    "lines": 2459,
+    "bytes": 155402
+  },
+  {
+    "name": "80-settings.js",
+    "lines": 1884,
+    "bytes": 117568
+  },
+  {
+    "name": "85-tools.js",
+    "lines": 543,
+    "bytes": 33366
+  },
+  {
+    "name": "86-import.js",
+    "lines": 2412,
+    "bytes": 132107
+  },
+  {
+    "name": "87-ai.js",
+    "lines": 473,
+    "bytes": 24748
+  },
+  {
+    "name": "88-download.js",
+    "lines": 330,
+    "bytes": 17407
+  },
+  {
+    "name": "90-main.js",
+    "lines": 488,
+    "bytes": 27551
+  }
+]

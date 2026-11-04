@@ -1,6 +1,6 @@
 # Tauri 2 版（v6.0）
 
-同一份渲染层（`electron/renderer/`，21 个模块 + styles.css）跑在 Tauri 里，
+同一份渲染层（`renderer/`，21 个模块 + styles.css）跑在 Tauri 里，
 宿主从「Electron 主进程里的 HTTP 服务」换成了「进程内的 Rust 命令」。
 
 **界面、交互、数据结构、素材包格式全部不变**，换掉的只是承载方式与存储实现。
@@ -10,7 +10,7 @@
 ```
 src-tauri/
 ├── Cargo.toml
-├── tauri.conf.json            frontendDist 指向 ../electron/renderer
+├── tauri.conf.json            frontendDist 指向 ../renderer
 ├── capabilities/default.json  核心 API + 原生对话框 + 打开链接
 ├── .cargo/config.toml         GNU 目标链接器
 ├── icons/icon.ico             运行时生成（make-ico.js）

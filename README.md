@@ -23,8 +23,8 @@
 **数据不会丢**：首次启动会自动把旧的 `vrclib-data\assets.json` 整库导入 SQLite，
 并把原文件改名成 `assets.json.bak` 留底。素材文件、封面、设置都不动。
 
-> 迁移之后不要再双击旧的 `启动素材库_Electron版.bat`：Electron 读不了 SQLite，
-> 会显示成空库（数据还在）。程序本身也加了拦截提示，会告诉你改用新的启动方式。
+> v6 起 Electron 版已移除，仓库里不再有 `electron/` 目录。前端仍在 `renderer/`，
+> 由 Tauri 直接加载；构建方式见 `src-tauri/README.md`。
 
 ---
 
@@ -59,37 +59,27 @@
 VRChat改模素材管理库/
 ├── 启动素材库_Tauri版.bat     日常启动入口（跑同目录的 exe）
 ├── VRChat改模素材管理库.exe   构建产物（由 src-tauri/build/build-tauri.ps1 拷过来）
+├── WebView2Loader.dll         必须与 exe 同目录，缺了启动即退出（0xC0000135）
+├── renderer/                  前端：页面 + 样式 + 21 个 JS 模块
+│   ├── index.html             唯一入口页（按序引入全部模块）
+│   ├── styles.css             样式表（暗/亮双主题 + 响应式）
+│   ├── manifest.json          模块清单（不参与加载，仅备查）
+│   └── js/
+│       ├── 00-brand … 15-secure    基础：品牌、字典、图标、工具、加密
+│       ├── 20-store 30-fetch       数据持久化与站点解析
+│       ├── 40-fs 50-app 60-modal 70-forms   宿主调用、主界面、弹窗、表单
+│       ├── 80-settings 84-update 85-tools 86-import 86c-context-menu
+│       ├── 87-ai 88-download 89-pack 89b-drop-import
+│       └── 90-main 95-shell-bridge          启动装配、拖拽桥
 ├── src-tauri/                 Tauri 后端（Rust）
 │   ├── main.rs                窗口 / 托盘 / 单实例 / 原生拖拽 / vrcasset 协议
 │   ├── host/                  宿主：fs / net / download / webdav / picker / pack / db / thumbs
 │   └── build/                 构建与 CDP 验证脚本
-├── VRChat改模素材管理库.html   旧入口页（Electron 用；Tauri 用 electron/renderer/index.html）
-├── 启动素材库_Electron版.bat   旧入口（v6 起仅作归档，检测到 SQLite 库会自动拦下）
-├── electron/
-│   ├── main/                  Electron 主进程
-│   │   ├── main.js            窗口、托盘、快捷键、单实例、日志
-│   │   ├── preload.js         暴露 vrcElectron：载体标识 / 宿主访问令牌 / 拖拽取真实路径 / 打开外部链接
-│   │   ├── icon.js            托盘/窗口图标（取页面 favicon 的盒子标记）
-│   │   └── host/              内置宿主（HTTP，契约与原 VRCLibHost 一致）
-│   │       ├── server.js      路由与端口选择
-│   │       ├── api-fs.js      读写/扫描/移动/复制/删除/打开
-│   │       ├── api-net.js     fetch 与 SSE 流式转发
-│   │       ├── api-download.js 下载队列、断点续传、.part 临时文件
-│   │       ├── api-webdav.js  WebDAV 五个接口
-│   │       ├── api-picker.js  原生文件夹/文件对话框（含「另存为」）
-│   │       ├── api-pack.js    素材包生成 / 查看 / 解包
-│   │       └── zip.js         零依赖 ZIP 读写（store 写、store+deflate 读，全程流式）
-│   ├── renderer/
-│   │   ├── styles.css         样式表（暗/亮双主题 + 响应式）
-│   │   ├── manifest.json      模块加载顺序
-│   │   └── js/                00-data … 90-main（18 个模块，含 84-update 检查更新、89-pack 素材包）
-│   ├── build/                 拆分与调试脚本（split-single / probe / 接口回归）
-│   └── node_modules/          Electron 运行时
 ├── scripts/
 │   └── vrc-library-bridge.user.js   浏览器用户脚本（Tampermonkey，导出已购列表 JSON）
-├── vrclib-data/               数据本体（assets.json / settings.json / covers / gallery / 下载队列）
+├── vrclib-data/               数据本体（library.db / settings.json / covers / 下载队列）
 ├── 本地素材库/                 素材文件存放目录（可改到别处）
-└── runtime/                   日志 + _旧版归档
+└── runtime/                   日志 + 旧版归档
 ```
 
 ---
@@ -192,46 +182,43 @@ vrcpack.json
 
 ---
 
-## 从源码运行
+## 从源码构建
 
-```bash
-cd electron
-npm install
+需要 Rust 与 Tauri 2 的构建环境（Windows 上要么装 MSVC C++ 工具集，要么用 MinGW-w64）。
+
+```powershell
+cd src-tauri
+powershell -ExecutionPolicy Bypass -File build\build-tauri.ps1
 ```
 
-然后回到上级目录双击 `启动素材库_Electron版.bat`，或：
+脚本会编译 release 版，并把 `VRChat改模素材管理库.exe` 与 `WebView2Loader.dll` 一起拷到仓库根目录。
 
-```bash
-./electron/node_modules/electron/dist/electron.exe .
-```
+两个常见坑（本机踩过，详见 `src-tauri/README.md`）：
 
-两个常见坑：
+- **产物目录必须是纯 ASCII 路径**：中文路径会让 `dlltool` 打不开 `.def` 文件。脚本固定用 `C:\vrclib-build`。
+- **`WebView2Loader.dll` 不能漏**：只拷 exe 的话双击无反应、进程秒退，事件查看器里是 `0xC0000135`（缺 DLL）。
 
-- 本机若设了 `ELECTRON_RUN_AS_NODE=1`，Electron 会以纯 Node 模式启动、**不显示窗口**。启动脚本里已经清掉这个变量，手动命令行启动时自己 `unset` 一下。
-- 入口 HTML 必须留在**仓库根目录**：页面按 `location` 推导 `vrclib-data` 的位置。
-
-不入库的目录见 `.gitignore`：`vrclib-data/`（你的素材数据）、`本地素材库/`、`runtime/`（日志与归档）、`electron/node_modules/`、`.workbuddy/`。
+不入库的目录见 `.gitignore`：`vrclib-data/`（你的素材数据）、`本地素材库/`、`runtime/`（日志与归档）、`src-tauri/target/`、`.workbuddy/`。
 
 ---
 
 ## 调试与验证
 
-```bash
-cd electron
-node build/probe-electron.mjs      # 页面状态 + 宿主地址 + 模块是否齐全（需带 --remote-debugging-port=9222 启动）
-node build/test-host-apis.mjs      # 内置宿主 14 项接口回归
-```
-
-启动调试端口：
+后端与前端能力都用 WebView2 的 CDP 端口在**真实页面里**验证，不靠肉眼看窗口：
 
 ```bash
-cd electron
-env -u ELECTRON_RUN_AS_NODE ./node_modules/electron/dist/electron.exe . --remote-debugging-port=9222
+# 带调试端口启动
+WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222 ./VRChat改模素材管理库.exe
+
+cd src-tauri
+node build/probe-tauri.mjs      # 宿主接口：写盘/扫描/素材包导出与解包
+node build/probe-db.mjs         # SQLite 主库：迁移、增量写、删除同步
+node build/probe-bytes.mjs      # 原始字节通道与封面落盘
+node build/probe-thumb.mjs      # 缩略图生成与命中
+node build/probe-ui.mjs         # 详情/编辑/设置/右键/搜索/主题
 ```
 
-注意：本机环境若带 `ELECTRON_RUN_AS_NODE=1`，Electron 会以纯 Node 模式启动、窗口不出现，必须先清掉。
-
-更细的结构与改动记录见 `electron/README.md`。
+更细的结构与改动记录见 `src-tauri/README.md`。
 
 ---
 

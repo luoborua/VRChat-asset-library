@@ -1,5 +1,5 @@
 // 第七轮探针：交互冒烟（详情 / 编辑 / 设置 / 右键菜单 / 搜索 / 筛选）
-const PORT = 9222;
+const PORT = Number(process.env.VRC_PROBE_PORT || 9222);
 async function main() {
   const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
   const page = list.find(t => t.type === 'page');

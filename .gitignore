@@ -5,12 +5,6 @@ vrclib-data/
 本地素材库/
 _来自/
 
-# ---------------- Electron 依赖与产物 ----------------
-electron/node_modules/
-electron/dist/
-electron/out/
-electron/*.log
-
 # ---------------- 本地运行时（日志、备份、旧版归档） ----------------
 runtime/
 

@@ -267,7 +267,11 @@ var AssetMenu = (function () {
     mutate(live);
     live.updatedAt = nowISO();
     return App.save(live).then(function () {
-      UI.renderAll();
+      /* v6.6：加标签 / 评分 / 隐藏这类「只改一条」的操作只重画那一张卡，
+       * 不再 UI.renderAll() —— 整页重建会让所有卡片重播入场动画（页面闪一下）。
+       * 卡片被筛掉或翻到别的页时，refreshCard 自己会退回整体重绘。 */
+      UI.refreshCard(live.id) || UI.renderAll();   // 找不到那张卡（异常情形）就退回整体重绘
+      UI.renderSidebar();          // 侧栏里「喜欢 / 标签 / 分类」的计数要跟着变
       if (okText) Toast.ok(okText, 3200);
     }).catch(function (e) {
       Toast.err('保存失败：' + ((e && e.message) || e), 6000);

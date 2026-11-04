@@ -2505,6 +2505,14 @@ var UI = {
     UI.renderMain(opts);
   },
 
+  /** v6.6：视图指纹。翻页 / 排序 / 视图模式 / 卡尺 / 每页数量 / 筛选 / 搜索 任一变化
+   *  才算「换了一批内容」，才值得播卡片入场动画。只是某条素材被改（收藏、标签、评分、
+   *  隐藏…）时指纹不变 —— 这时重绘必须是静默的，详见 renderGrid 里的说明。 */
+  viewKey: function () {
+    return [App.page, App.settings.sort, App.settings.view, App.settings.cardSize,
+            App.settings.pageSize, JSON.stringify(App.filters || {})].join('\u0001');
+  },
+
   /**
    * 保存/导入后保持视图稳定：卡片已在本页 → 只做必要的滚动；不在本页 → 只在
    * 「当前筛选结果里仍包含它」时换页定位。**绝不清空用户的筛选 / 搜索**
@@ -2907,6 +2915,13 @@ var UI = {
     var isList = App.settings.view === 'list';
     grid.classList.toggle('list-view', isList);
     grid.setAttribute('data-size', App.settings.cardSize || 'm');
+    /* v6.6：入场动画只在「换了一批内容」时播。
+     * 原实现每次重绘都给每张卡重挂 cardIn（0% → opacity:0），还带最多 14×18ms 的错峰延迟，
+     * 于是点一下 ★ 收藏 / 加个标签，整页卡片会集体消失再从 0 弹回来 —— 看着就是「页面闪一下」。
+     * 数据变更类的重绘（视图指纹没变）一律静默替换：不播动画、不动滚动位置。 */
+    var vk = UI.viewKey();
+    var animate = vk !== UI._lastViewKey;
+    UI._lastViewKey = vk;
     UI.renderPager(pi);
     var empty = $('#emptyState');
     if (!list.length) {
@@ -2930,8 +2945,13 @@ var UI = {
     var animIdx = 0;
     function renderOne(a) {
       var card = UI.card(a);
-      /* 入场错峰：最多 14 张累加，每张 18ms，避免大页等太久 */
-      card.style.animationDelay = (Math.min(animIdx, 14) * 18) + 'ms';
+      if (!animate) {
+        /* 静默重绘：直接关掉这条卡的入场动画（等价于「已经在位」，不要再来一次淡入） */
+        card.style.animation = 'none';
+      } else {
+        /* 入场错峰：最多 14 张累加，每张 18ms，避免大页等太久 */
+        card.style.animationDelay = (Math.min(animIdx, 14) * 18) + 'ms';
+      }
       animIdx++;
       frag.appendChild(card);
     }
@@ -3107,7 +3127,14 @@ var UI = {
         var live = App.assets.find(function (x) { return x.id === a.id; }) || a;
         live.favorite = !live.favorite;
         a.favorite = live.favorite;
-        App.save(live).then(function () { UI.renderAll(); });
+        /* v6.6：只重画这一张卡 + 刷新侧栏「喜欢」计数。
+         * 原先叫 UI.renderAll()，为了一个星标把整页 34 张卡重建一遍，
+         * 入场动画一并重播，观感就是整页闪一下。
+         * refreshCard 内部已处理「被筛选/翻页挤出本页」的情况（那时它会退回整体重绘）。 */
+        App.save(live).then(function () {
+          UI.refreshCard(live.id) || UI.renderAll();
+          UI.renderSidebar();
+        });
       }
     }, a.favorite ? ICONS.label('\u2605') : ICONS.label('\u2606')));
 

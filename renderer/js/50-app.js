@@ -2886,9 +2886,11 @@ var UI = {
   },
 
   /* ---------------- 卡片网格 ---------------- */
+  /* v6.5：卡宽自适应交给 CSS（.grid 用 repeat(auto-fill, minmax(卡宽,1fr))），
+     行内剩余空间由浏览器平摊，这里不再算宽度、也不写 --card-w。 */
   /** 按当前宽度和卡片尺寸计算纵向分栏数量 */
   masonryColumnCount: function (width) {
-    var cfg = { s: 170, m: 220, l: 290 };
+    var cfg = { s: 164, m: 220, l: 290 };
     var colWidth = cfg[App.settings.cardSize] || 220;
     var gap = App.settings.cardSize === 's' ? 10 : (App.settings.cardSize === 'l' ? 18 : 14);
     width = width || (($('#grid') && $('#grid').clientWidth) || 0);

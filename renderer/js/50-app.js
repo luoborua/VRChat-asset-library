@@ -4,7 +4,7 @@
  * ===================================================================== */
 
 /** v3.0.0（D9 · 容量悬崖）：把写盘失败的三类原因翻成用户能自救的话 ——
- *  旧文案把「体积超宿主上限」也说成「宿主离线或目录不可写」，用户会一直等一个永远不会成功的重试。 */
+ *  旧文案把「体积超后端上限」也说成「后端离线或目录不可写」，用户会一直等一个永远不会成功的重试。 */
 function mbText(n) { return (Number(n || 0) / 1048576).toFixed(2); }
 function fileWriteFailShort(kind) {
   if (kind === 'db-error') return '素材数据库写入失败';
@@ -20,16 +20,16 @@ function fileWriteFailText(kind, info) {
       + '修好后按 Ctrl+S 或再改一次任意素材即可补写。';
   }
   if (kind === 'too-large') {
-    /* 悬崖值由上限现算（不写死），宿主上限变了这里自动跟着变 */
+    /* 悬崖值由上限现算（不写死），后端上限变了这里自动跟着变 */
     var cliffRaw = Math.floor(((Number(info.limitBytes) || 0) - 256) * 3 / 4);
     return '数据太大，未能写入 ' + dir + '：本次请求体约 ' + mbText(info.bodyBytes) + ' MB（原始 JSON ' + mbText(info.rawBytes)
-      + ' MB），超过内置宿主单次写入上限 ' + mbText(info.limitBytes) + ' MB（' + String(info.limitBytes) + ' 字节）——'
+      + ' MB），超过程序后端单次写入上限 ' + mbText(info.limitBytes) + ' MB（' + String(info.limitBytes) + ' 字节）——'
       + '原始 JSON 超过约 ' + mbText(cliffRaw) + ' MB 就一定写不进去。'
       + '本次不会自动重试。改动仍在浏览器缓存里：请先按 Ctrl+S（或设置页「导出完整备份」）留底，'
-      + '再清理不用的素材 / 大字段后重试；确实需要更大的主库时，得由宿主侧提高该上限。';
+      + '再清理不用的素材 / 大字段后重试；确实需要更大的主库时，得由后端侧提高该上限。';
   }
   if (kind === 'host-error') {
-    return '宿主拒绝写入 ' + dir + '：' + String(info.error || '未知原因')
+    return '后端拒绝写入 ' + dir + '：' + String(info.error || '未知原因')
       + '（常见原因：目录被占用 / 没有写权限 / 路径不存在）。请关闭占用该目录的程序、检查权限，'
       + '或到「设置 → 本地库与整理」改用别的库目录。改动仍在浏览器缓存里。';
   }
@@ -577,8 +577,8 @@ var App = {
 
   /**
    * 定向修复「存储路径退化成分类目录」的历史坏数据（技术手册 §51.6）。
-   * 只处理【末级正好等于分类名】这一种确定坏形态（全库仅十余条），用宿主确认
-   * <库根>\<分类>\<素材文件夹名> 真实存在才改写；不做全库扫描，宿主离线直接跳过。
+   * 只处理【末级正好等于分类名】这一种确定坏形态（全库仅十余条），用后端确认
+   * <库根>\<分类>\<素材文件夹名> 真实存在才改写；不做全库扫描，后端离线直接跳过。
    */
   repairCategoryOnlyPaths: function (list) {
     list = list || [];
@@ -853,7 +853,7 @@ var App = {
         Object.keys(base).forEach(function (k) { if (s[k] !== undefined) base[k] = s[k]; });
         // 代理功能已移除：旧代理列表不再使用
         if (!Array.isArray(base.proxies)) base.proxies = [];
-        // v1.0 -> v1.1 迁移：proxyMode 合并为 fetchMode；v2.0 起旧「代理/直连/自动」统一改为宿主联网
+        // v1.0 -> v1.1 迁移：proxyMode 合并为 fetchMode；v2.0 起旧「代理/直连/自动」统一改为后端联网
         if (s.fetchMode === undefined && s.proxyMode !== undefined) {
           base.fetchMode = (s.proxyMode === 'direct') ? 'direct' : 'paste';
         }
@@ -876,7 +876,7 @@ var App = {
         base.avatarNamePriority = 'label'; base.avatarNamePriorityMigrated = true; settingsDirty = true;
       }
       /* v4.1.0：hostToolPath / hostBackground / proxyToolPath 随旧 WebView2 壳一并移除 ——
-       * 宿主已内置在 Electron 主进程里，不再有「宿主工具文件夹」或启动器参数可配置。
+       * 后端已内置在 Electron 主进程里，不再有「后端工具文件夹」或启动器参数可配置。
        * 这里只做存量清理，免得旧 settings.json 里一直留着三个永不生效的键。 */
       ['proxyToolPath', 'hostToolPath', 'hostBackground'].forEach(function (k) {
         if (Object.prototype.hasOwnProperty.call(base, k)) { delete base[k]; settingsDirty = true; }
@@ -887,7 +887,7 @@ var App = {
         if (nv !== base[k]) { base[k] = nv; settingsDirty = true; }
       });
       App.settings = base;
-      /* v3.0.4：窄条件路径自愈（不阻塞设置加载；宿主离线或路径有效时什么都不做） */
+      /* v3.0.4：窄条件路径自愈（不阻塞设置加载；后端离线或路径有效时什么都不做） */
       try { App.healDerivedPaths(); } catch (e) {}
       if (settingsDirty) App.saveSettings();
       return base;
@@ -895,7 +895,7 @@ var App = {
   },
   /* ---------------- 文件主库（v2.3.0） ----------------
    * <HTML 同目录>\vrclib-data\ 是数据本体，IndexedDB 降为缓存。
-   * 宿主离线 / 非 file:// 打开且未配置目录 → 只在浏览器缓存里读写，不落盘。
+   * 后端离线 / 非 file:// 打开且未配置目录 → 只在浏览器缓存里读写，不落盘。
    */
   localDir: '',
   localReadOnly: false,
@@ -908,7 +908,7 @@ var App = {
     App.localDir = Store.local.dataDir(App.settings);
     // 无法推导数据目录（非 file:// 打开且未配置）→ 只读缓存
     if (!App.localDir) { App.localReadOnly = true; App.localOffline = false; return Promise.resolve(false); }
-    // v2.3.1 修正：宿主离线时必须真的进入「只读缓存」，否则每次保存都静默写失败且不提示。
+    // v2.3.1 修正：后端离线时必须真的进入「只读缓存」，否则每次保存都静默写失败且不提示。
     // 读取本身不受影响——素材照常从 IndexedDB 缓存读出，只是改动暂不落盘。
     return FS.hostEnsure().then(function (ok) {
       if (!ok) { App.localReadOnly = true; App.localOffline = true; return false; }
@@ -922,7 +922,7 @@ var App = {
         // （实测用户文件里已出现 settings.settings 嵌套），而且文件里的设置从来没被读进来过。
         if (loc.settings) {
           var savedSettings = (loc.settings.settings && typeof loc.settings.settings === 'object') ? loc.settings.settings : loc.settings;
-          /* v4.1.0：文件里可能残留旧 WebView2 壳的宿主启动参数（宿主工具目录 / 后台隐藏运行）。
+          /* v4.1.0：文件里可能残留旧 WebView2 壳的后端启动参数（后端工具目录 / 后台隐藏运行）。
            * 这里在合并前剔掉，否则上面 loadSettings 的清理会被这一步原样覆盖回来。 */
           ['proxyToolPath', 'hostToolPath', 'hostBackground'].forEach(function (k) { delete savedSettings[k]; });
           App.settings = Object.assign({}, App.settings, savedSettings);
@@ -930,7 +930,7 @@ var App = {
         }
         var list = (loc.assets && Array.isArray(loc.assets.assets)) ? loc.assets.assets : null;
         if (!list && (loc.readErrors || []).length) {
-          // v2.3.11：数据文件**存在但读不出来**（宿主旧 2MB 上限（现 64MB） / JSON 损坏 / 权限）——
+          // v2.3.11：数据文件**存在但读不出来**（后端旧 2MB 上限（现 64MB） / JSON 损坏 / 权限）——
           // 绝不能当「首次运行」处理，否则启动链会把内存里的空列表写回去 = 清空整个素材库。
           App.localReadOnly = true;
           App.localReadBroken = true;
@@ -963,17 +963,17 @@ var App = {
     ]);
     document.body.insertBefore(bar, document.body.firstChild);
   },
-  /** 宿主离线时的常驻提示条：说明当前只读缓存，并提供「重试连接」把改动补写落盘 */
+  /** 后端离线时的常驻提示条：说明当前只读缓存，并提供「重试连接」把改动补写落盘 */
   showLocalBanner: function () {
     if (document.getElementById('localDataBanner')) return;
     var bar = el('div', { id: 'localDataBanner', class: 'local-banner' }, [
-      el('span', {}, ICONS.label('\u26A0 内置宿主离线：素材照常读取，但改动只存在浏览器缓存，尚未写入 ' + (App.localDir || '数据目录'))),
+      el('span', {}, ICONS.label('\u26A0 程序后端离线：素材照常读取，但改动只存在浏览器缓存，尚未写入 ' + (App.localDir || '数据目录'))),
       el('button', { class: 'btn btn-xs btn-primary', onclick: function () {
         FS.hostEnsureRetry(3).then(function (ok) {
-          if (!ok) { Toast.warn('仍未连接到内置宿主：请重启程序后再点重试', 6200); return; }
+          if (!ok) { Toast.warn('仍未连接到程序后端：请重启程序后再点重试', 6200); return; }
           App.localReadOnly = false; App.localOffline = false;
           var b = document.getElementById('localDataBanner'); if (b) b.remove();
-          Toast.ok('已连接内置宿主，正在把离线期间的改动写入 ' + App.localDir);
+          Toast.ok('已连接程序后端，正在把离线期间的改动写入 ' + App.localDir);
           App.scheduleFileSync();     // 无参 = 素材与设置都标脏，整体补写一次
           App.syncCoverFiles(60);     // 顺带补写离线期间只落在浏览器缓存里的封面（v2.5.14：20 → 60）
         });
@@ -998,7 +998,7 @@ var App = {
     });
     if (!targets.length) return Promise.resolve({ checked: 0, filled: 0, skipped: 0 });
     return FS.hostEnsure().then(function (ok) {
-      if (!ok) throw new Error('内置宿主离线：无法扫描素材库，请先启动宿主');
+      if (!ok) throw new Error('程序后端未就绪：无法扫描素材库，请重启程序');
       var labels = App.allCategories().map(function (c) { return c.label; });
       var filled = 0, skipped = 0;
       var chain = Promise.resolve();
@@ -1051,7 +1051,7 @@ var App = {
     return Promise.all(jobs).then(function (rs) {
       var failed = rs.some(function (r) { return r === false; });
       if (!failed) { App._fileWarned = false; App._fileRetryCount = 0; App._fileWarnKind = ''; return true; }
-      // v2.3.2：写失败不静默——重新标脏 + 明确提示 + 自动重试（宿主恢复后由「重试连接」或这里补写）
+      // v2.3.2：写失败不静默——重新标脏 + 明确提示 + 自动重试（后端恢复后由「重试连接」或这里补写）
       App._fileDirty = App._fileDirty || {};
       if (d.assets) App._fileDirty.assets = true;
       if (d.settings) App._fileDirty.settings = true;
@@ -1061,14 +1061,14 @@ var App = {
       var retryable = (fKind !== 'too-large');
       if (fKind !== App._fileWarnKind) { App._fileWarned = false; App._fileWarnKind = fKind; }   // 原因变了要重新说明一次
       if (!App._fileWarned) { App._fileWarned = true; Toast.warn(fileWriteFailText(fKind, fInfo), 9000); }
-      /* v2.5.3：自动重试加**次数上限**。原先宿主一直离线时每 20 秒重排一次、永不停止（每次还连带 5 个端口的
-       * 宿主探测）。上限 15 次（约 5 分钟）后停下，改由「重试连接」按钮或下一次改动（scheduleFileSync）重新开始。
+      /* v2.5.3：自动重试加**次数上限**。原先后端一直离线时每 20 秒重排一次、永不停止（每次还连带 5 个端口的
+       * 后端探测）。上限 15 次（约 5 分钟）后停下，改由「重试连接」按钮或下一次改动（scheduleFileSync）重新开始。
        * v3.0.0（D9）：① 体积超上限 = 确定性失败 → **一次也不重试**；② 其它两类每次重试都让用户看见进度与原因
        * （1/15、3/15 …），不再静默空转 5 分钟。 */
       var FILE_RETRY_MAX = 15, FILE_RETRY_MS = 20000;
       if (!retryable) {
         App._fileRetryCount = FILE_RETRY_MAX;
-        console.warn('[localData] 体积超过宿主写入上限，已停止自动重试：' + JSON.stringify(fInfo));
+        console.warn('[localData] 体积超过后端写入上限，已停止自动重试：' + JSON.stringify(fInfo));
         return false;
       }
       if (!App._fileRetry && (App._fileRetryCount || 0) < FILE_RETRY_MAX) {
@@ -1078,7 +1078,7 @@ var App = {
           App._fileRetry = null;
           if (App._fileDirty && !App.localReadOnly) App.flushFileSync();
           else if ((App._fileRetryCount || 0) >= FILE_RETRY_MAX) {
-            console.warn('[localData] 自动重试已达上限，等宿主恢复后由「重试连接」或新的改动补写');
+            console.warn('[localData] 自动重试已达上限，等后端恢复后由「重试连接」或新的改动补写');
             Toast.err('自动重试已停止（' + App._fileRetryCount + '/' + FILE_RETRY_MAX + '）：' + fileWriteFailShort(fKind)
               + '。改动仍在浏览器缓存里；修好后点顶部提示条的「重试连接」，或再改一次任意素材即可补写。', 9000);
           }
@@ -1091,7 +1091,7 @@ var App = {
       return false;
     }).catch(function () { return false; });
   },
-  /** v2.3.2：宿主恢复后，把只在浏览器缓存里的封面补写到 vrclib-data\covers。
+  /** v2.3.2：后端恢复后，把只在浏览器缓存里的封面补写到 vrclib-data\covers。
    *  v2.5.14（用户批复 · 修3）：改成**游标续跑 + 两处一起补**。旧实现 `filter(hasCover).slice(0, limit)`
    *  是「先截断再判断磁盘有没有」，于是永远只照顾前 20 条、后面的素材永远轮不到（真实库实测：
    *  398 条有本地路径的素材里 339 条素材文件夹缺 <文件夹名>.png）。现在每轮从上次位置继续，
@@ -1291,7 +1291,7 @@ var App = {
 
   /** v3.0.4（用户要求）：**窄条件**路径自愈 —— 仅当 ① 设置里**填过**该路径（留空/纯空白一律跳过，不猜不写不提示）且该目录不存在
    *  且 ② <应用目录>\<名称> 确实存在 时，才改用推导值并回写设置。
-   *  绝不覆盖用户已有的有效自定义路径；宿主离线（无法判定）时一律不动。 */
+   *  绝不覆盖用户已有的有效自定义路径；后端离线（无法判定）时一律不动。 */
   healDerivedPaths: function () {
     try {
       if (typeof FS === 'undefined' || !FS.host || typeof FS.hostEnsure !== 'function' || typeof FS.host.exists !== 'function') return Promise.resolve(false);
@@ -1300,7 +1300,7 @@ var App = {
       ];
       var healedLib = '';
       return FS.hostEnsure().then(function (ok) {
-        if (!ok) return false;                                  // 宿主离线 ⇒ 无法判定 ⇒ 不动
+        if (!ok) return false;                                  // 后端离线 ⇒ 无法判定 ⇒ 不动
         var changed = [];
         var chain = Promise.resolve();
         targets.forEach(function (t) {
@@ -1495,7 +1495,7 @@ var App = {
    *  与**素材文件夹 `<文件夹名>.png`** 两处，缺哪补哪；两侧都在就整条跳过（不动盘、不联网）。
    *  opts:
    *    quiet       : true 静默（不弹任何提示）—— 详情页打开 / 补全完成 / 启动补写都走静默
-   *    allowFetch  : true 时允许联网补抓封面（宿主优先、浏览器兜底）并转 PNG 落库；默认 false（避免启动时批量抓图）
+   *    allowFetch  : true 时允许联网补抓封面（后端优先、浏览器兜底）并转 PNG 落库；默认 false（避免启动时批量抓图）
    *    createFolder: true 时允许给「还没有存储路径」的素材新建文件夹；默认 false（只写已有文件夹）
    *  返回 { covers, folder, fetched }：covers/folder ∈ 'ok' | 'skip' | 'fail' | 'noblob' | 'nopath' | 'offline' */
   ensureCoverOnDisk: function (asset, opts) {
@@ -1560,7 +1560,7 @@ var App = {
     else if (typeof Importer.ensureStoragePathQuiet === 'function') pathP = Importer.ensureStoragePathQuiet(asset);
     else pathP = Promise.resolve(App.primaryLocalPath(asset));
     return pathP.then(function (folderPath) {
-      if (!folderPath) { warnHtml('未能创建素材存储路径，封面没写进素材文件夹（检查宿主与素材库根目录）', 5600); return null; }
+      if (!folderPath) { warnHtml('未能创建素材存储路径，封面没写进素材文件夹（检查后端与素材库根目录）', 5600); return null; }
       var name = App.folderName(asset) + '.png';
       var dst = joinWinPath(folderPath, [name]);
       return FS.host.exists(dst).then(function (kind) {
@@ -1568,7 +1568,7 @@ var App = {
         return toPngBlob(blob).then(function (png) {
           return FS.writeFileToPath(dst, png).then(function (ok) {
             if (ok) { if (!quiet) Toast.ok('封面已写入素材文件夹：' + name, 3600); }
-            else warnHtml('封面写入素材文件夹失败（宿主是否在线？）');
+            else warnHtml('封面写入素材文件夹失败（后端是否在线？）');
             return ok ? { path: dst, name: name } : null;
           });
         });
@@ -1713,8 +1713,8 @@ var App = {
     return joinWinPath(dir, ['covers', String(asset.id) + '.png']);
   },
 
-  /** v2.3.23：抓一张 README 图——优先内置宿主下载（带浏览器 UA，不受 CORS / 防盗链限制），失败退回浏览器直连。
-   *  宿主下载直接落在 dst（最终路径），读回后在调用方转 PNG 覆盖，因此不产生临时文件。 */
+  /** v2.3.23：抓一张 README 图——优先程序后端下载（带浏览器 UA，不受 CORS / 防盗链限制），失败退回浏览器直连。
+   *  后端下载直接落在 dst（最终路径），读回后在调用方转 PNG 覆盖，因此不产生临时文件。 */
   ghFetchImage: function (url, dst) {
     var u = String(url || '').trim();
     if (!u) return Promise.resolve(null);
@@ -1723,7 +1723,7 @@ var App = {
       if (!hostOk || !p) return null;
       return FS.host.download(u, p, {}, '')
         .then(function (j) {
-          if (!j || !(j.size > 64)) return null;      // 宿主会拒绝把登录页 / 错误页存成文件
+          if (!j || !(j.size > 64)) return null;      // 后端会拒绝把登录页 / 错误页存成文件
           if (FS.host.bytesSupported && FS.host.bytesSupported()) {
             return FS.host.readBytes(p).then(function (bytes) { return new Blob([bytes]); });
           }
@@ -1737,7 +1737,7 @@ var App = {
         .catch(function () { return null; });
     }).then(function (b) {
       if (b) return b;
-      return Net.fetchBlob(u, {});                    // 宿主不可用或下载失败 → 浏览器直连兜底
+      return Net.fetchBlob(u, {});                    // 后端不可用或下载失败 → 浏览器直连兜底
     }).catch(function () { return null; });
   },
 
@@ -1934,7 +1934,7 @@ var App = {
   },
 
   /* ---------------- 网盘（WebDAV）路径（v2.2.12） ----------------
-   * 素材的「本地文件路径」可以填 webdav://账号名/远端路径，由宿主代为读写。
+   * 素材的「本地文件路径」可以填 webdav://账号名/远端路径，由后端代为读写。
    * 远端条目一律不参与本地路径收敛（否则会被当成 Windows 路径截断）。
    */
   isWebdavPath: function (p) { return /^webdav:\/\//i.test(String(p || '')); },
@@ -1954,7 +1954,7 @@ var App = {
         return acc.concat((v.files || []).map(function (f) { return String((f && f.name) || ''); }));
       }, [])
     )).filter(function (n) { return !!n; });
-    /* v3.0.3（用户要求）：宿主离线时不再直接判 'offline' —— 有浏览器库根句柄就用 FSA 枚举做权威对账。
+    /* v3.0.3（用户要求）：后端离线时不再直接判 'offline' —— 有浏览器库根句柄就用 FSA 枚举做权威对账。
      * 结果多带一个 via: 'host' | 'fsa'，调用方据此说明这次对账是用哪条通道做的。 */
     function compareAgainst(onDisk, via) {
       var low = Object.create(null), recLow = Object.create(null);
@@ -1972,7 +1972,7 @@ var App = {
           return compareAgainst((entries || []).filter(function (e) { return e && e.kind === 'file'; }).map(function (e) { return String(e.name); }), 'host');
         }, function () { return { dir: dir, error: 'missing-dir', recorded: recorded }; });
       }
-      /* 第二档：浏览器库根句柄（宿主离线）；不可用才回落第三档 'offline' */
+      /* 第二档：浏览器库根句柄（后端离线）；不可用才回落第三档 'offline' */
       if (typeof FS.listLibraryDir !== 'function' || typeof FS.relPathFromLibrary !== 'function') {
         return { dir: dir, error: 'offline', recorded: recorded };
       }

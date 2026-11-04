@@ -8,7 +8,7 @@ var Settings = {
   open: function (tabId) {
     var tabs = [
       { id: 'appearance', label: ICONS.label('\u{1F3A8} 外观') },
-      { id: 'fetch',      label: ICONS.label('\u{1F310} 联网与宿主') },
+      { id: 'fetch',      label: ICONS.label('\u{1F310} 联网与抓取') },
       { id: 'cred',       label: ICONS.label('\u{1F510} 站点凭证') },
       { id: 'tagdict',    label: ICONS.label('\u{1F524} 标签翻译') },
       { id: 'tagmanage',  label: ICONS.label('\u{1F5C2} 标签管理') },
@@ -104,12 +104,12 @@ var Settings = {
     return box;
   },
 
-  /* ---------------- 联网与宿主 ---------------- */
+  /* ---------------- 联网与抓取 ---------------- */
   tab_fetch: function () {
     var box = el('div', { class: 'settings-pane' });
     box.appendChild(el('div', { class: 'notice' }, [
-      el('b', { text: '浏览器安全限制与内置宿主' }),
-      el('p', { text: '浏览器同源策略决定了网页脚本不能直接读取 BOOTH / Gumroad 等外部站点。本工具因此只有两条路：默认「手动粘贴源码」（完全离线、零请求）；需要联网时，全部请求统一由程序自身的后端发起——不经过任何端口、外部进程或 CORS 代理。' })
+      el('b', { text: '联网抓取的两种方式' }),
+      el('p', { text: '抓取商品信息的路径只有两条：默认「手动粘贴源码」（完全离线、零请求）；需要自动抓取时，全部请求由程序自身的后端直接发出——不经过端口、外部进程或 CORS 代理。' })
     ]));
 
     box.appendChild(el('h3', { text: '抓取方式' }));
@@ -143,29 +143,9 @@ var Settings = {
     } });
     box.appendChild(el('label', { class: 'check check-row' }, [autoCk, el('span', { text: '编辑素材时，如已保存 Cookie 且该素材还没有版本/下载链接，自动获取已购版本（需要联网）' })]));
 
-    box.appendChild(el('h3', { text: '内置宿主（联网与文件操作唯一通道）' }));
-    var hostStatus = el('div', { class: 'local-proxy-status' });
-    /* v6.0：后端与窗口同进程，没有可启停的外部服务，也没有端口——
-     * 这里只如实说明「随程序运行」，不再有端口号，也不再有「去重启某个 bat」的指引。 */
-    function renderHostStatus() {
-      hostStatus.innerHTML = '';
-      FS.hostEnsure().then(function (ok) {
-        hostStatus.innerHTML = '';
-        if (ok) {
-          hostStatus.appendChild(el('span', { class: 'chip chip-ok' }, ICONS.label('\u2714 内置宿主已就绪（随程序运行）')));
-          hostStatus.appendChild(el('span', { class: 'field-hint', text: '打开文件夹 / 移动复制 / 联网抓取 / Cookie 已购识别 / AI 翻译 / 网盘全部由程序自身的 Rust 后端直接执行，不经过任何端口或外部进程。' }));
-          hostStatus.appendChild(el('div', { class: 'btn-row' }, [
-            el('button', { class: 'btn btn-sm', onclick: function () { renderHostStatus(); } }, ICONS.label('\u{1F504} 重新检测'))
-          ]));
-        } else {
-          hostStatus.appendChild(el('span', { class: 'chip' }, ICONS.label('\u26A0 内置宿主未就绪')));
-          hostStatus.appendChild(el('div', { class: 'field-hint', text: '素材仍可正常浏览，手动粘贴源码也不受影响；但打开文件夹、移动/复制、联网抓取、Cookie 已购识别、AI 翻译、网盘将不可用。' }));
-          hostStatus.appendChild(el('div', { class: 'field-hint', text: '宿主随窗口一起启动，正常不会离线。出现这一提示通常是用浏览器直接打开了页面，请改用「启动素材库_Tauri版.bat」或直接双击程序。' }));
-        }
-      });
-    }
-    renderHostStatus();
-    box.appendChild(hostStatus);
+    /* v6.1：这里原先有一块「内置后端」状态区（在线/离线 + 重新检测按钮）。
+     * 后端与页面同进程后恒为就绪，那块只会永远显示同一个绿标，已移除。
+     * 现在页面只在真正需要时（启动装配、写盘失败）判断能力是否可用。 */
 
     box.appendChild(el('h3', { text: '解析结果缓存' }));
     box.appendChild(el('div', { class: 'field-hint', text: '同一个商品链接的解析结果会缓存到本机 IndexedDB，重复添加时直接命中缓存，不再重复请求或重复解析。' }));
@@ -194,7 +174,7 @@ var Settings = {
         App.saveSettings();
       }
     });
-    box.appendChild(Field.row('同时下载文件数', concIn, '1~8，默认 4。单文件 ≥16MB 且服务器支持断点续传时，宿主会自动切成最多 8 段并发下载（慢速源提速用）；改完立刻对新任务生效。'));
+    box.appendChild(Field.row('同时下载文件数', concIn, '1~8，默认 4。单文件 ≥16MB 且服务器支持断点续传时会自动切成最多 8 段并发下载（慢速源提速用）；改完立刻对新任务生效。'));
     return box;
   },
 
@@ -693,7 +673,7 @@ var Settings = {
       body: [
         el('div', { class: 'notice' }, [
           el('p', { text: '对每个有商店链接的素材重新抓取商品信息，只填写从未自动获取且用户未手改的空字段；闲鱼/好友分享/已下架素材自动跳过。如需强制覆盖，请到编辑页点「⚡ 强制使用获取信息」。' }),
-          el('p', { text: '需要先在「设置 → 联网与宿主」选择「内置宿主联网」；宿主随程序启动，保持窗口运行即可。' })
+          el('p', { text: '需要先在「设置 → 联网与抓取」选择「内置联网」；它随程序运行，不需要额外设置。' })
         ]),
         logBox
       ],
@@ -706,7 +686,7 @@ var Settings = {
     function run() {
       if (running) return;
       if (!Net.networkAllowed()) {
-        log('\u2716 当前为「手动粘贴源码」（不联网）。请先在「联网与宿主」中选择「内置宿主联网」——它随程序运行，不需要额外启动任何东西。');
+        log('\u2716 当前为「手动粘贴源码」（不联网）。请先在「联网与抓取」中选择「内置联网」——它随程序运行，不需要额外启动任何东西。');
         return;
       }
       running = true; startBtn.disabled = true; ICONS.apply(startBtn, ('\u23F3 补全中 …'));
@@ -1280,7 +1260,7 @@ var Settings = {
     var box = el('div', { class: 'settings-pane' });
     box.appendChild(el('div', { class: 'notice' }, [
       el('b', { text: 'DeepSeek AI 翻译（标签 / 简介 / 标题汉化）' }),
-      el('p', { text: 'API Key 仅保存在本机（AES-GCM 加密，永不随备份导出，可一键清除）。只有在你点击「AI 翻译」时，选中的文本才会发送给 DeepSeek 官方接口；请求由内置宿主直连官方接口，不经过任何代理。宿主离线时网页其他功能不受影响，仅 AI 翻译暂不可用。' })
+      el('p', { text: 'API Key 仅保存在本机（AES-GCM 加密，永不随备份导出，可一键清除）。只有在你点击「AI 翻译」时，选中的文本才会发送给 DeepSeek 官方接口；请求由程序后端直连官方接口，不经过任何代理。后端不可用时只有 AI 翻译受影响，其它功能照常。' })
     ]));
 
     var keyIn = el('input', {
@@ -1334,17 +1314,13 @@ var Settings = {
       App.saveSettings();
       Toast.ok('AI 请求超时已设为 ' + v + ' 秒');
     });
-    box.appendChild(Field.row('请求超时（秒）', tmoIn, 'AI 翻译单次请求的等待上限（默认 120 秒，10~600）。宿主在线时会走流式：只要还在持续接收就不会被掐断。'));
+    box.appendChild(Field.row('请求超时（秒）', tmoIn, 'AI 翻译单次请求的等待上限（默认 120 秒，10~600）。响应是流式的：只要还在持续接收就不会被掐断。'));
     var autoTagsCb = el('input', { type: 'checkbox', checked: !!App.settings.aiAutoTags, onchange: function () {
       App.settings.aiAutoTags = autoTagsCb.checked; App.saveSettings();
     } });
     box.appendChild(el('label', { class: 'check check-row' }, [autoTagsCb, el('span', { text: '导入 / 解析素材时自动用 AI 翻译未命中的标签（会消耗 API 额度）' })]));
 
-    var hostStatus = el('div', { class: 'field-hint', text: '正在检测内置宿主 …' });
-    FS.hostEnsure().then(function (ok) {
-      ICONS.apply(hostStatus, ok ? '\u2714 内置宿主已就绪：AI 请求由程序后端直连 DeepSeek 官方接口。' : ICONS.label('\u26A0 内置宿主未就绪：AI 翻译暂不可用，请从桌面程序运行。'));
-    });
-    box.appendChild(hostStatus);
+    /* v6.1：原先这里还有一个「内置后端已就绪」的状态行，同进程后恒为真，已移除。 */
 
     box.appendChild(el('h3', { text: '模糊搜索词表（近义词 / 俗称 / 常见错拼）' }));
     box.appendChild(el('p', { class: 'field-hint', text: '把当前的标签词典、支持角色（三语名与别名）、分类名、来源名发给 DeepSeek，生成一张用于扩展搜索的词表；搜索框右侧的「模糊搜索」开关打开后生效。词表只存在本机设置里，搜索过程本身不联网。' }));
@@ -1429,7 +1405,7 @@ var Settings = {
     box.appendChild(el('pre', { class: 'tree-pre', text:
       '素材库页面（点击「AI 翻译」）\n' +
       '   \u2193 选中的标签 / 简介文本\n' +
-      '内置宿主（127.0.0.1，唯一通道）\n' +
+      '程序内置后端（同一进程，无端口）\n' +
       '   \u2193 POST（Authorization: Bearer <本机解密出的 Key>）\n' +
       'https://api.deepseek.com/chat/completions\n' +
       '   \u2193 返回中文翻译\n' +
@@ -1444,27 +1420,11 @@ var Settings = {
   tab_library: function () {
     var box = el('div', { class: 'settings-pane' });
     box.appendChild(el('div', { class: 'notice' }, [
-      el('p', { text: '纯网页环境受浏览器安全策略限制，无法直接读写任意磁盘位置。本工具提供两条路径：①（推荐，Chrome/Edge）授权一个「素材库根目录」，即可直接在其中创建分类文件夹；②生成目录结构与批处理脚本，由你在资源管理器中执行。' })
+      el('p', { text: '桌面版由程序直接读写磁盘：选择文件夹、创建分类目录、整项移动/复制都是原生操作，不需要额外授权。下面的「生成目录结构与批处理脚本」仍可给外部工具用。' })
     ]));
 
-    var status = el('div', { class: 'field-hint' }, ICONS.label(FS.supported() ? '\u2714 当前浏览器支持文件系统访问 API' : '\u26A0 当前浏览器不支持文件系统访问 API（请使用 Chrome / Edge）'));
-    box.appendChild(status);
-
-    var hostStatus = el('div', { class: 'field-hint', text: '内置宿主：正在检测…' });
-    box.appendChild(hostStatus);
-    FS.hostEnsure().then(function (ok) {
-      ICONS.apply(hostStatus, ok ? '\u2714 内置宿主已连接（文件操作将由宿主执行）' : ICONS.label('\u26A0 内置宿主未就绪：请重启程序（可用原生对话框选路径、整项移动/复制）'));
-    }).catch(function () {
-      ICONS.apply(hostStatus, ('\u26A0 内置宿主检测失败'));
-    });
-    box.appendChild(el('div', { class: 'btn-row' }, [
-      el('button', { class: 'btn btn-sm', onclick: function () {
-        hostStatus.textContent = '内置宿主：正在检测…';
-        FS.hostEnsure().then(function (ok) {
-          ICONS.apply(hostStatus, ok ? '\u2714 内置宿主已连接（文件操作将由宿主执行）' : ICONS.label('\u26A0 内置宿主未就绪：请重启程序'));
-        });
-      } }, ICONS.label('\u{1F504} 重新检测宿主'))
-    ]));
+    // v6.1：原先这里有一行「浏览器是否支持文件系统访问 API」的检测——桌面载体下必然为否，
+    // 会误导成「环境不满足」。同进程后端接管文件操作后，这项检查与「重新检测后端」按钮一并移除。
 
     // v2.5.1（L4）：原来写「尚未选择素材库根目录」，而下面的输入框里显示着默认路径——看着自相矛盾
 var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '已授权目录：' + App.settings.libraryRootName : '未手动设置 · 当前使用默认路径（下方输入框里显示的就是它）' });
@@ -1472,7 +1432,7 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
       rootInfo,
       el('div', { class: 'btn-row' }, [
         el('button', { class: 'btn btn-sm btn-primary', onclick: function () {
-          /* v3.0.5：宿主原生对话框 → 直接得到绝对路径（不再需要手动粘贴） */
+          /* v3.0.5：后端原生对话框 → 直接得到绝对路径（不再需要手动粘贴） */
           FS.pickDirectoryPath('vrc-library-root').then(function (r) {
             if (!r) return;
             if (!r.path) { Toast.warn('未能获取该文件夹的完整路径，请在下方输入框手动填写'); return; }
@@ -1531,7 +1491,7 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
       }
     });
     box.appendChild(Field.row('素材库根目录的完整路径', rootPathIn,
-      '宿主在线时点上面的「选择文件夹」会自动填入完整路径（v3.0.5），也可手动填写。填写后，导入 / 整理生成的路径都会是可以直接粘贴进资源管理器的完整路径。'
+      '点上面的「选择文件夹」会直接填入完整路径（v3.0.5），也可手动填写。填写后，导入 / 整理生成的路径都会是可以直接粘贴进资源管理器的完整路径。'
       + (App.settings.libraryRootPath ? '' : '当前显示的是「未设置时的默认值」，改动后即以你填写的为准。')));
 
     box.appendChild(el('h3', { text: '导入本地已下载的素材' }));
@@ -1742,7 +1702,7 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
   tab_about: function () {
     var box = el('div', { class: 'settings-pane' });
     box.appendChild(el('h3', { text: APP.name + ' v' + APP.version }));
-    box.appendChild(el('p', { class: 'field-hint', text: '单文件离线网页工具：数据本体存在与 HTML 同目录的 vrclib-data\\ 文件夹（v2.3.0 起，浏览器 IndexedDB 只是缓存副本），不依赖任何服务器，也不会上传你的任何数据。' }));
+    box.appendChild(el('p', { class: 'field-hint', text: '离线桌面工具：数据本体存在与程序同目录的 vrclib-data\\ 文件夹（library.db 为主库，浏览器 IndexedDB 只是缓存副本），不依赖任何服务器，也不会上传你的任何数据。' }));
 
     /* ---------------- v4.3.2：程序更新（手动检查） ---------------- */
     var updStatus = el('div', { class: 'field-hint', text: '' });
@@ -1796,8 +1756,8 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
     box.appendChild(el('h3', { text: '信息获取方式' }));
     box.appendChild(el('ul', { class: 'help-list' }, [
       el('li', { text: '手动粘贴源码（默认）：不发起任何外部请求。打开商品页 → 查看网页源代码 → 复制 → 粘贴 → 本地解析。BOOTH 建议直接粘贴 items/<商品ID>.json 的内容，识别率最高。' }),
-      el('li', { text: '内置宿主联网：全部外部请求由程序内置的宿主发起，支持自动抓取、Cookie 已购识别、订单下载解析与 AI 翻译；不使用也不配置任何 CORS 代理。' }),
-      el('li', { text: '宿主离线时网页照常打开：浏览 / 手动粘贴 / 拖拽导入照常可用；打开文件夹、移动复制、联网抓取、已购识别与 AI 翻译会提示受限。' })
+      el('li', { text: '内置联网：全部外部请求由程序自身的后端直接发出，支持自动抓取、Cookie 已购识别、订单下载解析与 AI 翻译；不使用也不配置任何 CORS 代理。' }),
+      el('li', { text: '后端不可用时：浏览 / 手动粘贴 / 拖拽导入照常可用，只有打开文件夹、移动复制、联网抓取、已购识别与 AI 翻译会受限。' })
     ]));
 
     box.appendChild(el('h3', { text: '解析器覆盖范围' }));
@@ -1817,17 +1777,17 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
       el('li', { text: '明确排除：Unity 编辑器插件（依赖 Editor 环境）与浏览器扩展（依赖扩展权限），与纯网页技术栈不匹配，未作为实现参考。' })
     ]));
 
-    box.appendChild(el('h3', { text: '运行形态：Electron 桌面程序 + 内置宿主' }));
-    box.appendChild(el('p', { class: 'field-hint', text: '程序以 Electron 原生窗口运行，真实文件操作由主进程内置的宿主完成（随窗口启动，监听 127.0.0.1:8788~8792），不需要再单独运行任何宿主程序。' }));
+    box.appendChild(el('h3', { text: '运行形态：单进程桌面程序（Tauri 2）' }));
+    box.appendChild(el('p', { class: 'field-hint', text: '程序以原生窗口运行，文件与网络操作由同进程里的 Rust 后端直接完成——不监听任何端口，也没有需要单独启动的外部程序。' }));
     box.appendChild(el('ul', { class: 'help-list' }, [
-      el('li', { text: '内置宿主提供的能力：读写任意路径、按路径建目录、移动/复制、读取目录、打开资源管理器、代发 HTTP 请求（绕过 CORS）、下载与断点续传、WebDAV 客户端、AI 流式转发。' }),
-      el('li', { text: '宿主离线时：素材照常从缓存读取，改动只留在本地缓存并显示顶部提示条，点「重试连接」可补写落盘。' }),
-      el('li', { text: 'v4.1.0 起只保留 Electron 单一载体：旧的 WebView2 桌面壳、独立宿主 VRCLibHost.exe 与「结构修复」工具均已移除（归档在 runtime\\_旧版归档\\）。' })
+      el('li', { text: '后端提供的能力：读写任意路径、按路径建目录、移动/复制、读取目录、打开资源管理器、发起 HTTP 请求、下载与断点续传、WebDAV 客户端、AI 流式转发、SQLite 主库、缩略图生成。' }),
+      el('li', { text: '素材主库为 vrclib-data\\library.db（SQLite），只写改动的行；二进制（封面 / 图集）以原始字节读写，不经过 base64。' }),
+      el('li', { text: 'v6.0 迁移到 Tauri 2：安装体积从数百 MB 降到约 7.4 MB，常驻内存约 33 MB；v6.1 起 Electron 载体与旧的本地 HTTP 后端（端口 / 令牌 / 断线重连）已整体移除。' })
     ]));
 
     box.appendChild(el('h3', { text: '数据安全' }));
     box.appendChild(el('ul', { class: 'help-list' }, [
-      el('li', { text: '素材数据本体存在「与 HTML 同目录的 vrclib-data\\」文件夹里（assets.json / settings.json / covers / gallery / download-queue.json），浏览器 IndexedDB 只是缓存副本；清理浏览器数据不会丢数据，但换电脑时记得一并拷贝 vrclib-data。' }),
+      el('li', { text: '素材数据本体存在「与程序同目录的 vrclib-data\\」文件夹里（library.db / settings.json / covers / download-queue.json），浏览器 IndexedDB 只是缓存副本；清理浏览器数据不会丢数据，但换电脑时记得一并拷贝 vrclib-data。' }),
       el('li', { text: '若数据文件读不出来（例如损坏），程序会进入只读并弹出红色告警，绝不覆盖原文件。' }),
       el('li', { text: '不存储账号密码；仅支持手动粘贴 Cookie，使用 ' + Secure.level().name + ' 保存，永不随备份导出。' }),
       el('li', { text: '默认「手动粘贴源码」下，工具不会向任何外部服务器发送请求。' })

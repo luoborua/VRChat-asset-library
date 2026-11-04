@@ -193,7 +193,7 @@ var DropImport = (function () {
     }
 
     var root = App.libraryRoot();
-    /* 库根必须是绝对路径：空值 / 相对名（历史配置或未配置）会让文件**相对宿主进程的工作目录**
+    /* 库根必须是绝对路径：空值 / 相对名（历史配置或未配置）会让文件**相对后端进程的工作目录**
      * 落盘 —— 实测会写进程序自己的目录里，事后很难找。这里直接拦住并提示去设置里选。 */
     function isAbsPath(p) {
       return /^[a-zA-Z]:[\\/]/.test(String(p || '')) || /^\\\\[^\\]/.test(String(p || ''));
@@ -641,7 +641,7 @@ var DropImport = (function () {
   function pickFiles() {
     if (typeof FS === 'undefined' || !FS.host) { Toast.err('当前环境不支持文件导入'); return Promise.resolve(false); }
     return FS.hostEnsure().then(function (ok) {
-      if (!ok) { Toast.err('内置宿主未就绪：请重启「启动素材库_Electron版.bat」', 7000); return false; }
+      if (!ok) { Toast.err('程序后端未就绪：请重启「启动素材库_Electron版.bat」', 7000); return false; }
       return FS.host.pickFiles().then(function (r) {
         if (!r || r.ok === false || !(r.paths || []).length) return false;
         var paths = r.paths.slice(0, 200);

@@ -162,7 +162,7 @@ var Store = (function () {
       links:         Array.isArray(a.links) ? a.links.slice() : [],          // 商店链接（多个）
       downloadLinks: Array.isArray(a.downloadLinks) ? a.downloadLinks.slice() : [], // 下载直链
       cloudUrl:      typeof a.cloudUrl === 'string' ? a.cloudUrl : '',              // v2.2.12 网盘路径或分享链接
-      downloadedFiles: Array.isArray(a.downloadedFiles) ? a.downloadedFiles.slice() : [],  // v2.3.2 成功下载过的文件名（宿主离线、且浏览器目录句柄也不可用时，作为乐观兜底保留原按钮状态）
+      downloadedFiles: Array.isArray(a.downloadedFiles) ? a.downloadedFiles.slice() : [],  // v2.3.2 成功下载过的文件名（后端离线、且浏览器目录句柄也不可用时，作为乐观兜底保留原按钮状态）
       versions:      Array.isArray(a.versions) ? a.versions.map(normalizeVersion) : [],       // 版本 / 变体
       activeVersion: a.activeVersion || '',                                                   // 兼容旧字段：已购买版本 id
       activeVersions: Array.isArray(a.activeVersions) ? uniq(a.activeVersions)
@@ -234,7 +234,7 @@ var Store = (function () {
         if (!d.objectStoreNames.contains('kv'))     d.createObjectStore('kv', { keyPath: 'k' });
         // v2：抓取结果缓存（同一商品链接不重复请求 / 重复解析）
         if (!d.objectStoreNames.contains('fetchCache')) d.createObjectStore('fetchCache', { keyPath: 'url' });
-        // v3：图集缓存表（v2.3.6 起图集本体落盘 vrclib-data\gallery\，这里只剩宿主离线时的兜底与迁移来源）
+        // v3：图集缓存表（v2.3.6 起图集本体落盘 vrclib-data\gallery\，这里只剩后端离线时的兜底与迁移来源）
         if (!d.objectStoreNames.contains('gallery')) d.createObjectStore('gallery', { keyPath: 'id' });
       };
       req.onsuccess = function () { db = req.result; useIDB = true; resolve(true); };
@@ -569,7 +569,7 @@ var Store = (function () {
 
   /* ================= 文件主库（v2.3.0） =================
    * 位置：<HTML 同目录>\vrclib-data\{assets.json, settings.json, covers\<id>.<ext>}
-   * 语义：文件为准，IndexedDB 降为缓存；宿主离线时 App 走只读缓存。
+   * 语义：文件为准，IndexedDB 降为缓存；后端离线时 App 走只读缓存。
    * settings.json 刻意排除凭据类字段（Cookie / AI Key / WebDAV 密码），
    * 这些只留在 IndexedDB 的加密存储里，不落旁路明文文件。
    */
@@ -606,12 +606,12 @@ var Store = (function () {
     return btoa(out);
   }
   function b64OfText(s) { return b64OfBytes(new TextEncoder().encode(String(s))); }
-  /* v3.0.0（D9 · 容量悬崖）：宿主 /api/writeFile 的上限 = **请求体 64 MB**（tools/vrclib-host.mjs readBody：
+  /* v3.0.0（D9 · 容量悬崖）：后端 /api/writeFile 的上限 = **请求体 64 MB**（tools/vrclib-host.mjs readBody：
    * len > 64*1024*1024 → req.destroy()，连 HTTP 响应都不给）。base64 膨胀 4/3 ⇒ 原始 JSON 超过约 48 MiB
-   * 就必然写不进去；而页面侧只看到「请求失败」，与宿主离线无法区分 —— 于是提示说错原因、还白重试 15 次
+   * 就必然写不进去；而页面侧只看到「请求失败」，与后端离线无法区分 —— 于是提示说错原因、还白重试 15 次
    * （约 5 分钟）。这里在**发送之前**按体积判死，并把结构化原因（too-large / host-offline / host-error）
    * 留给上层说话。
-   * ⚠ 联动：HOST_BODY_LIMIT 必须与宿主 readBody 的上限**同步改**（宿主侧：tools/vrclib-host.mjs，
+   * ⚠ 联动：HOST_BODY_LIMIT 必须与后端 readBody 的上限**同步改**（后端侧：tools/vrclib-host.mjs，
    *   v3.0.0 起 = 64 MB = 67108864 B）。这是前端唯一一处常数，改一处即可；Store.local.hostBodyLimit()
    *   把它连同推导出的悬崖值暴露出来，供探针/测试钉住这个联动。 */
   var HOST_BODY_LIMIT = 67108864;     // = 64 MB，与 tools/vrclib-host.mjs readBody 上限一致
@@ -633,7 +633,7 @@ var Store = (function () {
   function hostReady() { return (typeof FS !== 'undefined' && FS.hostEnsure) ? FS.hostEnsure() : Promise.resolve(false); }
   /** errBox：文件「存在但读不出来」时记录原因（缺文件不记）。
    *  v2.3.11：这条信息是防止「读失败被当成首次运行 → 启动链把空列表写回去」的关键，
-   *  起因是宿主 /api/readText 有 2MB 上限（v2.3.11 前；现 64MB），而用户 assets.json 已 2.8MB。 */
+   *  起因是后端 /api/readText 有 2MB 上限（v2.3.11 前；现 64MB），而用户 assets.json 已 2.8MB。 */
   function readJsonFile(path, errBox) {
     if (!path) return Promise.resolve(null);
     return hostReady().then(function (ok) {
@@ -869,7 +869,7 @@ var Store = (function () {
       saveCoverFile: saveCoverFile, loadCoverFile: loadCoverFile, coverExistsOnDisk: coverExistsOnDisk, settingsPayload: settingsPayload,
       saveQueue: saveQueue, loadQueue: loadQueue,
       lastWriteFail: lastWriteFailInfo,   // v3.0.0（D9）：最近一次写盘失败的结构化原因（too-large / host-offline / host-error）
-      hostBodyLimit: hostBodyLimitInfo,   // v3.0.0（D9）：{limitBytes, wrap, cliffRawBytes} —— 前端护栏与宿主上限的联动锚点
+      hostBodyLimit: hostBodyLimitInfo,   // v3.0.0（D9）：{limitBytes, wrap, cliffRawBytes} —— 前端护栏与后端上限的联动锚点
       galleryDir: galleryDir, saveGalleryFile: saveGalleryFile, listGalleryFiles: listGalleryFiles, loadGalleryFile: loadGalleryFile
     }
   };

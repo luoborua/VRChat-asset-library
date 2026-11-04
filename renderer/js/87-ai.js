@@ -2,8 +2,8 @@
 /* =====================================================================
  * 87-ai.js  —  DeepSeek AI 翻译（标签 / 简介 / 标题汉化）
  *   · 用户批复范围：可选配置 API Key（本机 AES-GCM 加密，永不随备份导出）
- *   · 仅在用户点击「AI 翻译」时发起请求；全部由内置宿主（VRCLibHost）直连 DeepSeek，
- *     不经过任何代理；宿主离线时 AI 翻译暂不可用，页面其他功能不受影响
+ *   · 仅在用户点击「AI 翻译」时发起请求；全部由程序后端直连 DeepSeek，
+ *     不经过任何代理；后端离线时 AI 翻译暂不可用，页面其他功能不受影响
  *   · 结果写入本地缓存，避免重复调用
  * ===================================================================== */
 
@@ -111,7 +111,7 @@ var AI = (function () {
     return { content: content, usage: usage, error: error };
   }
 
-  /* ---------------- 基础调用（全部由内置宿主负责，不再使用本地代理） ---------------- */
+  /* ---------------- 基础调用（全部由程序后端负责，不再使用本地代理） ---------------- */
   function chatCompletion(messages, opts) {
     opts = opts || {};
     var cfg = config();
@@ -123,16 +123,16 @@ var AI = (function () {
     };
     if (opts.json) body.response_format = { type: 'json_object' };
 
-    // 内置宿主（VRCLibHost）唯一通道：Node 主进程直连 DeepSeek，绕过 CORS，不经过任何代理
+    // 程序后端唯一通道：Rust 侧直连 DeepSeek，绕过 CORS，不经过任何代理
     var keyP = opts.key ? Promise.resolve(opts.key) : getApiKey();
     return keyP.then(function (key) {
       return FS.hostEnsure().then(function (hok) {
-        if (!hok) throw new Error('内置宿主未就绪：AI 翻译需要宿主。请重启程序后重试（手动粘贴等离线功能不受影响）。');
+        if (!hok) throw new Error('程序后端未就绪：AI 翻译需要后端。请重启程序后重试（手动粘贴等离线功能不受影响）。');
         var url = cfg.apiBase + '/chat/completions';
         var hdrs = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (key || '') };
         var tmo = httpTimeoutMs();
         var onDelta = (typeof opts.onDelta === 'function') ? opts.onDelta : null;
-        /** 整份请求（老宿主 / 流式不可用时的回退） */
+        /** 整份请求（老后端 / 流式不可用时的回退） */
         function viaFetch() {
           return FS.host.fetchURL(url, hdrs, 'POST', JSON.stringify(body), tmo).then(function (j) {
             if (!j || !j.okFlag) throw new Error('DeepSeek HTTP ' + ((j && j.status) || 0));
@@ -141,7 +141,7 @@ var AI = (function () {
             return data;
           });
         }
-        /** v2.5.15：流式（宿主 2.3.18 的 /api/stream）——长回答边到边用，宿主侧是**空闲超时**，
+        /** v2.5.15：流式（后端 2.3.18 的 /api/stream）——长回答边到边用，后端侧是**空闲超时**，
          *  不会因为"整份响应太慢"被掐断；页面侧还能实时显示进度。 */
         function viaStream() {
           var acc = '';
@@ -163,8 +163,8 @@ var AI = (function () {
         }
         return viaStream().catch(function (e) {
           var msg = String((e && e.message) || e);
-          /* 旧宿主没有 /api/stream（404 → 「宿主流式接口不可用」）→ 退回整份请求，功能不受影响 */
-          if (/宿主流式接口不可用|内置宿主未启动/.test(msg)) return viaFetch();
+          /* 旧后端没有 /api/stream（404 → 「后端流式接口不可用」）→ 退回整份请求，功能不受影响 */
+          if (/后端流式接口不可用|程序后端未启动/.test(msg)) return viaFetch();
           if (!/aborted|超时|timeout/i.test(msg)) throw e;
           return viaFetch().catch(function () {
             throw new Error('AI 请求超时或被中断（' + msg + '）。可稍后重试；若经常出现：把「设置 → AI 翻译 → 请求超时（秒）」调大，或把每次翻译条数调小。');
@@ -272,7 +272,7 @@ var AI = (function () {
     var lastTick = 0;
     return chatCompletion(messages, {
       json: true, key: key,
-      // v2.5.15：流式进度（宿主 2.3.18 起）——长回答不再"静默等"，也便于判断是不是卡住
+      // v2.5.15：流式进度（后端 2.3.18 起）——长回答不再"静默等"，也便于判断是不是卡住
       onDelta: function (t, acc) {
         var now = Date.now();
         if (now - lastTick > 1500) { lastTick = now; onLog('\u23F3 接收中 ' + acc.length + ' 字符 …'); }
@@ -296,7 +296,7 @@ var AI = (function () {
         })
       };
     }).catch(function (e) {
-      onLog('\u2716 ' + e.message + (e.message.indexOf('Failed to fetch') >= 0 || e.message.indexOf('NetworkError') >= 0 ? '（请确认程序正常运行：内置宿主随窗口启动）' : ''));
+      onLog('\u2716 ' + e.message + (e.message.indexOf('Failed to fetch') >= 0 || e.message.indexOf('NetworkError') >= 0 ? '（请确认程序正常运行：程序后端随窗口启动）' : ''));
       throw e;
     });
   }

@@ -187,7 +187,7 @@ var Modals = {
       });
     }
 
-    /** 无存储路径时先静默创建，再通过宿主直接下载；不再跳转打开下载页面 */
+    /** 无存储路径时先静默创建，再通过后端直接下载；不再跳转打开下载页面 */
     function ensureAndDownload(url, name, btn, opts) {
       opts = opts || {};
       if (!isHttpUrl(url)) { Toast.warn('下载链接无效'); return; }
@@ -198,7 +198,7 @@ var Modals = {
       function restore() { if (btn) { btn.disabled = false; setLabel(origLabel || '\u2B07 下载'); } }
       // v2.3.4：不再直接下载，改为入队（由下载队列执行，悬浮窗显示进度；v2.3.13 起可并发，默认 4）
       Importer.ensureStoragePathQuiet(a).then(function (folderPath) {
-        if (!folderPath) { Toast.err('无法创建存储路径，已取消下载。请检查「设置 → 本地库与整理」的素材库根目录与内置宿主状态。', 6200); restore(); return; }
+        if (!folderPath) { Toast.err('无法创建存储路径，已取消下载。请检查「设置 → 本地库与整理」的素材库根目录与程序后端状态。', 6200); restore(); return; }
         var dst = joinWinPath(folderPath, [name || 'download']);
         var queued = DLQueue.enqueue({ url: url, name: name || '下载文件', dst: dst, assetId: a.id,
           overwrite: !!opts.overwrite, expectSize: opts.expectSize || 0 });
@@ -416,8 +416,8 @@ var Modals = {
           if (!touched && !shopN) {
             back();
             Toast.err(targets.length
-              ? '未解析到更新：订单页可能需要已登录的 Cookie（设置 → 联网与宿主），或该 Gumroad 下载链接已过期。'
-              : '未解析到更新：抓不到商品页（检查内置宿主在线 / 链接是否有效）。', 5600);
+              ? '未解析到更新：订单页可能需要已登录的 Cookie（设置 → 联网与抓取），或该 Gumroad 下载链接已过期。'
+              : '未解析到更新：抓不到商品页（检查联网状态 / 链接是否有效）。', 5600);
             return;
           }
           if (!added && !changed && !shopN) {
@@ -469,10 +469,10 @@ var Modals = {
     }
     /**
      * v2.3.2 统一的「已下载」标记：先按本地记录乐观标记，再用磁盘结果权威覆盖。
-     * 之所以不能只等权威结果：FS.hostEnsure() 有 4 秒「刚探测成功」缓存，宿主刚掉线时
+     * 之所以不能只等权威结果：FS.hostEnsure() 有 4 秒「刚探测成功」缓存，后端刚掉线时
      * 它会先返回 true，随后的真实请求失败若被吞掉，按钮就会错误地回到「⬇ 下载」。
      */
-    /** v2.5.0：磁盘上已有该文件 → 按钮变浅红「重新下载」（可点，点击时宿主覆盖旧文件） */
+    /** v2.5.0：磁盘上已有该文件 → 按钮变浅红「重新下载」（可点，点击时后端覆盖旧文件） */
     function markRedownload(btn, dst, why) {
       btn.classList.remove('btn-primary');
       btn.classList.add('btn-redl');
@@ -492,9 +492,9 @@ var Modals = {
     function markDownloaded(btn, name) {
       if (!btn || !name) return;
       var known = localKnown(name);
-      /* v3.0.3（用户要求「网页端断开宿主后也能验证是否已下载」）：三档判定 ——
-       *   ① 宿主可用 → FS.host.exists（权威，行为与改前一致）
-       *   ② 宿主离线但浏览器有库根句柄且能读 → FS.diskFileState 内部走 relativePathExists（权威）
+      /* v3.0.3（用户要求「网页端断开后端后也能验证是否已下载」）：三档判定 ——
+       *   ① 后端可用 → FS.host.exists（权威，行为与改前一致）
+       *   ② 后端离线但浏览器有库根句柄且能读 → FS.diskFileState 内部走 relativePathExists（权威）
        *   ③ 两者都没有 → **静默**保持乐观标记（用户要求：不加「（未校验）」这类标注），但绝不把"无法判定"当成"没下载"。 */
       if (known) markRedownload(btn, '', '此前成功下载过；当前无法确认文件是否还在磁盘上');
       var dir = storageDirOf();
@@ -504,7 +504,7 @@ var Modals = {
       FS.diskFileState(dst, rel).then(function (st) {
         if (!st || !st.known) return;                               // 第三档：无法判定 → 静默保持乐观标记（不额外标注）
         if (st.exists) {
-          markRedownload(btn, dst, st.via === 'fsa' ? '浏览器库目录里已存在（宿主离线，已校验）' : '');
+          markRedownload(btn, dst, st.via === 'fsa' ? '浏览器库目录里已存在（后端离线，已校验）' : '');
           return;
         }
         markPlainDownload(btn);                                     // 权威结论：磁盘上没有 → 回到「⬇ 下载」
@@ -839,7 +839,7 @@ var Modals = {
           return toPngBlob(b, App.settings.imageMaxWidth).then(function (png) {
             return App.galleryToDisk(a, i, u, png).then(function (p) {
               if (p) return adopt(png);
-              // 宿主离线等写不了盘：退回浏览器缓存兜底，等宿主回来由迁移搬到磁盘（不会白抓一次）
+              // 后端离线等写不了盘：退回浏览器缓存兜底，等后端回来由迁移搬到磁盘（不会白抓一次）
               return Store.galleryAdd(a.id, { url: u, blob: png }).then(function () { return adopt(png); })
                 .catch(function () { return adopt(png); });
             });
@@ -1010,7 +1010,7 @@ var Modals = {
         chain.then(function () {
           cacheAllBtn.disabled = false; ICONS.apply(cacheAllBtn, ('\u{1F4BE} 缓存全部图集'));
           if (!failN) Toast.ok('图集已全部本地化（' + okN + ' 张）');
-          else Toast.warn('已本地化 ' + okN + ' 张，' + failN + ' 张没抓到（多为外链防盗链或未联网；可在「设置 → 联网与宿主」检查抓取方式）', 5200);
+          else Toast.warn('已本地化 ' + okN + ' 张，' + failN + ' 张没抓到（多为外链防盗链或未联网；可在「设置 → 联网与抓取」检查抓取方式）', 5200);
         }).catch(function (e) {
           cacheAllBtn.disabled = false; ICONS.apply(cacheAllBtn, ('\u{1F4BE} 缓存全部图集'));
           Toast.err('缓存图集失败：' + (e && e.message ? e.message : e));
@@ -1098,7 +1098,7 @@ var Modals = {
         var link = (a.links || []).filter(function (l) { return isHttpUrl(l.url); })[0];
         var url = link ? link.url : (a.itemId ? 'https://booth.pm/ja/items/' + a.itemId : '');
         if (!url) { Toast.warn('这条素材没有商店链接，无法重新获取图集'); return; }
-        if (typeof Net === 'undefined' || !Net.networkAllowed()) { Toast.warn('当前抓取方式不允许联网（可在「设置 → 联网与宿主」切换）', 4200); return; }
+        if (typeof Net === 'undefined' || !Net.networkAllowed()) { Toast.warn('当前抓取方式不允许联网（可在「设置 → 联网与抓取」切换）', 4200); return; }
         refetchGalleryBtn.disabled = true; ICONS.apply(refetchGalleryBtn, '\u23F3 获取中 …');
         Fetchers.fetchInfo(url, { forceNetwork: true, noCache: false }).then(function (info) {
           var fresh = (info && !info.__failed && Array.isArray(info.images)) ? info.images.filter(Boolean) : null;
@@ -1215,7 +1215,7 @@ var Modals = {
       !(a.versions || []).some(function (v) { return v.orderUrl && v.orderUrl.trim() && !v.special; }) &&
       (((a.links || []).some(function (l) { return isHttpUrl(l.url); })) || a.itemId);
     if (!opts.noAutoEnrich && needsVariantAuto) {
-      Toast.info('正在通过内置宿主自动获取版本 / 变体 …', 2200);
+      Toast.info('正在通过程序后端自动获取版本 / 变体 …', 2200);
       var enrichFn = a.source === 'gumroad' ? Importer.autoEnrichGumroadAsset : Importer.autoEnrichBoothAsset;
       enrichFn(a).then(function (saved) {
         if (!saved || saved.delisted) return;
@@ -1689,13 +1689,13 @@ var Modals = {
       }, ICONS.label('\u{1F50E} 解析粘贴内容'))
     ]);
 
-    /* ---- 联网抓取（全部由内置宿主负责） ---- */
+    /* ---- 联网抓取（全部由程序后端负责） ---- */
     var netBtn = el('button', {
       class: 'btn', type: 'button', onclick: function () { doFetch({}); }
     }, ICONS.label('\u{1F310} 联网自动填充'));
-    // 已保存 Cookie 时：即便在手动粘贴模式下也可直接让宿主联网获取（含已购版本与下载直链）
+    // 已保存 Cookie 时：即便在手动粘贴模式下也可直接让后端联网获取（含已购版本与下载直链）
     var cookieBtn = el('button', {
-      class: 'btn btn-warn', type: 'button', title: '用本机保存的 Cookie 由内置宿主获取，已购商品会带出版本、价格与全部下载直链',
+      class: 'btn btn-warn', type: 'button', title: '用本机保存的 Cookie 由程序后端获取，已购商品会带出版本、价格与全部下载直链',
       onclick: function () { doFetch({ forceNetwork: true, viaCookie: true }); }
     }, ICONS.label('\u{1F510} 用 Cookie 获取已购信息'));
     // 强制联网填充：忽略字段锁定与本地缓存，除自定义标题/原标题/角色三语名外全部用获取信息覆盖
@@ -1772,7 +1772,7 @@ var Modals = {
     function startFetch(url, opts) {
       opts = opts || {};
       if (!Net.networkAllowed() && !opts.forceNetwork) {
-        log('\u{1F6E1} 当前为「手动粘贴源码」模式，未发起任何请求。如需联网抓取，请在「设置 → 联网与宿主」选择「内置宿主联网」，或点「用 Cookie 获取已购信息」。');
+        log('\u{1F6E1} 当前为「手动粘贴源码」模式，未发起任何请求。如需联网抓取，请在「设置 → 联网与抓取」选择「内置联网」，或点「用 Cookie 获取已购信息」。');
         Toast.warn('当前为「手动粘贴源码」模式');
         return;
       }
@@ -1789,7 +1789,7 @@ var Modals = {
             App.save(a).then(function () { UI.renderAll(); });
             Toast.err('商品已下架，已标记；可手动重试获取', 5200);
           } else {
-            log('\u2716 抓取未成功。请确认程序正常运行（内置宿主随窗口启动），或改用下方「手动粘贴源码」。');
+            log('\u2716 抓取未成功。请确认程序正常运行（程序后端随窗口启动），或改用下方「手动粘贴源码」。');
             Toast.err('自动抓取失败，请查看日志或改用手动粘贴');
           }
           pasteWrap.style.display = '';

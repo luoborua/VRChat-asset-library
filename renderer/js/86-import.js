@@ -3,7 +3,7 @@
  * 86-import.js  —  导入中心
  *   ① 文件夹导入：扫描本地已下载素材（多版本 / 封面 / .url 链接），可复制进素材库
  *   ② 用户脚本导入：接收 vrc-library-bridge 用户脚本导出的 JSON（含已购列表与下载直链）
- *   ③ 已购库同步：内置宿主在线 + 保存了 Cookie 时，直接同步 BOOTH 购买记录
+ *   ③ 已购库同步：程序后端在线 + 保存了 Cookie 时，直接同步 BOOTH 购买记录
  * ===================================================================== */
 
 var Importer = (function () {
@@ -370,7 +370,7 @@ var Importer = (function () {
     }
     return FS.mkdirPath(folderPath).then(function (hostCreated) {
       if (hostCreated) return setPath();
-      // 宿主离线：退回浏览器句柄创建（与 ensureDownloadFolder 同规则）
+      // 后端离线：退回浏览器句柄创建（与 ensureDownloadFolder 同规则）
       return FS.getLibraryRoot().then(function (root) {
         if (!root) {
           Toast.warn('尚未配置素材库根目录：请先在「设置 → 本地库与整理」选择根目录，才能自动创建存储路径', 6200);
@@ -816,7 +816,7 @@ var Importer = (function () {
   }
 
   /* ------------------------------------------------------------------
-   * 已购库同步（需内置宿主在线 + Cookie）
+   * 已购库同步（需程序后端在线 + Cookie）
    * ------------------------------------------------------------------ */
   function parseBoothLibrary(html) {
     var items = {};
@@ -1261,7 +1261,7 @@ var Importer = (function () {
     return { site: 'booth', items: parseBoothOrder(html) };
   }
 
-  /** 从 BOOTH 订单页导入：粘贴订单页源码（Ctrl+U / Ctrl+A 复制），或交给宿主按 URL + Cookie 抓取 */
+  /** 从 BOOTH 订单页导入：粘贴订单页源码（Ctrl+U / Ctrl+A 复制），或交给后端按 URL + Cookie 抓取 */
   function orderImportDialog() {
     var ta = el('textarea', { class: 'input textarea mono', rows: 10, placeholder: '在浏览器打开 https://accounts.booth.pm/orders/<订单号>，Ctrl+U 全选复制源码，粘贴到这里' });
     var urlIn = el('input', { class: 'input mono', value: 'https://accounts.booth.pm/orders/', placeholder: '订单页 URL（可选，配合已保存的 Cookie 自动抓取）' });
@@ -1342,7 +1342,7 @@ var Importer = (function () {
       body: [
         el('div', { class: 'notice' }, [
           el('p', { text: '订单页通常一个商品含多个下载文件（新/旧版本混在一起）。此导入把它们归入一个「订单下载文件」版本，下载直链全部保留，不再按每文件拆成多个版本。' }),
-          el('p', { text: '方式一（最稳）：在浏览器打开订单页 → Ctrl+U 全选复制源码 → 粘贴到下面。方式二：填写 URL，工具用你已保存的 booth.pm Cookie 经内置宿主抓取。' })
+          el('p', { text: '方式一（最稳）：在浏览器打开订单页 → Ctrl+U 全选复制源码 → 粘贴到下面。方式二：填写 URL，工具用你已保存的 booth.pm Cookie 经程序后端抓取。' })
         ]),
         Field.row('订单页 URL', urlIn),
         ta,
@@ -1358,7 +1358,7 @@ var Importer = (function () {
             if (src.length > 200) { setBusy(true); run(src, orderUrl, true); return; }
             var u = orderUrl;
             if (!isHttpUrl(u)) { Toast.warn('请粘贴订单页源码，或填写有效 URL'); return; }
-            log('尝试经内置宿主抓取订单页 …');
+            log('尝试经程序后端抓取订单页 …');
             setBusy(true);
             Net.fetchText(u, { forceNetwork: true, onLog: log }).then(function (r) {
               if (r && r.ok && r.text) return run(r.text, u, true);
@@ -1382,8 +1382,8 @@ var Importer = (function () {
     var pagesIn = el('input', { class: 'input input-sm', type: 'number', min: 1, max: 50, value: 5 });
     var urlIn = el('input', { class: 'input mono', value: 'https://accounts.booth.pm/library' });
 
-    var hostTip = el('span', { text: '内置宿主：正在检测 …' });
-    FS.hostEnsure().then(function (ok) { hostTip.textContent = ok ? '内置宿主：\u2714 在线' : '内置宿主：\u2716 离线'; });
+    var hostTip = el('span', { text: '程序后端：正在检测 …' });
+    FS.hostEnsure().then(function (ok) { hostTip.textContent = ok ? '程序后端：\u2714 在线' : '程序后端：\u2716 离线'; });
     var hasCookie = Object.keys(App.settings.credentials || {}).some(function (h) {
       return /booth/.test(h) && App.settings.credentials[h].cookie;
     });
@@ -1394,7 +1394,7 @@ var Importer = (function () {
       body: [
         el('div', { class: 'notice notice-warn' }, [
           el('b', { text: '前置条件' }),
-          el('p', { text: '① 确认程序正常运行（内置宿主随窗口启动，无需安装任何环境）；② 在「站点凭证」中保存 booth.pm 的 Cookie。Cookie 只会发给你自己机器上的内置宿主。' }),
+          el('p', { text: '① 确认程序正常运行（程序后端随窗口启动，无需安装任何环境）；② 在「站点凭证」中保存 booth.pm 的 Cookie。Cookie 只会发给你自己机器上的程序后端。' }),
           el('p', {}, [hostTip, el('span', {}, '；booth.pm Cookie ' + (hasCookie ? '\u2714 已保存' : '\u2716 未保存'))]),
           el('p', { text: '若不想配置 Cookie，请改用「从用户脚本导入」，效果相同且更简单。' })
         ]),
@@ -1410,7 +1410,7 @@ var Importer = (function () {
 
     function run() {
       if (runningSync) { log('\u26A0 同步正在进行中，请勿重复点击'); return; }
-      if (!Net.networkAllowed()) { log('\u2716 当前为「手动粘贴源码」（不联网）。请先在「设置 → 联网与宿主」中选择「内置宿主联网」。'); return; }
+      if (!Net.networkAllowed()) { log('\u2716 当前为「手动粘贴源码」（不联网）。请先在「设置 → 联网与抓取」中选择「内置联网」。'); return; }
       runningSync = true;
       startBtn.disabled = true; ICONS.apply(startBtn, ('\u{23F3} 同步中 …'));
       var isGiftsPage = /\/gifts/.test(urlIn.value.trim());   // 获赠页 → 自动标记「获赠」
@@ -1432,7 +1432,7 @@ var Importer = (function () {
         })(i);
       }
       chain.then(function () {
-        if (!all.length) { log('\u2716 未解析到任何商品。请确认 Cookie 有效、内置宿主已启动。'); return; }
+        if (!all.length) { log('\u2716 未解析到任何商品。请确认 Cookie 有效、程序后端已启动。'); return; }
         var seen = {}, uniqItems = [];
         all.forEach(function (x) { if (!seen[x.itemId]) { seen[x.itemId] = 1; uniqItems.push(x); } });
         log('去重后共 ' + uniqItems.length + ' 项。开始逐个补全商品详情（版本 / 价格 / 全部下载链接）…');
@@ -1502,7 +1502,7 @@ var Importer = (function () {
 
   /**
    * 统一入口：只创建存储路径（分类/素材文件夹）并打开资源管理器，不搬任何文件。
-   * 宿主在线时按配置路径字符串精确创建；离线时用浏览器句柄创建并校验根名一致。
+   * 后端在线时按配置路径字符串精确创建；离线时用浏览器句柄创建并校验根名一致。
    */
   function createStoragePathOnly(asset, pathEditor, dialogOpts) {
     dialogOpts = dialogOpts || {};
@@ -2199,7 +2199,7 @@ var Importer = (function () {
 
     function fetchJSON(url) {
       return Net.fetchText(url, { forceNetwork: true, onLog: function () {} }).then(function (r) {
-        if (!r || !r.ok) throw new Error(r && r.reason ? ('宿主请求失败：' + r.reason) : '宿主请求失败');
+        if (!r || !r.ok) throw new Error(r && r.reason ? ('后端请求失败：' + r.reason) : '后端请求失败');
         return safeJSON(r.text, null);
       });
     }
@@ -2307,7 +2307,7 @@ var Importer = (function () {
           Toast.ok('心愿单导入完成：新增 ' + created + '，标记已有 ' + updated + (failed ? '，失败 ' + failed : ''));
         });
       }).catch(function (e) {
-        log('\u2716 导入失败：' + (e && e.message) + '。请确认已保存 booth.pm Cookie 且内置宿主在线。');
+        log('\u2716 导入失败：' + (e && e.message) + '。请确认已保存 booth.pm Cookie 且程序后端在线。');
         Toast.err('心愿单导入失败：' + (e && e.message), 5200);
       }).then(function () {
         busy = false;
@@ -2319,7 +2319,7 @@ var Importer = (function () {
       title: '导入 BOOTH 心愿单', size: 'md',
       body: [
         el('div', { class: 'notice' }, [
-          el('p', { text: '使用设置里已保存的 booth.pm Cookie，由内置宿主读取你的全部心愿单，逐项抓取商品信息后入库，并打上「心愿单」标记（可筛选）。已存在的商品只追加心愿单标记，不会重复创建。' }),
+          el('p', { text: '使用设置里已保存的 booth.pm Cookie，由程序后端读取你的全部心愿单，逐项抓取商品信息后入库，并打上「心愿单」标记（可筛选）。已存在的商品只追加心愿单标记，不会重复创建。' }),
           el('p', { text: '提示：心愿单商品通常未购买，保存后会按版本情况显示「未购买」标签。' })
         ]),
         (runBtn = el('button', { class: 'btn btn-primary', onclick: run }, ICONS.label('\u2B07 开始导入全部心愿单'))),

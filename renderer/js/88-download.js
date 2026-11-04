@@ -1,7 +1,7 @@
 /* ============ 88-download.js ============ */
 /* =====================================================================
  * 88-download.js  —  下载队列 + 下载任务悬浮窗（v2.3.4）
- *   · 并发执行：同时下载的文件数可设置（1~8，默认 4），单文件 ≥16MB 且支持 Range 时宿主还会分段下载
+ *   · 并发执行：同时下载的文件数可设置（1~8，默认 4），单文件 ≥16MB 且支持 Range 时后端还会分段下载
  *   · 队列落盘：vrclib-data\download-queue.json，刷新 / 重开后恢复未完成任务
  *   · 悬浮窗：可拖动；拖到屏幕边缘自动吸附并折叠成竖条，鼠标移入展开、移出收起
  * ===================================================================== */
@@ -47,7 +47,7 @@ var DLQueue = (function () {
   function activeCount() { return tasks.filter(function (t) { return t.state === 'pending' || t.state === 'running'; }).length; }
   function findByDst(dst) { return tasks.filter(function (t) { return t.dst === dst && t.state !== 'failed'; })[0]; }
 
-  /** 落盘（只存未完成与失败的；宿主离线时静默跳过） */
+  /** 落盘（只存未完成与失败的；后端离线时静默跳过） */
   function persist() {
     try {
       if (typeof Store === 'undefined' || !Store.local) return;
@@ -131,7 +131,7 @@ var DLQueue = (function () {
         notify(); persist(); kick();
         return;
       }
-      if (!res) { t.state = 'failed'; t.error = t.error || '下载失败（宿主离线或链接无效）'; }
+      if (!res) { t.state = 'failed'; t.error = t.error || '下载失败（后端离线或链接无效）'; }
       else if (t.total > 0 && res.size && res.size !== t.total) {
         // v2.5.0（S6）：与服务器 Content-Length 不符 = 下载被截断 → 标失败可重试
         t.state = 'failed';
@@ -176,10 +176,10 @@ var DLQueue = (function () {
   function remove(id) {
     var t = tasks.filter(function (x) { return x.id === id; })[0];
     stopPoll(id);
-    /* v4.3.2：正在跑的任务不能只是从列表里删掉 —— 宿主那边还在下，
+    /* v4.3.2：正在跑的任务不能只是从列表里删掉 —— 后端那边还在下，
      * 会继续占着「同一文件正在下载中」的互斥表，用户马上重下就直接失败；
      * 下完还会给一个已经不存在于队列的任务弹「已下载」提示。
-     * 现在先标记 cancelled 并让宿主真正中断，等宿主回调收尾时再移除。 */
+     * 现在先标记 cancelled 并让后端真正中断，等后端回调收尾时再移除。 */
     if (t && t.state === 'running') {
       t.state = 'cancelled';
       try { if (FS.host && FS.host.downloadCancel) FS.host.downloadCancel('dl_' + t.id).catch(function () {}); } catch (e) {}

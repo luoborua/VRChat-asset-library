@@ -22,7 +22,7 @@ var Tools = {
     var h = Modal.open({
       title: '建议目录结构（分类 / 支持角色 两级）', size: 'lg',
       body: [
-        el('div', { class: 'field-hint', text: '按「分类 → 支持角色」两级组织，可复制结构或下载一键创建文件夹的批处理脚本。仅创建目录，不会移动你的任何文件；真实整理 / 归档请交给内置宿主或资源管理器执行。' }),
+        el('div', { class: 'field-hint', text: '按「分类 → 支持角色」两级组织，可复制结构或下载一键创建文件夹的批处理脚本。仅创建目录，不会移动你的任何文件；真实整理 / 归档请交给程序后端或资源管理器执行。' }),
         Field.row('根目录', rootIn),
         pre
       ],
@@ -61,7 +61,7 @@ var Tools = {
       body: [
         el('div', { class: 'notice' }, [
           el('p', { text: '对照「素材库记录」与「存储目录里的真实文件」：找出路径失效、记录里有但磁盘缺失、磁盘上有但库里没登记的文件。' }),
-          el('p', { text: '需要内置宿主在线（设置 → 联网与宿主；宿主离线时只能列出未关联路径的素材）。' })
+          el('p', { text: '联网列出需要「内置联网」模式（设置 → 联网与抓取）；离线模式下只能列出未关联路径的素材。' })
         ]),
         logBox, reportBox
       ],
@@ -118,7 +118,7 @@ var Tools = {
         reportBox.appendChild(el('h3', { text: '磁盘上有文件但库里没登记（' + extra.length + ' 个素材 / ' + extraFiles + ' 个文件）' }));
         if (!extra.length) reportBox.appendChild(el('div', { class: 'multi-empty', text: '无' }));
         else {
-          // v2.5.1（F3）：光发现没用——给每个未登记文件两个动作：「登记」（写进 downloadedFiles）与「删除」（宿主 /api/delete，二次确认）
+          // v2.5.1（F3）：光发现没用——给每个未登记文件两个动作：「登记」（写进 downloadedFiles）与「删除」（后端 /api/delete，二次确认）
           var extraBox = el('div', { class: 'audit-list' });
           extra.slice(0, 60).forEach(function (x) {
             x.st.extra.slice(0, 8).forEach(function (nm) {
@@ -143,7 +143,7 @@ var Tools = {
         var noCover = App.assets.filter(function (a) { return !a.hasCover && !a.coverURL; });
         reportBox.appendChild(el('h3', { text: '缺少封面图（' + noCover.length + '）' }));
         reportBox.appendChild(listOf(noCover.map(function (a) { return { node: itemBtn(a) }; })));
-        if (offline.length) reportBox.appendChild(el('div', { class: 'field-hint', text: '⚠ ' + offline.length + ' 个素材未能扫描：内置宿主未启动或已掉线（这些素材没被判定为缺失）。' }));
+        if (offline.length) reportBox.appendChild(el('div', { class: 'field-hint', text: '⚠ ' + offline.length + ' 个素材未能扫描：后端调用失败（这些素材没被判定为缺失）。' }));
         startBtn.disabled = false; ICONS.apply(startBtn, ('\u{1F50E} 重新扫描')); running = false;
       }).catch(function (e) {
         log('扫描中断：' + (e && e.message ? e.message : e));
@@ -240,9 +240,9 @@ var Tools = {
     var ids = App.selectedIds();
     if (!ids.length) { Toast.warn('请先选择素材'); return; }
     var list = App.assets.filter(function (a) { return ids.indexOf(a.id) >= 0; });
-    /* v3.0.3（用户要求「断开宿主也能验证是否已下载」· Lead 2026-10-04 批准）：
-     * 本入口是**只读对账**，宿主不可用时不再早退 —— App.localFileAudit 会降级到浏览器库根句柄（FSA）枚举；
-     * 只有「宿主离线 且 没有可用的库目录句柄」这一档才如实说明"拿不到数字"，且**不用「（未校验）」这类标注**（不可判定 ≠ 没有文件）。 */
+    /* v3.0.3（用户要求「断开后端也能验证是否已下载」· Lead 2026-10-04 批准）：
+     * 本入口是**只读对账**，后端不可用时不再早退 —— App.localFileAudit 会降级到浏览器库根句柄（FSA）枚举；
+     * 只有「后端离线 且 没有可用的库目录句柄」这一档才如实说明"拿不到数字"，且**不用「（未校验）」这类标注**（不可判定 ≠ 没有文件）。 */
     FS.hostEnsure().then(function (hostOk) {
       var okN = 0, missN = 0, missFiles = 0, badN = 0, remoteN = 0, fsaN = 0, unverifiedN = 0;
       var chain = Promise.resolve();
@@ -259,11 +259,11 @@ var Tools = {
       });
       return chain.then(function () {
         if (!hostOk && !fsaN && unverifiedN) {
-          Toast.warn('磁盘状态：内置宿主未启动，且没有可用的素材库目录句柄，暂时无法核对磁盘（到「设置 → 本地库目录」选择一次，离线时也能核对）。共 ' + list.length + ' 个素材'
+          Toast.warn('磁盘状态：后端不可用，且没有可用的素材库目录句柄，暂时无法核对磁盘（到「设置 → 本地库目录」选择一次即可）。共 ' + list.length + ' 个素材'
             + (remoteN ? '；仅远端路径 ' + remoteN + ' 个' : '') + '。', 7600);
           return;
         }
-        var how = hostOk ? '' : '（浏览器库目录校验，宿主离线）';
+        var how = hostOk ? '' : '（浏览器库目录校验）';
         Toast.ok('磁盘状态' + how + '：正常 ' + okN + ' 个；缺文件 ' + missN + ' 个（共 ' + missFiles + ' 个文件）；路径失效 ' + badN + ' 个'
           + (remoteN ? '；仅远端路径 ' + remoteN + ' 个' : '')
           + (unverifiedN ? '；另有 ' + unverifiedN + ' 个暂时无法核对' : ''), 7600);
@@ -324,10 +324,10 @@ var Tools = {
         el('div', { class: 'notice' + (Net.networkAllowed() ? '' : ' notice-warn') }, [
           el('p', { text: Net.networkAllowed()
             ? '当前为联网抓取模式，将依次尝试获取标题、封面与标签；命中本地缓存的链接不会重复请求。数量多时耗时较长。'
-            : '当前为「手动粘贴源码」模式（离线）：这里只会创建占位记录，不会联网。之后可逐条打开编辑页粘贴源码补全，或到「设置 → 联网与宿主」切换抓取方式。' })
+            : '当前为「手动粘贴源码」模式（离线）：这里只会创建占位记录，不会联网。之后可逐条打开编辑页粘贴源码补全，或到「设置 → 联网与抓取」切换抓取方式。' })
         ]),
         ta,
-        el('label', { class: 'check check-row' }, [autoFetch, el('span', { text: '同时联网抓取信息（需先在「设置 → 联网与宿主」选「内置宿主联网」，并保持宿主在线）' })]),
+        el('label', { class: 'check check-row' }, [autoFetch, el('span', { text: '同时联网抓取信息（需先在「设置 → 联网与抓取」选「内置联网」）' })]),
         logBox
       ],
       footer: [
@@ -434,7 +434,7 @@ var Tools = {
       body: [
         el('div', { class: 'notice' }, [
           el('p', { text: '对每个「有订单链接的已购版本」重新抓订单页，刷新它的下载文件（名称 / 链接 / 大小）。只动下载文件，不覆盖价格、标签等其它字段。' }),
-          el('p', { text: '需要先在「设置 → 联网与宿主」选择「内置宿主联网」，并保持宿主在线。' })
+          el('p', { text: '需要先在「设置 → 联网与抓取」选择「内置联网」。' })
         ]),
         logBox
       ],
@@ -446,7 +446,7 @@ var Tools = {
     });
     startBtn.onclick = function () {
       if (running) return;
-      if (!Net.networkAllowed()) { log('\u2716 当前为「手动粘贴源码」（不联网）。请先在「联网与宿主」中选择「内置宿主联网」。'); return; }
+      if (!Net.networkAllowed()) { log('\u2716 当前为「手动粘贴源码」（不联网）。请先在「联网与抓取」中选择「内置联网」。'); return; }
       cancelled = false;
       running = true; startBtn.disabled = true; ICONS.apply(startBtn, ('\u23F3 更新中 …'));
       log('共 ' + targets.length + ' 个素材有订单链接，开始逐个获取更新 …');
@@ -506,7 +506,7 @@ var Tools = {
     var list = App.assets.filter(function (a) { return ids.indexOf(a.id) >= 0; });
     Toast.info('正在扫描所选素材的存储目录 …', 2400);
     FS.hostEnsure().then(function (ok) {
-      if (!ok) { Toast.warn('内置宿主未启动：无法扫描磁盘、也无法下载。请先启动宿主。', 5600); return null; }
+      if (!ok) { Toast.warn('程序后端未就绪：无法扫描磁盘、也无法下载。请重启程序。', 5600); return null; }
       var queued = 0, noUrl = 0, missingTotal = 0, noPath = 0;
       var chain = Promise.resolve();
       list.forEach(function (a) {

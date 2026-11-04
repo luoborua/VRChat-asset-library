@@ -169,7 +169,7 @@ var Field = {
                     Toast.warn('未能获取所选文件夹的完整路径。请在资源管理器地址栏复制完整路径后粘贴到此处（不会保存空路径）。', 6800);
                   }
                 }
-                if (r.path) { write(r.path); return; }   // v3.0.5：宿主直给绝对路径
+                if (r.path) { write(r.path); return; }   // v3.0.5：后端直给绝对路径
                 Toast.info('正在识别所选文件夹的完整路径 …', 1600);
                 FS.resolveDirectoryPath(r.handle).then(write);
               });
@@ -294,7 +294,7 @@ var Field = {
       var unt = data.filter(function (t) { return Smart.isUntranslated(t); });
       if (!unt.length) return;
       aiBox.appendChild(el('button', {
-        class: 'tag tag-sug ai-btn', type: 'button', title: '通过 DeepSeek AI 翻译这些标签（需在设置中配置 Key，并由本地宿主发起请求）',
+        class: 'tag tag-sug ai-btn', type: 'button', title: '通过 DeepSeek AI 翻译这些标签（需在设置中配置 Key，并由本地后端发起请求）',
         onclick: function () {
           Toast.info('AI 翻译中，请稍候 …');
           AI.translateItems(unt, function (m) { console.log('[AI]', m); }).then(function (r) {

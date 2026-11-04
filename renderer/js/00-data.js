@@ -129,7 +129,7 @@ var STATUS_FILTERS = [
 var FETCH_MODES = [
   { id: 'paste',  label: '手动粘贴源码（默认 · 离线）',
     desc: '不发起任何外部网络请求。你在浏览器打开商品页 → 查看源代码 → 复制粘贴，工具在本地离线解析。' },
-  { id: 'host',   label: '内置宿主联网（自动抓取 / Cookie 已购识别）',
+  { id: 'host',   label: '内置联网（自动抓取 / Cookie 已购识别）',
     desc: '全部外部请求都由程序自身的后端直接发起，不经过端口、外部进程或任何第三方代理。' }
 ];
 

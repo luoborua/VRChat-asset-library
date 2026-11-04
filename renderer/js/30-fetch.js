@@ -4,7 +4,7 @@
  *
  *  抓取方式（用户可在设置中切换，默认手动粘贴）：
  *    手动粘贴源码：不发起任何外部请求，纯本地离线解析（默认）
- *    内置宿主联网：全部外部请求由本机 VRCLibHost 发起，不再使用任何 CORS 代理
+ *    程序后端联网：全部外部请求由 Rust 后端直接发起，不再使用任何 CORS 代理
  *
  *  解析产物结构参考 BoothPM-SDK 的商品数据模型：
  *    { itemId, originalTitle(name), description, price/priceValue/currency/isFree,
@@ -13,9 +13,9 @@
 
 var Net = (function () {
 
-  /** 宿主离线时的统一失败结果（页面无宿主仍可用手动粘贴，联网功能受限） */
+  /** 后端离线时的统一失败结果（页面无后端仍可用手动粘贴，联网功能受限） */
   function hostOffline(log, tried) {
-    log('\u26A0 内置宿主（VRCLibHost）未启动。联网抓取 / Cookie 已购识别 / AI 翻译都需要宿主。');
+    log('\u26A0 程序后端未就绪。联网抓取 / Cookie 已购识别 / AI 翻译都依赖它，请从桌面程序运行。');
     log('  请重启程序（关闭窗口后重新双击「启动素材库_Electron版.bat」）再试；手动粘贴源码不受影响。');
     return Promise.resolve({ ok: false, tried: tried, reason: 'host-offline' });
   }
@@ -38,7 +38,7 @@ var Net = (function () {
   /** 当前是否允许联网抓取（host 模式才允许；Cookie 按钮可用 forceNetwork 临时放行） */
   function networkAllowed() { return (App.settings.fetchMode || 'paste') !== 'paste'; }
 
-  /** 兼容旧调用（代理通道已移除，联网统一由内置宿主负责） */
+  /** 兼容旧调用（代理通道已移除，联网统一由程序后端负责） */
   function buildChain() { return []; }
 
   /**
@@ -53,13 +53,13 @@ var Net = (function () {
       log('\u{1F6E1} 当前为「手动粘贴源码」模式，工具不会发起任何外部请求。');
       return Promise.resolve({ ok: false, tried: [], reason: 'paste-mode' });
     }
-    if (opts.forceNetwork) log('\u{1F510} 已按你的要求使用 Cookie 联网获取（仅由内置宿主发起请求）');
+    if (opts.forceNetwork) log('\u{1F510} 已按你的要求使用 Cookie 联网获取（仅由程序后端发起请求）');
 
-    var tried = [{ name: '内置宿主', ok: false, error: '' }];
+    var tried = [{ name: '程序后端', ok: false, error: '' }];
     return credFor(url).then(function (cred) {
       return FS.hostEnsure().then(function (hostOk) {
         if (!hostOk) return hostOffline(log, tried);
-        log('\u{1F5A5} 内置宿主通道：由 VRCLibHost 发起请求（不再使用任何代理）');
+        log('\u{1F5A5} 程序后端通道：由 Rust 后端直接发起请求（不经过任何代理）');
         var hdrs = opts.headers ? Object.assign({}, opts.headers) : {};   // v2.3.22：允许调用方带自定义头（如 GitHub API 的 Accept）
         if (cred && cred.cookie) hdrs.Cookie = cred.cookie;
         return FS.host.fetchURL(url, hdrs).then(function (j) {
@@ -67,11 +67,11 @@ var Net = (function () {
           var text = String((j && j.text) || '');
           if (text.length < 40) throw new Error('返回内容为空');
           tried[0].ok = true; tried[0].error = '';
-          log('\u2714 内置宿主抓取成功（' + fmtSize(text.length) + '）');
-          return { ok: true, text: text, via: '内置宿主', tried: tried };
+          log('\u2714 程序后端抓取成功（' + fmtSize(text.length) + '）');
+          return { ok: true, text: text, via: '程序后端', tried: tried };
         }).catch(function (e) {
           tried[0].error = String(e.message || e);
-          log('\u2716 内置宿主抓取失败：' + (e.message || e));
+          log('\u2716 程序后端抓取失败：' + (e.message || e));
           return { ok: false, tried: tried, reason: 'host-failed' };
         });
       });

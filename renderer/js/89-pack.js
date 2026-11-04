@@ -267,7 +267,7 @@ var Packer = (function () {
                 note: a.note,
                 purchasePrice: a.purchasePrice, purchaseCurrency: a.purchaseCurrency,
                 files: r[0],
-                /* v6.1：Tauri 下封面走磁盘路径（宿主直接流式写进包），不再转 base64；
+                /* v6.1：Tauri 下封面走磁盘路径（后端直接流式写进包），不再转 base64；
                  * Electron 仍走 base64 分支，两边产物完全一致。 */
                 coverPath: r[1] && r[1].path ? r[1].path : '',
                 coverBase64: r[1] && r[1].b64 ? r[1].b64 : '',

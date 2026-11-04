@@ -115,7 +115,7 @@ var Updater = (function () {
       return { ok: true, hasUpdate: hasUpdate, current: cur, latest: latest, url: page, notes: String(j.body || '') };
     }).catch(function (e) {
       busy = false;
-      Toast.err('检查更新失败：' + ((e && e.message) || e) + '（离线或宿主流量被拦截都可能）', 8000);
+      Toast.err('检查更新失败：' + ((e && e.message) || e) + '（离线或后端流量被拦截都可能）', 8000);
       return { ok: false, reason: 'exception' };
     });
   }

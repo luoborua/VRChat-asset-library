@@ -243,10 +243,10 @@ function bindEvents() {
       }
     });
 
-    // 内置宿主检测：离线时页面照常打开，只提示一次（短时，避免挡住后续操作提示）
+    // 程序后端检测：离线时页面照常打开，只提示一次（短时，避免挡住后续操作提示）
     setTimeout(function () {
       FS.hostEnsure().then(function (ok) {
-        if (!ok) Toast.warn('内置宿主未就绪：文件打开/联网等功能受限，请重启程序。', 3000);
+        if (!ok) Toast.warn('程序后端未就绪：文件打开/联网等功能受限，请重启程序。', 3000);
       });
     }, 1600);
 
@@ -284,10 +284,10 @@ function bindEvents() {
         item('download', '从用户脚本导入已购素材（推荐）',
           '用随附的 vrc-library-bridge 用户脚本，在你已登录的 BOOTH / Gumroad 页面导出「已购列表 + 下载直链」，再粘贴进来。不需要提供账号密码。',
           function () { Importer.bridgeImportDialog(); }),
-        item('version', '同步我的 BOOTH 已购（需内置宿主）',
-          '已保存 booth.pm Cookie 且内置宿主在线时，由宿主自动翻页同步购买记录与下载直链。',
+        item('version', '同步我的 BOOTH 已购（需程序后端）',
+          '已保存 booth.pm Cookie 且程序后端在线时，由后端自动翻页同步购买记录与下载直链。',
           function () { Importer.syncLibraryDialog(); }),
-        item('star', '导入 BOOTH 心愿单（需内置宿主）',
+        item('star', '导入 BOOTH 心愿单（需程序后端）',
           '读取你全部 BOOTH 心愿单，逐项抓取商品信息入库，并打上「心愿单」标记；已存在的商品只追加标记。',
           function () { Importer.wishlistDialog(); }),
         item('link', '粘贴多个商品链接批量添加',
@@ -577,7 +577,7 @@ function bindEvents() {
             if (isDesk) {
               var bm = document.querySelector('.brand-main');
               if (bm && !bm.querySelector('.chip-desk')) {
-                bm.appendChild(el('span', { class: 'chip chip-desk', title: 'Electron 桌面版：内置宿主随窗口启动，无需任何外部程序' }, '桌面版'));
+                bm.appendChild(el('span', { class: 'chip chip-desk', title: 'Electron 桌面版：程序后端随窗口启动，无需任何外部程序' }, '桌面版'));
               }
             }
           } catch (e) {}

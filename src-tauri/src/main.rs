@@ -226,9 +226,22 @@ fn main() {
             /* 素材主库在窗口之前就绪：首次启动要把老的 assets.json 迁进来 */
             app.manage(host::AppState::new(&host::data_dir()));
 
+            /* v6.5：默认窗口按「中等卡片刚好一排 6 张」定宽。
+             * 算法：侧栏 300 + 主区内边距 32 + (6×220 + 5×14) + 竖向滚动条约 17 = 1739。
+             * 7 列需要容器 1624 以上，所以 1722~1956 这个区间内一排稳定是 6 张。
+             * 但小屏/高缩放机器上 1739 会超出屏幕，所以再按主显示器夹一次。 */
+            let (mut win_w, mut win_h) = (1739.0_f64, 920.0_f64);
+            if let Ok(Some(mon)) = app.primary_monitor() {
+                let scale = if mon.scale_factor() > 0.0 { mon.scale_factor() as f64 } else { 1.0 };
+                let sw = mon.size().width as f64 / scale;    // 逻辑像素，与 inner_size 同单位
+                let sh = mon.size().height as f64 / scale;
+                win_w = win_w.min(sw * 0.94);
+                win_h = win_h.min(sh * 0.90);
+            }
+
             let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title(TITLE)
-                .inner_size(1380.0, 920.0)
+                .inner_size(win_w, win_h)
                 .min_inner_size(1160.0, 620.0)
                 .decorations(false)
                 .background_color(tauri::window::Color(14, 16, 20, 255))

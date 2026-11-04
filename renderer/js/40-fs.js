@@ -101,6 +101,31 @@ var FS = (function () {
       if (!TAURI_INVOKE) return Promise.reject(new Error('当前载体不支持缩略图'));
       return TAURI_INVOKE('thumb_batch', { items: items || [], max: max || 400 });
     },
+    /* ---- v6.2：数据目录（选择 / 迁移） ---- */
+    dataScan: function (dir) {
+      if (!TAURI_INVOKE) return Promise.resolve({ ok: false, error: '当前载体不支持' });
+      return TAURI_INVOKE('data_scan', { dir: String(dir || '') });
+    },
+    /** 复制到新目录并校验；onEvent({phase,done,total,name}) 用于进度条 */
+    dataMigrate: function (from, to, onEvent) {
+      if (!TAURI_INVOKE) return Promise.reject(new Error('当前载体不支持数据迁移'));
+      var ch = new TAURI_CHANNEL();
+      ch.onmessage = function (raw) {
+        if (!onEvent) return;
+        try { onEvent(typeof raw === 'string' ? JSON.parse(raw) : raw); } catch (e) {}
+      };
+      return TAURI_INVOKE('data_migrate', { from: from, to: to, onEvent: ch });
+    },
+    /** 删除旧目录里的重型数据（不会碰 settings.json） */
+    dataCleanup: function (dir) {
+      if (!TAURI_INVOKE) return Promise.resolve({ ok: false, error: '当前载体不支持' });
+      return TAURI_INVOKE('data_cleanup', { dir: String(dir || '') });
+    },
+    /** 重新解析数据根并重开数据库（写完 settings.localDataDir 之后调用） */
+    dataApplyRoot: function () {
+      if (!TAURI_INVOKE) return Promise.resolve({ ok: false, error: '当前载体不支持' });
+      return TAURI_INVOKE('data_apply_root', {});
+    },
     scan: function (p, maxDepth) { return hostCall('/api/scan', { path: p, maxDepth: maxDepth || 0 }).then(function (j) { return j.entries || []; }); },
     move: function (src, dst) { return hostCall('/api/move', { src: src, dst: dst }); },
     copy: function (src, dst) { return hostCall('/api/copy', { src: src, dst: dst }); },

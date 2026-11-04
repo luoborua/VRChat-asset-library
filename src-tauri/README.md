@@ -79,13 +79,17 @@ powershell -ExecutionPolicy Bypass -File build\build-tauri.ps1
 
 ## 数据
 
+**数据目录可配置**：`settings.json` 固定留在程序目录（它存着 `localDataDir` 这个指针），
+主库 / 封面 / 缩略图 / 下载队列跟着用户选的位置走。首次启动询问一次，之后可在设置页更改；
+迁移由 `host/data_api.rs` 完成（复制 → 逐文件校验 → 切换指针 → 重开库 → 清理旧目录）。
+
 | 项 | 位置 |
 |---|---|
-| 素材主库 | `vrclib-data\library.db`（SQLite，WAL） |
-| 迁移备份 | `vrclib-data\assets.json.bak`（首次启动自动生成） |
-| 设置 | `vrclib-data\settings.json`（小文件，仍是 JSON） |
-| 封面 | `vrclib-data\covers\<id>.<ext>` |
-| 缩略图 | `vrclib-data\covers\thumb\<id>.jpg`（400px） |
+| 素材主库 | `<数据目录>\library.db`（SQLite，WAL；默认数据目录 = `vrclib-data\`） |
+| 迁移备份 | `<数据目录>\assets.json.bak`（首次启动自动生成） |
+| 设置 | `vrclib-data\settings.json`（**不随数据搬家**） |
+| 封面 | `<数据目录>\covers\<id>.<ext>` |
+| 缩略图 | `<数据目录>\covers\thumb\<id>.jpg`（400px） |
 | 素材文件 | `本地素材库\`（可在设置里改） |
 
 首次启动若发现 `assets.json` 且库为空 → 整库导入 → 原文件改名 `.bak`。

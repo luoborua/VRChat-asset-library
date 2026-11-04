@@ -1497,6 +1497,26 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
       '点上面的「选择文件夹」会直接填入完整路径（v3.0.5），也可手动填写。填写后，导入 / 整理生成的路径都会是可以直接粘贴进资源管理器的完整路径。'
       + (App.settings.libraryRootPath ? '' : '当前显示的是「未设置时的默认值」，改动后即以你填写的为准。')));
 
+    /* v6.2：数据存放位置 —— 与「素材文件放哪」是两件事：
+     * 这里放的是主库 / 封面 / 缩略图 / 下载队列；素材文件本体在上一节的库根目录。 */
+    box.appendChild(el('h3', { text: '数据存放位置（主库 / 封面 / 缩略图）' }));
+    var dataPath = el('div', { class: 'field-hint mono', text: Settings.dataRoot() || '(未知)' });
+    box.appendChild(Field.row('当前数据目录', el('div', {}, [
+      dataPath,
+      el('div', { class: 'btn-row' }, [
+        el('button', { class: 'btn btn-sm btn-primary', onclick: function () {
+          Settings.changeDataDir().then(function (ok) {
+            if (ok) dataPath.textContent = Settings.dataRoot() || '(未知)';
+          });
+        } }, ICONS.label('\u{1F4E6} 更改位置并迁移')),
+        el('button', { class: 'btn btn-sm', onclick: function () {
+          var p = Settings.dataRoot();
+          if (p) FS.openPath(p);
+        } }, ICONS.label('\u{1F4C2} 打开该目录'))
+      ])
+    ]), '主库（library.db）、封面、缩略图、下载队列都在这里。换到别的盘时会把现有数据整体迁过去并校验；'
+      + 'settings.json 仍留在程序目录（它是「指向哪里」的指针，不能跟着搬）。'));
+
     box.appendChild(el('h3', { text: '导入本地已下载的素材' }));
     (function () {
       var cb = el('input', { type: 'checkbox', checked: !!App.settings.importMoveInsteadOfCopy, onchange: function () {
@@ -1790,12 +1810,118 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
 
     box.appendChild(el('h3', { text: '数据安全' }));
     box.appendChild(el('ul', { class: 'help-list' }, [
-      el('li', { text: '素材数据本体存在「与程序同目录的 vrclib-data\\」文件夹里（library.db / settings.json / covers / download-queue.json），浏览器 IndexedDB 只是缓存副本；清理浏览器数据不会丢数据，但换电脑时记得一并拷贝 vrclib-data。' }),
+      el('li', { text: '数据本体默认在「与程序同目录的 vrclib-data\\」，可在「设置 → 本地库与整理 → 数据存放位置」改到别的盘（会整体迁移并校验）；settings.json 始终留在程序目录，它是指向数据位置的指针。' }),
       el('li', { text: '若数据文件读不出来（例如损坏），程序会进入只读并弹出红色告警，绝不覆盖原文件。' }),
       el('li', { text: '不存储账号密码；仅支持手动粘贴 Cookie，使用 ' + Secure.level().name + ' 保存，永不随备份导出。' }),
       el('li', { text: '默认「手动粘贴源码」下，工具不会向任何外部服务器发送请求。' })
     ]));
     return box;
+  },
+
+  /* ================= 数据目录（v6.2） =================
+   * 设计：settings.json 固定留在程序目录（它存着「数据放哪」这个指针），
+   * 只有主库 / 封面 / 缩略图 / 下载队列跟着用户选的位置走。 */
+  dataRoot: function () { return Store.local.dataDir(App.settings) || ''; },
+
+  markDataDirAsked: function () {
+    App.settings.dataDirAsked = true;
+    App.saveSettings();
+  },
+
+  /** 首次运行问一次：数据放程序目录，还是另选一个盘。
+   *  只认「问过没有」这个标记——不能拿「库里有没有数据」判断，因为 Rust 启动时就会
+   *  建好一个空的 library.db，按数据判断会把全新安装误判成老用户。 */
+  askDataDirIfNeeded: function () {
+    var s = App.settings || {};
+    if (s.localDataDir || s.dataDirAsked) return;
+    if (App.localOffline || !FS.hostAvailable()) return;      // 后端不可用时别打扰
+    var h = Modal.open({
+      title: '选择数据存放位置',
+      size: 'md',
+      body: [
+        el('p', { class: 'field-hint', text: '素材库数据（主库、封面、缩略图、下载队列）默认放在程序目录下的 vrclib-data 文件夹里，整个文件夹可以随时拷走。' }),
+        el('p', { class: 'field-hint', text: '如果想把它们放到别的盘（比如空间更大的 D 盘），现在就可以选；以后也能在「设置 → 本地库与整理」里更改，数据会自动迁过去。' }),
+        el('div', { class: 'field-hint', text: '当前默认位置：' + Settings.dataRoot() })
+      ],
+      closeOnBackdrop: false,
+      footer: [
+        el('button', { class: 'btn', onclick: function () { Settings.markDataDirAsked(); Modal.close(h); } }, '就用程序目录'),
+        el('button', { class: 'btn btn-primary', onclick: function () {
+          FS.pickDirectoryPath('vrclib-data').then(function (r) {
+            if (!r || !r.path) return;
+            Modal.close(h);
+            Settings.changeDataDir(r.path);
+          });
+        } }, '选择文件夹…')
+      ]
+    });
+  },
+
+  /** 更改数据位置：扫描 → 确认 → 迁移 → 切库 → 清旧 → 刷新 */
+  changeDataDir: function (targetPath) {
+    var pick = targetPath
+      ? Promise.resolve({ path: targetPath })
+      : FS.pickDirectoryPath('vrclib-data');
+    return pick.then(function (r) {
+      if (!r || !r.path) return false;
+      var to = normalizeWinPath(String(r.path));
+      var from = Settings.dataRoot();
+      if (from && to && from.toLowerCase() === to.toLowerCase()) { Toast.info('已经是当前数据位置'); return false; }
+      return FS.host.dataScan(to).then(function (sc) {
+        if (!sc || sc.ok === false) throw new Error((sc && sc.error) || '无法读取目标目录');
+        if (sc.hasData) throw new Error('目标目录里已经有一份素材库数据，请换一个空文件夹');
+        return FS.host.dataScan(from);
+      }).then(function (cur) {
+        var n = (cur && cur.files) || 0, b = (cur && cur.bytes) || 0;
+        var msg = n
+          ? ('把 ' + n + ' 个文件（' + fmtSize(b) + '）从\n' + from + '\n迁移到\n' + to + '\n\n复制并校验无误后，会删除旧目录里的素材库数据（settings.json 保留）。迁移期间请不要关闭程序。')
+          : ('数据将存放到\n' + to + '\n\n当前还没有素材数据，直接切换即可。');
+        return Modal.confirm(msg, { title: '迁移数据目录', okText: '开始迁移', cancelText: '取消' });
+      }).then(function (yes) {
+        if (!yes) return false;
+        return Settings._migrateRun(from, to);
+      });
+    }).catch(function (e) {
+      Toast.err('迁移失败：' + ((e && e.message) || e), 8000);
+      return false;
+    });
+  },
+
+  /** 真正执行迁移（带进度窗）。失败时把数据库按当前设置重新打开，避免停在「库已关闭」状态 */
+  _migrateRun: function (from, to) {
+    var txt = el('div', { class: 'field-hint', text: '准备中 …' });
+    var h = Modal.open({ title: '正在迁移数据', size: 'sm', body: [txt], closeOnBackdrop: false });
+    function say(t) { txt.textContent = t; }
+    return FS.host.dataMigrate(from, to, function (ev) {
+      if (!ev) return;
+      if (ev.phase === 'start') say('共 ' + ev.total + ' 个文件，开始复制 …');
+      else if (ev.phase === 'copy') say('正在复制 ' + ev.done + ' / ' + ev.total + (ev.name ? '：' + ev.name : ''));
+      else if (ev.phase === 'verify') say('复制完成，正在校验 …');
+      else if (ev.phase === 'done') say('完成');
+    }).then(function (r) {
+      if (!r || r.ok === false) throw new Error((r && r.error) || '迁移失败');
+      App.settings.localDataDir = to;
+      App.settings.dataDirAsked = true;
+      /* 这里必须**立刻落盘**再切库：App.saveSettings 走的是 1.2 秒防抖，
+       * 而 data_apply_root 是去读 settings.json 决定新根在哪的——写晚了就会读到旧值，
+       * 结果数据搬了、库还开在旧目录（实测踩过）。 */
+      return Promise.resolve(Store.local.saveSettings(App.settings))
+        .then(function () { return FS.host.dataApplyRoot(); })
+        .then(function (ap) {
+          if (!ap || ap.ok === false) throw new Error((ap && ap.error) || '切换数据目录后打开主库失败');
+          App.localDir = Store.local.dataDir(App.settings);
+          if (r.moved === false) return null;             // 源目录没有数据：只改了指针
+          return FS.host.dataCleanup(from);
+        })
+        .then(function () {
+          Modal.close(h);
+          Toast.ok('数据已存放到：' + to, 6000);
+          return App.reload().then(function () { return true; });
+        });
+    }).catch(function (e) {
+      Modal.close(h);
+      return FS.host.dataApplyRoot().catch(function () {}).then(function () { throw e; });
+    });
   }
 };
 

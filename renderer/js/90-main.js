@@ -581,6 +581,11 @@ function bindEvents() {
               }
             }
           } catch (e) {}
+          /* v6.2：首次运行问一次「数据放哪」。放在首屏渲染之后，不拖慢启动；
+           * 已经有库的老用户会被静默跳过（见 Settings.askDataDirIfNeeded）。 */
+          setTimeout(function () {
+            try { Settings.askDataDirIfNeeded(); } catch (e) {}
+          }, 700);
           /* v4.3.2：只有启动清洗确实改了数据才补写。
            * 原先是无条件调用，等于每次开机都重写一遍整份 assets.json。 */
           if (App._lastReloadChanged) App.scheduleFileSync('assets');

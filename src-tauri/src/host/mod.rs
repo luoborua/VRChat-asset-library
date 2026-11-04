@@ -5,6 +5,7 @@
  *   保留同一张路由表，页面侧只换传输（fetch → invoke），业务代码一个字都不用动，
  *   行为与 Electron 版严格一致。
  */
+pub mod data_api;
 pub mod db;
 pub mod download_api;
 pub mod fs_api;
@@ -63,8 +64,36 @@ pub fn app_root() -> std::path::PathBuf {
     }
 }
 
-pub fn data_dir() -> std::path::PathBuf {
+/// 配置目录：永远在程序目录下，**不随数据搬家**。
+/// 里面只放 settings.json（约 1 KB），其中一项 localDataDir 指向真正的数据根。
+/// 这样「数据可以放到任意盘」与「启动时知道去哪找数据」不冲突。
+pub fn settings_dir() -> std::path::PathBuf {
     app_root().join("vrclib-data")
+}
+
+/// 数据根：settings.json 里配了 localDataDir 就用它，否则默认与配置同目录（便携模式）。
+pub fn data_root() -> std::path::PathBuf {
+    let cfg = settings_dir().join("settings.json");
+    if let Ok(txt) = std::fs::read_to_string(&cfg) {
+        if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+            if let Some(p) = v
+                .get("settings")
+                .and_then(|s| s.get("localDataDir"))
+                .and_then(|x| x.as_str())
+            {
+                let p = p.trim();
+                if !p.is_empty() {
+                    return std::path::PathBuf::from(p);
+                }
+            }
+        }
+    }
+    settings_dir()
+}
+
+/// 兼容旧名：库里其它地方仍按 data_dir() 取主库位置
+pub fn data_dir() -> std::path::PathBuf {
+    data_root()
 }
 
 pub fn library_dir() -> std::path::PathBuf {
@@ -79,9 +108,21 @@ fn fail(msg: impl Into<String>) -> Value {
 pub fn app_paths() -> Value {
     json!({
         "appRoot": app_root().to_string_lossy(),
-        "dataDir": data_dir().to_string_lossy(),
+        "settingsDir": settings_dir().to_string_lossy(),
+        "dataDir": data_root().to_string_lossy(),
         "libraryDir": library_dir().to_string_lossy()
     })
+}
+
+/// 重新解析数据根并重开数据库。
+/// 迁移流程的最后一步：settings.json 已写入新的 localDataDir，这里让连接跟过去。
+#[tauri::command]
+pub fn data_apply_root(state: State<AppState>) -> Value {
+    let root = data_root();
+    match state.db.reopen(&root) {
+        Ok(v) => v,
+        Err(e) => fail(format!("切换数据目录后打开主库失败：{e}")),
+    }
 }
 
 /* ---------------- 原始字节通道（v6.1：彻底不再过 base64） ----------------

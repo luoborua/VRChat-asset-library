@@ -927,6 +927,9 @@ var App = {
           ['proxyToolPath', 'hostToolPath', 'hostBackground'].forEach(function (k) { delete savedSettings[k]; });
           App.settings = Object.assign({}, App.settings, savedSettings);
           delete App.settings.v; delete App.settings.at; delete App.settings.settings;
+          /* v6.2：设置里可能写着「数据放在别的盘」——合并后必须重算，
+           * 否则 App.localDir 还是默认目录，后续封面 / 队列的路径就全指错了。 */
+          App.localDir = Store.local.dataDir(App.settings) || App.localDir;
         }
         var list = (loc.assets && Array.isArray(loc.assets.assets)) ? loc.assets.assets : null;
         if (!list && (loc.readErrors || []).length) {

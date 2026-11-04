@@ -575,7 +575,7 @@ var Store = (function () {
    */
   var DATA_DIRNAME = 'vrclib-data';
   // 只排除【凭据类】与【环境相关】字段；fuzzyDict 是普通词表，必须落盘（v2.3.1 修正）
-  var SETTINGS_SKIP = ['credentials', 'ai', 'webdavAccounts', 'localDataDir', 'githubToken'];   // v2.3.25：Token 只留浏览器本机库
+  var SETTINGS_SKIP = ['credentials', 'ai', 'webdavAccounts', 'githubToken'];   // v2.3.25：Token 只留浏览器本机库
 
   function htmlDir() {
     try {
@@ -590,11 +590,25 @@ var Store = (function () {
       return i > 0 ? p.slice(0, i) : '';
     } catch (e) { return ''; }
   }
+  /** 配置目录：固定为 <程序根>\vrclib-data，**永远不搬**。
+   *  因为 settings.json 里存着「数据放在哪」（localDataDir）这个指针本身，
+   *  它要是跟着数据一起搬，下次启动就不知道该去哪个目录读配置了。 */
+  function settingsDir() {
+    try {
+      if (window.vrcElectron && window.vrcElectron.settingsDir) return normalizeWinPath(window.vrcElectron.settingsDir);
+    } catch (e) {}
+    var d = htmlDir();
+    return d ? joinWinPath(d, [DATA_DIRNAME]) : '';
+  }
+  function settingsPath() {
+    var d = settingsDir();
+    return d ? joinWinPath(d, ['settings.json']) : '';
+  }
+  /** 数据根：用户选过目录就用它（v6.2），否则默认与配置同目录 */
   function dataDir(settings) {
     var custom = normalizeWinPath((settings || App.settings || {}).localDataDir || '');
     if (custom) return custom;
-    var d = htmlDir();
-    return d ? joinWinPath(d, [DATA_DIRNAME]) : '';
+    return settingsDir();
   }
   function jsonPath(name, settings) {
     var d = dataDir(settings);
@@ -718,7 +732,7 @@ var Store = (function () {
     if (dbMode()) {
       return Promise.all([
         FS.host.db('load'),
-        readJsonFile(joinWinPath(dir, ['settings.json']), errs)
+        readJsonFile(settingsPath(), errs)
       ]).then(function (r) {
         var db = r[0] || {};
         var count = Number(db.count) || 0;
@@ -732,7 +746,7 @@ var Store = (function () {
     }
     return Promise.all([
       readJsonFile(joinWinPath(dir, ['assets.json']), errs),
-      readJsonFile(joinWinPath(dir, ['settings.json']), errs)
+      readJsonFile(settingsPath(), errs)
     ]).then(function (r) {
       return { dir: dir, assets: r[0], settings: r[1], ok: !!(r[0] || r[1]), readErrors: errs };
     });
@@ -749,7 +763,7 @@ var Store = (function () {
     return writeTextFile(jsonPath('assets.json', settings), JSON.stringify({ v: 1, at: nowISO(), assets: list || [] }));
   }
   function saveSettings(settings) {
-    return writeTextFile(jsonPath('settings.json', settings), JSON.stringify({ v: 1, at: nowISO(), settings: settingsPayload(settings) }, null, 1));
+    return writeTextFile(settingsPath(), JSON.stringify({ v: 1, at: nowISO(), settings: settingsPayload(settings) }, null, 1));
   }
   /** 封面落盘 covers\<id>.<ext> */
   function saveCoverFile(id, blob, settings) {
@@ -864,7 +878,8 @@ var Store = (function () {
     galleryGet: galleryGet, galleryAdd: galleryAdd, galleryClear: galleryClear, galleryAll: galleryAll,
     estimate: estimate, iconURL: iconURL,
     local: {
-      DIRNAME: DATA_DIRNAME, htmlDir: htmlDir, dataDir: dataDir, jsonPath: jsonPath,
+      DIRNAME: DATA_DIRNAME, htmlDir: htmlDir, settingsDir: settingsDir, settingsPath: settingsPath,
+      dataDir: dataDir, jsonPath: jsonPath,
       loadAll: loadAll, saveAssets: saveAssets, saveSettings: saveSettings,
       saveCoverFile: saveCoverFile, loadCoverFile: loadCoverFile, coverExistsOnDisk: coverExistsOnDisk, settingsPayload: settingsPayload,
       saveQueue: saveQueue, loadQueue: loadQueue,

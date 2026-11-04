@@ -14,7 +14,8 @@ const TITLE: &str = "VRChat 改模素材管理库 · v1.1";
 /// 页面据此判断「跑在原生壳里」，并拿到数据目录（Tauri 的 URL 不是 file://，推导不出来）。
 fn init_script() -> String {
     let root = host::app_root().to_string_lossy().replace('\\', "\\\\");
-    let data = host::data_dir().to_string_lossy().replace('\\', "\\\\");
+    let cfg = host::settings_dir().to_string_lossy().replace('\\', "\\\\");
+    let data = host::data_root().to_string_lossy().replace('\\', "\\\\");
     let lib = host::library_dir().to_string_lossy().replace('\\', "\\\\");
     format!(
         r#"(function () {{
@@ -25,6 +26,7 @@ fn init_script() -> String {
     version: 'tauri2',
     token: '',
     appRoot: '{root}',
+    settingsDir: '{cfg}',
     dataDir: '{data}',
     libraryDir: '{lib}',
     getPathForFile: function (file) {{
@@ -214,6 +216,10 @@ fn main() {
             host::thumb_batch,
             host::app_paths,
             host::win_action,
+            host::data_apply_root,
+            host::data_api::data_scan,
+            host::data_api::data_migrate,
+            host::data_api::data_cleanup,
             open_external
         ])
         .setup(|app| {

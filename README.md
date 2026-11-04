@@ -86,7 +86,19 @@ VRChat改模素材管理库/
 
 ## 数据在哪
 
-数据本体在 `vrclib-data\`，与程序同目录；浏览器/WebView 侧只是缓存副本。备份、换机时拷贝这个目录即可。凭证类字段（站点 Cookie / AI Key / WebDAV 密码）加密后存在渲染层 IndexedDB，**不写进 `settings.json`，也永不随备份导出**。
+数据默认在 `vrclib-data\`（与程序同目录），**首次启动会询问放在哪**，也可以在「设置 → 本地库与整理 → 数据存放位置」随时更改——改的时候会把主库、封面、缩略图、下载队列整体迁过去并逐文件校验，旧目录清空（`settings.json` 保留）。
+
+`settings.json` 永远留在程序目录：它存着「数据放在哪」这个指针，跟着搬会导致下次启动找不到库。
+
+| 文件 | 位置 |
+|---|---|
+| 主库 `library.db` | 数据目录（默认 `vrclib-data\`） |
+| 封面 / 缩略图 | 数据目录 `covers\`、`covers\thumb\` |
+| 下载队列 | 数据目录 `download-queue.json` |
+| 设置 | 程序目录 `vrclib-data\settings.json`（不含凭据） |
+| Cookie / AI Key | WebView 的 IndexedDB（AES-GCM，密钥不可导出） |
+
+备份、换机时拷贝数据目录即可；凭证类字段加密后存在渲染层 IndexedDB，**不写进 `settings.json`，也永不随备份导出**。
 
 素材库根目录可在「设置 → 本地库与整理」里指定；点「选择文件夹」走的是 Windows 原生对话框，直接返回绝对路径，不需要手填。
 

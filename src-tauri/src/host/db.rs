@@ -127,6 +127,24 @@ impl DbState {
         Ok(())
     }
 
+    /// 关闭连接：迁移前调用，确保 WAL 已合并、文件句柄释放，之后才能安全复制 library.db
+    pub fn close(&self) {
+        *self.conn.lock().unwrap() = None;
+        self.hashes.lock().unwrap().clear();
+    }
+
+    /// 换到另一个数据目录：关旧库 → 开新库 → 换句柄。
+    /// 新目录首次使用时，DbState::open 会建表并顺带迁移遗留的 assets.json。
+    pub fn reopen(&self, dir: &Path) -> Result<Value, String> {
+        self.close();
+        let fresh = DbState::open(dir)?;
+        let new_conn = { fresh.conn.lock().unwrap().take() };
+        let new_path = { fresh.path.lock().unwrap().clone() };
+        { *self.conn.lock().unwrap() = new_conn; }
+        { *self.path.lock().unwrap() = new_path.clone(); }
+        Ok(json!({ "ok": true, "path": new_path }))
+    }
+
     pub fn info(&self) -> Value {
         let path = self.path.lock().unwrap().clone();
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);

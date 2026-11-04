@@ -578,10 +578,43 @@ body.has-pager #grid { padding-bottom: 76px; }
 
 /* 列表视图：单栏横排，不走轮转分栏 */
 .grid.list-view { display: flex; flex-direction: column; gap: 8px; }
-.grid.list-view .card { flex-direction: row; align-items: stretch; }
-.grid.list-view .card-cover { width: 132px; flex: 0 0 132px; aspect-ratio: auto; }
-.grid.list-view .card-body { padding: 10px 14px; }
-.grid.list-view .card-title { -webkit-line-clamp: 1; font-size: 14.5px; min-height: 0; text-wrap: normal; }
+/* v6.4：必须显式覆盖 .grid .card 的 width/height —— 否则列表模式下每张卡仍是网格里的
+ * 固定卡宽（170/220/290），挤在左边一条窄带，右侧大片空白；
+ * height:100% 在 flex 纵向容器里还会按容器高度算，导致卡片被拉长。
+ * 高度定死 92px：封面图会把卡片撑到 101，行高参差。 */
+.grid.list-view .card {
+  flex-direction: row; align-items: stretch;
+  width: 100%; height: 92px; min-height: 92px;
+}
+.grid.list-view .card-cover {
+  width: 132px; flex: 0 0 132px; aspect-ratio: auto;
+  height: 100%; min-height: 0;
+}
+/* 封面图改绝对定位：否则图片固有比例会反过来撑高卡片 */
+.grid.list-view .card-cover .cover-img { position: absolute; inset: 0; width: 100%; height: 100%; }
+/* v6.4：正文原先纵向堆叠（标题 / 副标题 / 来源 / 角色 / 标签各占一行），
+ * 在 1300px 宽的卡片里每行只有左侧一小段有字，右侧近千像素空白，
+ * 而且行数不同会把卡片撑成 101 / 121 / 141 三种高度。
+ * 列表视图改成五列网格，且**列位写死**（grid-column）——
+ * 用 flex 自动排版时，缺副标题的行会让后面几列整体左移，看着参差。
+ * 列宽全用 fr，保证每行同一列起点一致（实测四列 x 坐标完全重合）。 */
+.grid.list-view .card-body {
+  display: grid;
+  grid-template-columns: minmax(0, 2.5fr) minmax(0, 1.5fr) minmax(0, 1.15fr) minmax(0, 1.1fr) minmax(0, 1.75fr);
+  align-items: center; column-gap: 14px; row-gap: 0;
+  padding: 0 18px; overflow: hidden;
+}
+.grid.list-view .card-title {
+  grid-column: 1; grid-row: 1;
+  -webkit-line-clamp: 1; font-size: 14.5px; min-height: 0; text-wrap: normal; overflow: hidden;
+}
+.grid.list-view .card-subtitle {
+  grid-column: 2; grid-row: 1; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.grid.list-view .card-chips { grid-column: 3; grid-row: 1; max-height: 22px; overflow: hidden; }
+.grid.list-view .card-avatars { grid-column: 4; grid-row: 1; max-height: 22px; overflow: hidden; }
+.grid.list-view .card-tags { grid-column: 5; grid-row: 1; max-height: 22px; margin-top: 0; overflow: hidden; }
 
 /* 空状态 */
 .empty-state { text-align: center; padding: 70px 20px; color: var(--text-3); }
@@ -812,6 +845,14 @@ body.has-pager #grid { padding-bottom: 76px; }
   .kv { grid-template-columns: 80px 1fr; }
   .toasts { left: 12px; right: 12px; align-items: stretch; }
   .grid.list-view .card-cover { width: 96px; flex: 0 0 96px; }
+  /* v6.4：窄屏下五列会被压成每列几十像素、字都看不清，收成三列并藏掉次要信息 */
+  .grid.list-view .card-body {
+    grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 10px; padding: 0 12px;
+  }
+  .grid.list-view .card-subtitle, .grid.list-view .card-avatars { display: none; }
+  .grid.list-view .card-chips { grid-column: 2; }
+  .grid.list-view .card-tags { grid-column: 3; }
 }
 /* v2.5.2：中等窄窗把两个下限再放松一点，避免过早换行/溢出 */
 @media (max-width: 1180px) {

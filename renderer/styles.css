@@ -724,6 +724,14 @@ body.has-pager #grid { padding-bottom: 76px; }
 .settings-tab .ico-pre svg { width: 1.3em; height: 1.3em; }   /* v2.3.27：左侧栏图标比正文略大，更醒目 */
 .settings-tab.active { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
 .settings-content { min-width: 0; }
+/* v6.2：设置窗固定尺寸。原先弹窗高度由内容决定，11 个页签长短差别很大，
+ * 切一次标签整个窗口就长大或缩小一次，很晃眼。现在高度固定，滚动交给右侧内容区，
+ * 左侧导航也顺势不再跟着滚（原来的 sticky 在这里已无必要）。 */
+.modal-settings { height: min(780px, 92vh); }
+.modal-settings .modal-body { overflow: hidden; }
+.modal-settings .settings { height: 100%; min-height: 0; grid-template-rows: minmax(0, 1fr); }
+.modal-settings .settings-nav { position: static; max-height: 100%; align-self: stretch; }
+.modal-settings .settings-content { overflow-y: auto; min-height: 0; padding-right: 8px; }
 .settings-pane h3 { font-size: 13.5px; margin: 18px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--border); }
 .settings-pane h3:first-child { margin-top: 0; }
 .notice {
@@ -783,6 +791,8 @@ body.has-pager #grid { padding-bottom: 76px; }
   .detail { grid-template-columns: 1fr; }
   .detail-cover { max-height: 320px; }
   .settings { grid-template-columns: 1fr; }
+  /* 窄屏时导航变成顶部一行，剩下的高度全给内容区 */
+  .modal-settings .settings { grid-template-rows: auto minmax(0, 1fr); }
   .settings-nav { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--border); padding: 0 0 10px;
   position: sticky; top: 0; z-index: 5; background: var(--bg-2); max-height: none; overflow: visible; }
 }

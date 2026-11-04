@@ -19,7 +19,7 @@ var Modal = (function () {
     opts = opts || {};
     purgePending();
     var overlay = el('div', { class: 'modal-overlay' });
-    var box = el('div', { class: 'modal modal-' + (opts.size || 'md') });
+    var box = el('div', { class: 'modal modal-' + (opts.size || 'md') + (opts.cls ? ' ' + opts.cls : '') });
     var head = el('div', { class: 'modal-head' }, [
       el('h2', { class: 'modal-title', text: opts.title || '' }),
       el('button', { class: 'icon-btn', title: '关闭 (Esc)', onclick: function () { close(handle); } }, ICONS.label('\u2715'))

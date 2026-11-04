@@ -30,11 +30,14 @@ var Settings = {
       $$('.settings-tab', nav).forEach(function (b) { b.classList.toggle('active', b.dataset.tab === id); });
       content.innerHTML = '';
       content.appendChild(Settings['tab_' + id]());
-      var sc = nav.closest ? nav.closest('.modal-body') : null;   // v2.3.8：切标签后右侧回到开头
-      if (sc) sc.scrollTop = 0;
+      /* v6.2：设置窗改为固定尺寸后，滚动容器从 .modal-body 变成 .settings-content
+       * （左侧导航不再跟着滚），切标签时也要把这个容器滚回顶部。 */
+      content.scrollTop = 0;
+      var body = nav.closest ? nav.closest('.modal-body') : null;
+      if (body) body.scrollTop = 0;
     }
     var h = Modal.open({
-      title: '设置', size: 'lg',
+      title: '设置', size: 'lg', cls: 'modal-settings',
       body: [el('div', { class: 'settings' }, [nav, content])],
       footer: [el('button', { class: 'btn btn-primary', onclick: function () { Modal.close(h); UI.renderAll(); } }, '完成')]
     });

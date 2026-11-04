@@ -904,6 +904,7 @@ var App = {
   /** 启动时读入文件主库；文件存在则以文件为准并回灌 IndexedDB */
   localOffline: false,
   localCacheNewer: false,   // v2.3.3：启动时发现缓存比文件新 → 稍后由启动链回写文件
+  needSyncAfterBoot: false, // v6.3：判定「以缓存为准」后必须真回写一次，否则 at 不动 → 每次开机都判定缓存更新
   bootLocalData: function () {
     App.localDir = Store.local.dataDir(App.settings);
     // 无法推导数据目录（非 file:// 打开且未配置）→ 只读缓存
@@ -947,6 +948,10 @@ var App = {
         cached.forEach(function (x) { var t = Date.parse((x && x.updatedAt) || '') || 0; if (t > cacheAt) cacheAt = t; });
         if (cacheAt > fileAt + 2000) {                      // 缓存更新 → 不采用旧文件，交给启动链回写
           App.localCacheNewer = true;
+          /* v6.3：光标记「以缓存为准」不够 —— 回写必须真的发生。
+           * 以前只弹一条 toast、没有触发落盘，文件里的 at 于是永远停在旧值，
+           * 下次启动照样判定「缓存更新」，每次开机都弹一次且数据一直没真正写进去。 */
+          App.needSyncAfterBoot = true;
           return false;
         }
         App.localCacheNewer = false;

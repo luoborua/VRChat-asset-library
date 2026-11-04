@@ -587,8 +587,11 @@ function bindEvents() {
             try { Settings.askDataDirIfNeeded(); } catch (e) {}
           }, 700);
           /* v4.3.2：只有启动清洗确实改了数据才补写。
-           * 原先是无条件调用，等于每次开机都重写一遍整份 assets.json。 */
-          if (App._lastReloadChanged) App.scheduleFileSync('assets');
+           * 原先是无条件调用，等于每次开机都重写一遍整份 assets.json。
+           * v6.3：另外，当开机判定「缓存比文件新」时也必须补写一次 ——
+           * 那是 toast 里承诺的「已按缓存为准并回写文件」，不做的话 at 永不前进，每次开机会再弹一遍。 */
+          if (App._lastReloadChanged
+              || (App.needSyncAfterBoot && (App.assets || []).length)) App.scheduleFileSync('assets');
           /* v2.5.14：每轮补写批量 20 → 120（游标续跑，下次开机接着上次位置；只写浏览器里已有 blob 的封面，不联网）。
          * 真实库实测 310 条 hasCover 而 covers 目录只有 84 个文件，20/轮要 15 次开机才轮完。 */
         if (!App.localReadOnly) App.syncCoverFiles(120);     // 顺带把只在缓存里的封面补写到磁盘

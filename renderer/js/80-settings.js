@@ -109,7 +109,7 @@ var Settings = {
     var box = el('div', { class: 'settings-pane' });
     box.appendChild(el('div', { class: 'notice' }, [
       el('b', { text: '浏览器安全限制与内置宿主' }),
-      el('p', { text: '浏览器同源策略决定了网页脚本不能直接读取 BOOTH / Gumroad 等外部站点。本工具因此只有两条路：默认「手动粘贴源码」（完全离线、零请求）；需要联网时，全部请求统一由本程序内置的宿主发起——不再使用任何 CORS 代理。' })
+      el('p', { text: '浏览器同源策略决定了网页脚本不能直接读取 BOOTH / Gumroad 等外部站点。本工具因此只有两条路：默认「手动粘贴源码」（完全离线、零请求）；需要联网时，全部请求统一由程序自身的后端发起——不经过任何端口、外部进程或 CORS 代理。' })
     ]));
 
     box.appendChild(el('h3', { text: '抓取方式' }));
@@ -141,32 +141,26 @@ var Settings = {
     var autoCk = el('input', { type: 'checkbox', checked: !!App.settings.autoCookieFetch, onchange: function () {
       App.settings.autoCookieFetch = autoCk.checked; App.saveSettings();
     } });
-    box.appendChild(el('label', { class: 'check check-row' }, [autoCk, el('span', { text: '编辑素材时，如已保存 Cookie 且该素材还没有版本/下载链接，自动获取已购版本、价格（需要内置宿主在线）' })]));
+    box.appendChild(el('label', { class: 'check check-row' }, [autoCk, el('span', { text: '编辑素材时，如已保存 Cookie 且该素材还没有版本/下载链接，自动获取已购版本（需要联网）' })]));
 
     box.appendChild(el('h3', { text: '内置宿主（联网与文件操作唯一通道）' }));
     var hostStatus = el('div', { class: 'local-proxy-status' });
-    /* v4.1.0（Electron 单载体）：宿主由主进程随窗口启动 —— 没有外部进程可启动/停止，
-     * 也就没有「宿主工具文件夹」「后台隐藏运行」这类启动器参数，旧 WebView2 入口已整体移除。 */
+    /* v6.0：后端与窗口同进程，没有可启停的外部服务，也没有端口——
+     * 这里只如实说明「随程序运行」，不再有端口号，也不再有「去重启某个 bat」的指引。 */
     function renderHostStatus() {
       hostStatus.innerHTML = '';
-      var tip = el('div', { class: 'field-hint', text: '正在检测内置宿主（127.0.0.1:8788-8792）…' });
-      hostStatus.appendChild(tip);
       FS.hostEnsure().then(function (ok) {
         hostStatus.innerHTML = '';
         if (ok) {
-          var base = FS.host.base ? FS.host.base() : '';
-          hostStatus.appendChild(el('span', { class: 'chip chip-ok' }, ICONS.label('\u2714 内置宿主在线（' + (base || '127.0.0.1') + '）')));
-          hostStatus.appendChild(el('span', { class: 'field-hint', text: '打开文件夹 / 移动复制 / 联网抓取 / Cookie 已购识别 / AI 翻译 / 网盘全部由主进程的内置宿主执行，随窗口一起启动，不需要单独运行任何程序。' }));
+          hostStatus.appendChild(el('span', { class: 'chip chip-ok' }, ICONS.label('\u2714 内置宿主已就绪（随程序运行）')));
+          hostStatus.appendChild(el('span', { class: 'field-hint', text: '打开文件夹 / 移动复制 / 联网抓取 / Cookie 已购识别 / AI 翻译 / 网盘全部由程序自身的 Rust 后端直接执行，不经过任何端口或外部进程。' }));
           hostStatus.appendChild(el('div', { class: 'btn-row' }, [
             el('button', { class: 'btn btn-sm', onclick: function () { renderHostStatus(); } }, ICONS.label('\u{1F504} 重新检测'))
           ]));
         } else {
-          hostStatus.appendChild(el('span', { class: 'chip' }, ICONS.label('\u26A0 内置宿主离线')));
+          hostStatus.appendChild(el('span', { class: 'chip' }, ICONS.label('\u26A0 内置宿主未就绪')));
           hostStatus.appendChild(el('div', { class: 'field-hint', text: '素材仍可正常浏览，手动粘贴源码也不受影响；但打开文件夹、移动/复制、联网抓取、Cookie 已购识别、AI 翻译、网盘将不可用。' }));
-          hostStatus.appendChild(el('div', { class: 'field-hint', text: '内置宿主由主进程随窗口启动：请关闭程序后重新双击「启动素材库_Electron版.bat」。若反复出现，多半是 8788~8792 端口被其它程序占用。' }));
-          hostStatus.appendChild(el('div', { class: 'btn-row' }, [
-            el('button', { class: 'btn btn-sm', onclick: function () { renderHostStatus(); } }, ICONS.label('\u{1F504} 重新检测'))
-          ]));
+          hostStatus.appendChild(el('div', { class: 'field-hint', text: '宿主随窗口一起启动，正常不会离线。出现这一提示通常是用浏览器直接打开了页面，请改用「启动素材库_Tauri版.bat」或直接双击程序。' }));
         }
       });
     }
@@ -213,7 +207,7 @@ var Settings = {
       el('b', null, ICONS.label('\u26A0 安全设计说明')),
       el('p', { text: '本工具「不存储账号密码」——按设计只接受你手动粘贴的 Cookie 字符串。Cookie 仅保存在你自己浏览器的本机数据库里，不会上传到任何服务器，也不会随备份文件导出。' }),
       el('p', { text: '当前保护级别：' + lv.name + '。' + lv.why }),
-      el('p', { text: 'Cookie 只会在联网抓取时发送给本程序内置的宿主（127.0.0.1 回环地址，由它直接访问 BOOTH），绝不发给任何第三方代理或服务器。请勿在公用电脑上保存 Cookie，使用后建议及时清除。' })
+      el('p', { text: 'Cookie 只会在联网抓取时交给程序自身的后端，由它直接访问 BOOTH / Gumroad，绝不发给任何第三方代理或服务器。请勿在公用电脑上保存 Cookie，使用后建议及时清除。' })
     ]));
 
     var listBox = el('div', { class: 'cred-list' });
@@ -712,7 +706,7 @@ var Settings = {
     function run() {
       if (running) return;
       if (!Net.networkAllowed()) {
-        log('\u2716 当前为「手动粘贴源码」（不联网）。请先在「联网与宿主」中选择「内置宿主联网」，并启动内置宿主。');
+        log('\u2716 当前为「手动粘贴源码」（不联网）。请先在「联网与宿主」中选择「内置宿主联网」——它随程序运行，不需要额外启动任何东西。');
         return;
       }
       running = true; startBtn.disabled = true; ICONS.apply(startBtn, ('\u23F3 补全中 …'));
@@ -1348,7 +1342,7 @@ var Settings = {
 
     var hostStatus = el('div', { class: 'field-hint', text: '正在检测内置宿主 …' });
     FS.hostEnsure().then(function (ok) {
-      ICONS.apply(hostStatus, ok ? '\u2714 内置宿主在线：AI 请求由宿主直连 DeepSeek 官方接口。' : ICONS.label('\u26A0 内置宿主离线：AI 翻译暂不可用，请启动内置宿主。'));
+      ICONS.apply(hostStatus, ok ? '\u2714 内置宿主已就绪：AI 请求由程序后端直连 DeepSeek 官方接口。' : ICONS.label('\u26A0 内置宿主未就绪：AI 翻译暂不可用，请从桌面程序运行。'));
     });
     box.appendChild(hostStatus);
 

@@ -2,16 +2,17 @@
 /* =====================================================================
  * 40-fs.js  —  本地文件系统 / 导入导出 / 整理辅助
  *   浏览器端使用 File System Access API（Chrome / Edge 支持）
- *   本机文件操统一走本地宿主 VRCLibHost（127.0.0.1，见下方 Host）；v2.3.12 起已移除旧的 window.vrcBridge 预留桥接
+ *   本机文件操作统一走 Tauri 的进程内命令（见下方 Host）；v2.3.12 起已移除旧的 window.vrcBridge 预留桥接
  * ===================================================================== */
 
 var FS = (function () {
 
   function supported() { return typeof window.showDirectoryPicker === 'function'; }
   function saveSupported() { return typeof window.showSaveFilePicker === 'function'; }
-  /* ---------------- 本地宿主（VRCLibHost.mjs，127.0.0.1） ---------------- */
-  var HOST_PORTS = [8788, 8789, 8790, 8791, 8792];
-  var hostState = { active: false, base: '', checked: false, probeP: null, lastOk: 0, fails: 0, backoffUntil: 0, warned: false };
+  /* ---------------- 进程内宿主（Tauri 命令） ----------------
+   * v6.0：宿主不再是 127.0.0.1:8788~8792 的 HTTP 服务，而是同一进程里的 Rust 命令。
+   * 端口探测、访问令牌、健康检查、断线横幅都随 HTTP 层一并删除：
+   *   没有端口，就没有「别的本地服务冒充宿主」的可能；没有跨进程调用，也就不会「断开」。 */
 
   /* v6.0（Tauri 载体）：宿主不再是 HTTP 服务，而是进程内的 Rust 命令。
    * 只换传输，不换契约 —— 下面 hostCall 的 api 名与 payload 与 HTTP 版完全一致，
@@ -28,147 +29,43 @@ var FS = (function () {
     try { return (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.Channel) || null; } catch (e) { return null; }
   })();
 
-  /** v2.5.2：宿主断开提示条（带「重试连接」）——只在首次判定断开时弹一次 */
-  function hostDeadBanner() {
-    if (typeof document === 'undefined' || document.getElementById('hostDeadBanner')) return;
-    var bar = el('div', { id: 'hostDeadBanner', class: 'local-banner local-banner-danger' }, [
-      el('span', {}, ICONS.label('⛔ 本地宿主已断开（可能已退出或被重启）：下载 / 写盘 / 导入等操作已暂停重试，恢复后会自动补写。')),
-      el('button', { class: 'btn btn-xs', onclick: function () { FS.retryHost(); } }, '重试连接'),
-      el('button', { class: 'btn btn-xs', onclick: function () { var b = document.getElementById('hostDeadBanner'); if (b) b.remove(); } }, '知道了')
-    ]);
-    (document.body || document.documentElement).appendChild(bar);
-  }
-  function hostRecovered() {
-    var b = typeof document !== 'undefined' ? document.getElementById('hostDeadBanner') : null;
-    if (b) b.remove();
-    if (typeof App !== 'undefined' && App && App.scheduleFileSync) App.scheduleFileSync();   // 无参 = 素材与设置整体补写一次
-    if (typeof Toast !== 'undefined' && Toast.ok) Toast.ok('本地宿主已恢复连接，待写入的改动会自动补写。', 4200);
-  }
+  /* v2.5.3 的「宿主身份 + 最低版本」校验、v2.5.2 的「断开横幅 / 恢复补写」都只对 HTTP 宿主有意义，
+   * Tauri 没有端口可探、没有身份可冒充，一并移除。 */
 
-  /* v2.5.3：宿主身份与最低版本——与 tools/vrclib-host.mjs 的 NAME / VERSION 对应 */
-  var HOST_NAME = 'VRChat改模素材管理库 · 本地宿主（VRCLibHost）';
-  var HOST_MIN_VERSION = '2.3.11';   // 2.3.11 起 /api/readText 上限 64MB（2.8MB 的 assets.json 才能读进来）
-  function hostVersionOk(v) {
-    var a = String(v || '0').split('.').map(function (x) { return parseInt(x, 10) || 0; });
-    var b = HOST_MIN_VERSION.split('.').map(function (x) { return parseInt(x, 10) || 0; });
-    for (var i = 0; i < 3; i++) { if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0); }
-    return true;
+  /** 宿主就绪判定：进程内命令，只要 __TAURI__ 在就永远在线，没有「探测」这一步。
+   *  保留这个函数是为了不动机场一样的调用点（hostEnsure / hostEnsureRetry）。 */
+  function hostProbe() {
+    return Promise.resolve(!!TAURI_INVOKE);
   }
-  /* v4.1.0（Electron 单载体）：旧 WebView2 壳与其宿主对象桥（window.chrome.webview.vrcHost）已随桌面版一并移除。
-   * 现在只有一种载体 —— Electron；它的内置宿主由主进程起 HTTP 服务，走下面统一的分支。 */
-  function hostProbe(force) {
-    /* Tauri 载体：宿主就在同一个进程里，没有端口可探，永远在线 */
-    if (TAURI_INVOKE) {
-      hostState.active = true;
-      hostState.checked = true;
-      hostState.base = '';
-      hostState.lastOk = Date.now();
-      return Promise.resolve(true);
+  /** 带重试的宿主探测——Tauri 下无需重试，签名保留（50-app.js 启动时会调用） */
+  function hostEnsureRetry() {
+    return Promise.resolve(!!TAURI_INVOKE);
+  }
+  function hostCall(api, payload) {
+    /* 直接进进程内命令；返回值语义与旧 HTTP 版逐字段一致（ok=false 抛错、cancelled 原样返回） */
+    if (!TAURI_INVOKE) {
+      return Promise.reject(new Error('当前载体不支持文件操作：请从桌面程序运行，不要直接用浏览器打开页面'));
     }
-    // v2.5.2：连续探测失败后进入退避窗口——以前每个操作都会重新探测 5 个端口（8788~8792），
-    // 宿主一旦退出就是「反复重发」；现在退避期内直接判定离线，只有「重试连接」才强制探测。
-    if (!force && hostState.backoffUntil && Date.now() < hostState.backoffUntil) return Promise.resolve(false);
-    // 已确认在线时短缓存：避免每次打开文件都重新做健康检查
-    if (hostState.active && Date.now() - hostState.lastOk < 4000) return Promise.resolve(true);
-    if (hostState.probeP) return hostState.probeP;
-    hostState.probeP = Promise.all(HOST_PORTS.map(function (p) {
-      var ctrl = new AbortController();
-      var to = setTimeout(function () { ctrl.abort(); }, 450);
-      return fetch('http://127.0.0.1:' + p + '/api/health', { signal: ctrl.signal })
-        .then(function (r) { clearTimeout(to); return r.ok ? r.json() : null; })
-        .catch(function () { clearTimeout(to); return null; });
-    })).then(function (results) {
-      var found = null;
-      for (var i = 0; i < results.length; i++) {
-        var j = results[i];
-        /* v2.5.3：不只看 {ok:true} —— 必须确认是**本宿主**且版本够新。
-         * 否则 8788 上任何一个返回 {ok:true} 的本地服务都会被当成宿主，后续所有文件操作打错端口；
-         * 旧宿主缺少 /api/delete 等新接口，也只会报「unknown api」而无任何提示。 */
-        if (j && j.ok && j.name === HOST_NAME && hostVersionOk(j.version)) { found = { port: HOST_PORTS[i], info: j }; break; }
-      }
-      if (found) {
-        var wasDead = hostState.warned === true;
-        hostState.active = true; hostState.base = 'http://127.0.0.1:' + found.port;
-        hostState.checked = true; hostState.lastOk = Date.now();
-        hostState.fails = 0; hostState.backoffUntil = 0; hostState.warned = false;
-        if (wasDead) hostRecovered();
-      } else {
-        hostState.active = false; hostState.base = ''; hostState.checked = true;
-        hostState.fails++;
-        if (hostState.fails >= 2) {
-          var wait = Math.min(60000, 5000 * Math.pow(2, Math.min(4, hostState.fails - 2)));   // 5s → 10s → 20s → 40s → 60s
-          hostState.backoffUntil = Date.now() + wait;
-          if (!hostState.warned) { hostState.warned = true; hostDeadBanner(); }
-        }
-      }
-      hostState.probeP = null;
-      return !!found;
-    });
-    return hostState.probeP;
-  }
-  /** 带重试的宿主探测：宿主 exe 首次启动可能被安全软件扫描，等它 1~3 秒 */
-  function hostEnsureRetry(attempts) {
-    attempts = attempts == null ? 3 : attempts;
-    function step(n) {
-      return hostProbe().then(function (ok) {
-        if (ok) return true;
-        if (n <= 0) return false;
-        return new Promise(function (res) { setTimeout(function () { res(step(n - 1)); }, 1200); });
-      });
-    }
-    return step(attempts);
-  }
-  /** v4.3.2：所有宿主请求的公共头。
-   *  X-VRCLib-Token 是主进程每次启动随机生成的令牌（经 preload 交过来），
-   *  宿主要求 /api/* 带上它，网页拿不到 —— 这样「任意网站调本地端口读写整块磁盘」就被堵住了。 */
-  function hostHeaders() {
-    var h = { 'Content-Type': 'text/plain;charset=UTF-8' };
-    try {
-      if (window.vrcElectron && window.vrcElectron.token) h['X-VRCLib-Token'] = String(window.vrcElectron.token);
-    } catch (e) {}
-    return h;
-  }
-  function hostCall(api, payload, method) {
-    /* Tauri：直接进进程内命令；返回值语义与 HTTP 版逐字段一致（ok=false 抛错、cancelled 原样返回） */
-    if (TAURI_INVOKE) {
-      return TAURI_INVOKE('host_call', { api: api, payload: payload === undefined ? {} : (payload || {}) })
-        .catch(function (e) { throw new Error(String((e && e.message) || e || '宿主调用失败')); })
-        .then(function (j) {
-          if (j && j.ok === false && j.cancelled === true) return j;
-          if (!j || j.ok === false) throw new Error((j && j.error) || ('宿主请求失败 ' + api));
-          return j;
-        });
-    }
-    return hostProbe().then(function (ok) {
-      if (!ok) throw new Error('内置宿主未就绪');
-      // text/plain 是 CORS 简单请求：file:// 页面访问 127.0.0.1 时不再触发
-      // application/json 会额外走一次 CORS preflight，实测带来约 6 秒延迟。
-      var opts = { method: method || 'POST', headers: hostHeaders() };
-      if (payload !== undefined) opts.body = JSON.stringify(payload || {});
-      return fetch(hostState.base + api, opts).then(function (r) {
-        return r.json().catch(function () { return { ok: false, error: 'HTTP ' + r.status }; });
-      }).then(function (j) {
-        // v2.5.3：用户取消（原生对话框点取消）不是错误——原样返回，交给调用方的 !r.ok 守卫处理。
-        // 旧实现把它抛成异常，取消一次就在控制台留一个未处理的 Promise 拒绝。
+    return TAURI_INVOKE('host_call', { api: api, payload: payload === undefined ? {} : (payload || {}) })
+      .catch(function (e) { throw new Error(String((e && e.message) || e || '宿主调用失败')); })
+      .then(function (j) {
         if (j && j.ok === false && j.cancelled === true) return j;
         if (!j || j.ok === false) throw new Error((j && j.error) || ('宿主请求失败 ' + api));
         return j;
       });
-    });
   }
   var Host = {
-    available: function () { return hostState.active; },
+    available: function () { return !!TAURI_INVOKE; },
     /** 当前是否跑在原生桌面壳里（Electron / Tauri）。
      *  页面据此切换文案与布局：网页版讲「启动宿主」，桌面版讲「内置宿主」。 */
     desk: function () {
       var s = window.vrcElectron && window.vrcElectron.shell;
       return s === 'electron' || s === 'tauri';
     },
-    checked: function () { return hostState.checked; },
-    ensure: function (force) { return hostProbe(!!force); },
-    /** v2.5.2：用户点「重试连接」——强制探测一次，成功后自动补写待写入的数据 */
-    retryHost: function () { return hostProbe(true).then(function (ok) { if (!ok) { if (typeof Toast !== 'undefined') Toast.warn('还是连不上内置宿主：请重启「启动素材库_Electron版.bat」。', 5600); } return ok; }); },
-    base: function () { return hostState.base; },
+    checked: function () { return true; },
+    ensure: function () { return hostProbe(); },
+    retryHost: function () { return hostProbe(); },
+    base: function () { return ''; },
     pickDir: function () { return hostCall('/api/pickDir').then(function (j) { return j.path || ''; }); },
     pickFiles: function () { return hostCall('/api/pickFiles').then(function (j) { return j.paths || []; }); },
     /* v4.2.0 素材包：另存为 / 选单个文件 / 打包相关调用。
@@ -268,47 +165,9 @@ var FS = (function () {
           });
         });
       }
-      return hostProbe().then(function (ok) {
-        if (!ok) throw new Error('内置宿主未就绪');
-        return fetch(hostState.base + '/api/stream', {
-          method: 'POST',
-          headers: hostHeaders(),   // v4.3.2：同样要带访问令牌
-          body: JSON.stringify(payload)
-        });
-      }).then(function (r) {
-        if (!r.ok || !r.body) throw new Error('宿主流式接口不可用（HTTP ' + r.status + '）');
-        var out = { status: 0, ok: false, text: '', error: '' };
-        var reader = r.body.getReader();
-        var dec = new TextDecoder('utf-8');
-        var buf = '';
-        function handleFrame(frame) {
-          frame.split('\n').forEach(function (line) {
-            if (line.indexOf('data: ') !== 0) return;
-            var evt = null;
-            try { evt = JSON.parse(line.slice(6)); } catch (e) { return; }
-            if (!evt) return;
-            if (evt.type === 'head') { out.status = evt.status || 0; out.ok = !!evt.ok; }
-            else if (evt.type === 'chunk') {
-              out.text += evt.text || '';
-              if (opts.onChunk) { try { opts.onChunk(evt.text || '', out); } catch (e) {} }
-            } else if (evt.type === 'error') { out.error = String(evt.error || '流式请求失败'); }
-          });
-        }
-        function pump() {
-          return reader.read().then(function (step) {
-            if (step.done) {
-              if (buf) handleFrame(buf);
-              if (out.error) throw new Error(out.error);
-              return out;
-            }
-            buf += dec.decode(step.value, { stream: true });
-            var idx;
-            while ((idx = buf.indexOf('\n\n')) >= 0) { handleFrame(buf.slice(0, idx)); buf = buf.slice(idx + 2); }
-            return pump();
-          });
-        }
-        return pump();
-      });
+      /* 没有 Tauri Channel 就没有流式通道。这里宁可明确报错，也不退回「缓冲式」请求：
+       * 那种退让会让 AI 翻译在长响应下被截断，看起来像「模型答到一半停了」。 */
+      return Promise.reject(new Error('当前载体不支持流式请求，请从桌面程序运行'));
     }
   };
 
@@ -982,7 +841,7 @@ var FS = (function () {
     ensurePermission: ensurePermission, scanDirectory: scanDirectory,
     createCategoryFolders: createCategoryFolders, openPath: openPath,
     movePath: movePath, copyPath: copyPath, mkdirPath: mkdirPath, writeFileToPath: writeFileToPath, downloadToPath: downloadToPath,
-    host: Host, hostAvailable: function () { return hostState.active; }, hostEnsure: function () { return hostProbe(); },
+    host: Host, hostAvailable: function () { return !!TAURI_INVOKE; }, hostEnsure: function () { return hostProbe(); },
     davCall: davCall,
     hostEnsureRetry: hostEnsureRetry,
     renameAssetFolder: renameAssetFolder,

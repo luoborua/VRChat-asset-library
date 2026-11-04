@@ -8,9 +8,9 @@
 function mbText(n) { return (Number(n || 0) / 1048576).toFixed(2); }
 function fileWriteFailShort(kind) {
   if (kind === 'db-error') return '素材数据库写入失败';
-  if (kind === 'too-large') return '数据体积超过宿主单次写入上限';
-  if (kind === 'host-error') return '宿主拒绝写入（目录被占用 / 无写权限）';
-  return '内置宿主未启动或已断开';
+  if (kind === 'too-large') return '数据体积超过单次写入上限';
+  if (kind === 'host-error') return '拒绝写入（目录被占用 / 无写权限）';
+  return '写入失败（原因未知）';
 }
 function fileWriteFailText(kind, info) {
   var dir = App.localDir || '(未知目录)';
@@ -33,8 +33,8 @@ function fileWriteFailText(kind, info) {
       + '（常见原因：目录被占用 / 没有写权限 / 路径不存在）。请关闭占用该目录的程序、检查权限，'
       + '或到「设置 → 本地库与整理」改用别的库目录。改动仍在浏览器缓存里。';
   }
-  return '未能写入 ' + dir + '：内置宿主未就绪（不是目录不可写）。请重启程序，'
-    + '再点页面顶部提示条的「重试连接」即可补写落盘；改动仍在本地缓存里。';
+  return '未能写入 ' + dir + '：程序后端未就绪（不是目录不可写）。请重启程序，'
+    + '再按 Ctrl+S 或改一次任意素材即可补写落盘；改动仍在本地缓存里。';
 }
 
 var App = {

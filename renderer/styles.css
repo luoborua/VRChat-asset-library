@@ -783,7 +783,7 @@ body.has-pager #grid { padding-bottom: 76px; }
 .toast-warn { border-left-color: var(--warn); }
 .toast-info { border-left-color: var(--primary); }
 .toast-ico { flex: 0 0 auto; }
-.toast-msg { line-height: 1.5; }
+.toast-msg { line-height: 1.5; white-space: pre-line; word-break: break-word; }
 
 /* ---------------- 响应式 ---------------- */
 @media (max-width: 1000px) {

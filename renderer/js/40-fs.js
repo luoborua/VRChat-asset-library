@@ -729,6 +729,48 @@ var FS = (function () {
 
   /* ---------------- 导出 ---------------- */
 
+  /** Blob → 原始字节（不经 base64） */
+  function blobToU8(blob) {
+    if (blob.arrayBuffer) return blob.arrayBuffer().then(function (ab) { return new Uint8Array(ab); });
+    return new Promise(function (res, rej) {
+      var fr = new FileReader();
+      fr.onload = function () { res(new Uint8Array(fr.result)); };
+      fr.onerror = function () { rej(fr.error); };
+      fr.readAsArrayBuffer(blob);
+    });
+  }
+
+  /** 存到**用户自己选**的位置：原生「另存为」优先，没有原生对话框时退回浏览器下载。
+   *  v6.2：以前一律走 <a download>，WebView2 会把它静默丢进系统「下载」文件夹 ——
+   *  不弹窗、不留路径提示，用户经常找不到文件、反复导出堆一堆同名副本。
+   *  返回 {status, path}：saved 已写盘 / cancelled 用户取消 / download 走了浏览器下载 / failed 写盘失败。
+   *  取消是正常操作，这里静默返回，不弹错误。 */
+  function saveToUserPath(blob, defaultName, opts) {
+    opts = opts || {};
+    if (!TAURI_INVOKE) {
+      downloadBlob(blob, defaultName);
+      return Promise.resolve({ status: 'download', path: '' });
+    }
+    var def = defaultName;
+    try { def = joinWinPath(App.libraryRoot(), [defaultName]); } catch (e) {}
+    return Host.saveFile({
+      title: opts.title || '保存文件',
+      defaultPath: def,
+      filters: opts.filters || []
+    }).then(function (r) {
+      if (!r || r.ok === false) return { status: 'cancelled', path: '' };   // 取消 / 关窗
+      var path = String(r.path || '');
+      if (!path) return { status: 'cancelled', path: '' };
+      if (opts.ext && !new RegExp('\\.' + opts.ext + '$', 'i').test(path)) path += '.' + opts.ext;
+      return blobToU8(blob).then(function (bytes) {
+        return Host.writeBytes(path, bytes).then(function () { return { status: 'saved', path: path }; });
+      });
+    }).catch(function (e) {
+      Toast.err('保存失败：' + ((e && e.message) || e || '未知错误'), 5600);
+      return { status: 'failed', path: '' };
+    });
+  }
+
   /** 导出完整备份 JSON（可选包含封面） */
   function exportJSON(withCovers) {
     return Store.allAssets().then(function (assets) {
@@ -755,9 +797,17 @@ var FS = (function () {
     return exportJSON(withCovers).then(function (payload) {
       var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
       var name = 'VRChat素材库备份_' + fmtDate(nowISO()).replace(/-/g, '') + (withCovers ? '_含封面' : '') + '.json';
-      downloadBlob(blob, name);
-      Toast.ok('已导出 ' + payload.assets.length + ' 条素材（' + fmtSize(blob.size) + '）');
-      return payload;
+      return saveToUserPath(blob, name, {
+        title: '导出完整备份',
+        ext: 'json',
+        filters: [{ name: 'JSON 备份', extensions: ['json'] }]
+      }).then(function (r) {
+        if (r.status === 'cancelled') return payload;        // 用户取消：静默，什么都不提示
+        var base = '已导出 ' + payload.assets.length + ' 条素材（' + fmtSize(blob.size) + '）';
+        if (r.status === 'saved') Toast.ok(base + '\n保存到：' + r.path, 7000);
+        else if (r.status === 'download') Toast.ok(base);     // 无原生对话框，退回浏览器下载
+        return payload;
+      });
     });
   }
 
@@ -779,8 +829,18 @@ var FS = (function () {
       ].map(csvCell).join(','));
     });
     var blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
-    downloadBlob(blob, 'VRChat素材清单_' + fmtDate(nowISO()).replace(/-/g, '') + '.csv');
-    Toast.ok('已导出 CSV（' + assets.length + ' 条）');
+    var name = 'VRChat素材清单_' + fmtDate(nowISO()).replace(/-/g, '') + '.csv';
+    return saveToUserPath(blob, name, {
+      title: '导出 CSV 清单',
+      ext: 'csv',
+      filters: [{ name: 'CSV 表格', extensions: ['csv'] }]
+    }).then(function (r) {
+      if (r.status === 'cancelled') return '';
+      var base = '已导出 CSV（' + assets.length + ' 条）';
+      if (r.status === 'saved') Toast.ok(base + '\n保存到：' + r.path, 7000);
+      else if (r.status === 'download') Toast.ok(base);
+      return r.path;
+    });
   }
 
   /** 生成「建议目录结构」文本 + 一键创建脚本 */

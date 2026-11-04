@@ -5,12 +5,6 @@ vrclib-data/
 本地素材库/
 _来自/
 
-# ---------------- Electron 依赖与产物 ----------------
-electron/node_modules/
-electron/dist/
-electron/out/
-electron/*.log
-
 # ---------------- 本地运行时（日志、备份、旧版归档） ----------------
 runtime/
 
@@ -27,6 +21,14 @@ desktop.ini
 *.swp
 .idea/
 .vscode/
+
+# ---------------- Rust / Tauri 产物 ----------------
+src-tauri/target/
+src-tauri/gen/
+# 构建脚本会把成品 exe 与 WebView2 加载器复制到根目录；二进制不入库
+VRChat改模素材管理库.exe
+vrclib.exe
+WebView2Loader.dll
 
 # ---------------- 日志 ----------------
 *.log

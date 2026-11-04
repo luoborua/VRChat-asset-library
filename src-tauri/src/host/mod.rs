@@ -5,6 +5,7 @@
  *   保留同一张路由表，页面侧只换传输（fetch → invoke），业务代码一个字都不用动，
  *   行为与 Electron 版严格一致。
  */
+pub mod db;
 pub mod download_api;
 pub mod fs_api;
 pub mod net_api;
@@ -19,13 +20,22 @@ use tauri::{AppHandle, Manager, State};
 pub struct AppState {
     pub dl: download_api::DlState,
     pub pack: pack_api::PackState,
+    pub db: db::DbState,
 }
 
-impl Default for AppState {
-    fn default() -> Self {
+impl AppState {
+    pub fn new(data_dir: &std::path::Path) -> Self {
+        let db = match db::DbState::open(data_dir) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("[db] 打开失败：{e}");
+                db::DbState::default()
+            }
+        };
         Self {
             dl: download_api::DlState::default(),
             pack: pack_api::PackState::default(),
+            db,
         }
     }
 }
@@ -145,6 +155,15 @@ pub async fn host_call(
         "/api/pack/inspect" => pack_api::pack_inspect(&p),
         "/api/pack/extract" => pack_api::pack_extract(&state.pack, &p),
         "/api/pack/progress" => Ok(pack_api::progress_json(&state.pack)),
+
+        /* ---- 素材主库（SQLite）---- */
+        "/api/db/load" => state.db.load(),
+        "/api/db/save" => {
+            let list = p.get("assets").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+            let at = p.get("at").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            state.db.save(&list, &at)
+        }
+        "/api/db/info" => Ok(state.db.info()),
 
         other => return Ok(fail(format!("unknown api: {other}"))),
     };

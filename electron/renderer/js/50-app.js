@@ -7,12 +7,18 @@
  *  旧文案把「体积超宿主上限」也说成「宿主离线或目录不可写」，用户会一直等一个永远不会成功的重试。 */
 function mbText(n) { return (Number(n || 0) / 1048576).toFixed(2); }
 function fileWriteFailShort(kind) {
+  if (kind === 'db-error') return '素材数据库写入失败';
   if (kind === 'too-large') return '数据体积超过宿主单次写入上限';
   if (kind === 'host-error') return '宿主拒绝写入（目录被占用 / 无写权限）';
   return '内置宿主未启动或已断开';
 }
 function fileWriteFailText(kind, info) {
   var dir = App.localDir || '(未知目录)';
+  if (kind === 'db-error') {
+    return '素材数据库写入失败（' + dir + '）：' + String(info.error || '未知原因')
+      + '。改动仍在浏览器缓存里；请确认数据目录可写（不要放在只读位置 / 不要被其它程序占用），'
+      + '修好后按 Ctrl+S 或再改一次任意素材即可补写。';
+  }
   if (kind === 'too-large') {
     /* 悬崖值由上限现算（不写死），宿主上限变了这里自动跟着变 */
     var cliffRaw = Math.floor(((Number(info.limitBytes) || 0) - 256) * 3 / 4);

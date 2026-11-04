@@ -657,11 +657,32 @@ var Store = (function () {
     });
     return s;
   }
-  /** 加载文件主库 → {dir, assets, settings, ok} */
+  /** 加载文件主库 → {dir, assets, settings, ok}
+   *  v6.0：Tauri 载体下素材主库改为 SQLite（vrclib-data\library.db），
+   *        settings.json 仍是文件。返回结构与读 assets.json 时完全一致，
+   *        上层 App.bootLocalData 的时间戳比较、只读保护逻辑全部照旧。 */
+  function dbMode() {
+    try { return !!(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke); } catch (e) { return false; }
+  }
   function loadAll(settings) {
     var dir = dataDir(settings);
     if (!dir) return Promise.resolve({ dir: '', ok: false, assets: null, settings: null, readErrors: [] });
     var errs = [];
+    if (dbMode()) {
+      return Promise.all([
+        FS.host.db('load'),
+        readJsonFile(joinWinPath(dir, ['settings.json']), errs)
+      ]).then(function (r) {
+        var db = r[0] || {};
+        var count = Number(db.count) || 0;
+        /* count=0 → 当作首次运行（assets=null），让启动链保持原来的「首次运行」分支 */
+        var assetsFile = count > 0 ? { v: 1, at: db.at || '', assets: db.assets || [] } : null;
+        return { dir: dir, assets: assetsFile, settings: r[1], ok: !!(assetsFile || r[1]), readErrors: errs };
+      }).catch(function (e) {
+        errs.push('素材库数据库：' + ((e && e.message) || e));
+        return { dir: dir, assets: null, settings: null, ok: false, readErrors: errs };
+      });
+    }
     return Promise.all([
       readJsonFile(joinWinPath(dir, ['assets.json']), errs),
       readJsonFile(joinWinPath(dir, ['settings.json']), errs)
@@ -670,6 +691,14 @@ var Store = (function () {
     });
   }
   function saveAssets(list, settings) {
+    if (dbMode()) {
+      return FS.host.db('save', { assets: list || [], at: nowISO() })
+        .then(function () { lastWriteFail = null; return true; })
+        .catch(function (e) {
+          noteWriteFail('db-error', { error: String((e && e.message) || e) });
+          return false;
+        });
+    }
     return writeTextFile(jsonPath('assets.json', settings), JSON.stringify({ v: 1, at: nowISO(), assets: list || [] }));
   }
   function saveSettings(settings) {

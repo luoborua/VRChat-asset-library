@@ -176,6 +176,8 @@ var FS = (function () {
     saveFile: function (p) { return hostCall('/api/saveFile', p || {}); },
     pickOneFile: function (p) { return hostCall('/api/pickOneFile', p || {}); },
     pack: function (api, payload) { return hostCall('/api/pack/' + api, payload || {}); },
+    /** v6.0：素材主库（SQLite）—— load / save / info */
+    db: function (op, payload) { return hostCall('/api/db/' + op, payload || {}); },
     scan: function (p, maxDepth) { return hostCall('/api/scan', { path: p, maxDepth: maxDepth || 0 }).then(function (j) { return j.entries || []; }); },
     move: function (src, dst) { return hostCall('/api/move', { src: src, dst: dst }); },
     copy: function (src, dst) { return hostCall('/api/copy', { src: src, dst: dst }); },

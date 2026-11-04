@@ -205,7 +205,6 @@ fn main() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(host::AppState::default())
         .invoke_handler(tauri::generate_handler![
             host::host_call,
             host::host_stream,
@@ -214,6 +213,9 @@ fn main() {
             open_external
         ])
         .setup(|app| {
+            /* 素材主库在窗口之前就绪：首次启动要把老的 assets.json 迁进来 */
+            app.manage(host::AppState::new(&host::data_dir()));
+
             let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title(TITLE)
                 .inner_size(1380.0, 920.0)

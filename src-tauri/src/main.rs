@@ -208,6 +208,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             host::host_call,
             host::host_stream,
+            host::host_read_bytes,
+            host::host_write_bytes,
             host::app_paths,
             host::win_action,
             open_external

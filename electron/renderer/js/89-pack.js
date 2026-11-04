@@ -91,6 +91,22 @@ var Packer = (function () {
   /** 封面转 base64（封面只存在 IndexedDB 的 blob 里，没有稳定磁盘路径，直接读出来塞进包） */
   function coverData(asset) {
     if (!asset || !asset.hasCover) return Promise.resolve(null);
+    /* v6.1：磁盘上已有 covers\<id>.<ext> 就直接交路径，让 Rust 侧流式写进包。
+     * 只有「封面仅存在于 IndexedDB」的老数据才退回 base64。 */
+    var preferPath = !!(typeof FS !== 'undefined' && FS.host && FS.host.bytesSupported && FS.host.bytesSupported());
+    if (preferPath && App.diskCoverFile) {
+      return App.diskCoverFile(asset).then(function (f) {
+        if (f && f.path) {
+          var e = String(f.name || f.path).toLowerCase().match(/\.([a-z0-9]+)$/);
+          return { path: f.path, ext: '.' + (e ? e[1].replace('jpeg', 'jpg') : 'jpg') };
+        }
+        return coverBase64(asset);
+      }).catch(function () { return coverBase64(asset); });
+    }
+    return coverBase64(asset);
+  }
+
+  function coverBase64(asset) {
     return App.coverURLFor(asset).then(function (url) {
       if (!url) return null;
       return fetch(url).then(function (r) { return r.blob(); }).then(function (blob) {
@@ -251,7 +267,10 @@ var Packer = (function () {
                 note: a.note,
                 purchasePrice: a.purchasePrice, purchaseCurrency: a.purchaseCurrency,
                 files: r[0],
-                coverBase64: r[1] ? r[1].b64 : '',
+                /* v6.1：Tauri 下封面走磁盘路径（宿主直接流式写进包），不再转 base64；
+                 * Electron 仍走 base64 分支，两边产物完全一致。 */
+                coverPath: r[1] && r[1].path ? r[1].path : '',
+                coverBase64: r[1] && r[1].b64 ? r[1].b64 : '',
                 coverExt: r[1] ? r[1].ext : ''
               });
             });

@@ -1420,11 +1420,14 @@ var App = {
     if (live.hasCover || live.coverURL || live.coverCleared) return Promise.resolve(null);   // 用户主动清除过就不再自动认领
     return App.diskCoverFile(live).then(function (f) {
       if (!f) return null;
-      return FS.host.readFileBase64(f.path).then(function (j) {
-        var b64 = (j && (j.base64 || j.data)) || '';
-        if (!b64) return null;
-        return fetch('data:' + f.mime + ';base64,' + b64).then(function (r) { return r.blob(); });
-      }).then(function (blob) {
+      var read = (FS.host.bytesSupported && FS.host.bytesSupported())
+        ? FS.host.readBytes(f.path).then(function (bytes) { return new Blob([bytes], { type: f.mime }); })
+        : FS.host.readFileBase64(f.path).then(function (j) {
+            var b64 = (j && (j.dataBase64 || j.base64 || j.data)) || '';
+            if (!b64) return null;
+            return fetch('data:' + f.mime + ';base64,' + b64).then(function (r) { return r.blob(); });
+          });
+      return read.then(function (blob) {
         if (!blob) return null;
         return Store.putCover(live.id, blob).then(function () {
           live.hasCover = true;
@@ -1672,13 +1675,15 @@ var App = {
       return FS.host.download(u, p, {}, '')
         .then(function (j) {
           if (!j || !(j.size > 64)) return null;      // 宿主会拒绝把登录页 / 错误页存成文件
-          return FS.host.readFileBase64(p);
-        })
-        .then(function (j) {
-          var b64 = (j && (j.base64 || j.data)) || '';
-          if (!b64) return null;
-          // media type 只是给 toPngBlob 的提示（浏览器按内容嗅探，随后一律重编码成 PNG）
-          return fetch('data:image/png;base64,' + b64).then(function (r) { return r.blob(); });
+          if (FS.host.bytesSupported && FS.host.bytesSupported()) {
+            return FS.host.readBytes(p).then(function (bytes) { return new Blob([bytes]); });
+          }
+          return FS.host.readFileBase64(p).then(function (r) {
+            var b64 = (r && (r.dataBase64 || r.base64 || r.data)) || '';
+            if (!b64) return null;
+            // media type 只是给 toPngBlob 的提示（浏览器按内容嗅探，随后一律重编码成 PNG）
+            return fetch('data:image/png;base64,' + b64).then(function (x) { return x.blob(); });
+          });
         })
         .catch(function () { return null; });
     }).then(function (b) {

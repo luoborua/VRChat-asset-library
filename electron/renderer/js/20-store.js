@@ -426,6 +426,15 @@ var Store = (function () {
     var dir = galleryDir(itemId, settings);
     if (!dir || !blob || !fileName) return Promise.resolve('');
     var path = joinWinPath(dir, [safeSeg(fileName)]);
+    if (bytesMode()) {
+      return blobBytes(blob).then(function (bytes) {
+        if (!bytes) return '';
+        return hostReady().then(function (ok) {
+          if (!ok) return '';
+          return FS.host.writeBytes(path, bytes).then(function () { return path; }).catch(function () { return ''; });
+        });
+      }).catch(function () { return ''; });
+    }
     return b64OfBlob(blob).then(function (b64) {
       if (!b64) return '';
       return hostReady().then(function (ok) {
@@ -453,8 +462,15 @@ var Store = (function () {
     var path = joinWinPath(dir, [safeSeg(fileName)]);
     return hostReady().then(function (ok) {
       if (!ok) return null;
+      if (bytesMode()) {
+        return FS.host.readBytes(path).then(function (bytes) {
+          var ext = String(fileName).split('.').pop().toLowerCase();
+          var mime = ext === 'png' ? 'image/png' : (ext === 'webp' ? 'image/webp' : (ext === 'gif' ? 'image/gif' : 'image/jpeg'));
+          return new Blob([bytes], { type: mime });
+        }).catch(function () { return null; });
+      }
       return FS.host.readFileBase64(path).then(function (j) {
-        var b64 = (j && j.base64) || '';
+        var b64 = (j && (j.dataBase64 || j.base64)) || '';
         if (!b64) return null;
         var ext = String(fileName).split('.').pop().toLowerCase();
         var mime = ext === 'png' ? 'image/png' : (ext === 'webp' ? 'image/webp' : (ext === 'gif' ? 'image/gif' : 'image/jpeg'));
@@ -633,6 +649,16 @@ var Store = (function () {
   function writeTextFile(path, text) {
     if (!path) return Promise.resolve(false);
     var bytes = new TextEncoder().encode(String(text));
+    /* v6.1：Tauri 下直接写字节。没有 base64 膨胀 ⇒ 也就没有「原始 JSON 超过约 48MB 必写不进去」
+     * 这个悬崖，下面的体积预检只是给 Electron/浏览器兜底。 */
+    if (bytesMode()) {
+      return hostReady().then(function (ok) {
+        if (!ok) { noteWriteFail('host-offline', { path: path }); return false; }
+        return FS.host.writeBytes(path, bytes)
+          .then(function () { lastWriteFail = null; return true; })
+          .catch(function (e) { noteWriteFail('host-error', { path: path, error: String((e && e.message) || e) }); return false; });
+      }).catch(function (e) { noteWriteFail('host-offline', { path: path, error: String((e && e.message) || e) }); return false; });
+    }
     var bodyBytes = 4 * Math.ceil(bytes.length / 3) + BODY_WRAP;      // base64 后 + JSON 包装
     if (bodyBytes > HOST_BODY_LIMIT) {
       noteWriteFail('too-large', { path: path, rawBytes: bytes.length, bodyBytes: bodyBytes, limitBytes: HOST_BODY_LIMIT });
@@ -663,6 +689,17 @@ var Store = (function () {
    *        上层 App.bootLocalData 的时间戳比较、只读保护逻辑全部照旧。 */
   function dbMode() {
     try { return !!(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke); } catch (e) { return false; }
+  }
+  /** v6.1：能不能直接读写原始字节（Tauri 可以；Electron / 浏览器退回 base64 通道） */
+  function bytesMode() {
+    try { return !!(typeof FS !== 'undefined' && FS.host && FS.host.bytesSupported && FS.host.bytesSupported()); } catch (e) { return false; }
+  }
+  function blobBytes(blob) {
+    if (!blob) return Promise.resolve(null);
+    if (blob.arrayBuffer) {
+      return blob.arrayBuffer().then(function (ab) { return new Uint8Array(ab); });
+    }
+    return Promise.resolve(null);
   }
   function loadAll(settings) {
     var dir = dataDir(settings);
@@ -710,6 +747,18 @@ var Store = (function () {
     if (!dir || !blob || !id) return Promise.resolve(false);
     var mime = String(blob.type || '');
     var ext = /png/i.test(mime) ? 'png' : (/webp/i.test(mime) ? 'webp' : (/gif/i.test(mime) ? 'gif' : 'jpg'));
+    if (bytesMode()) {
+      return blobBytes(blob).then(function (bytes) {
+        if (!bytes) return false;
+        return hostReady().then(function (ok) {
+          if (!ok) return false;
+          var covers = joinWinPath(dir, ['covers']);
+          return FS.host.writeBytes(joinWinPath(covers, [id + '.' + ext]), bytes)
+            .then(function () { return true; })
+            .catch(function () { return false; });
+        });
+      }).catch(function () { return false; });
+    }
     return b64OfBlob(blob).then(function (b64) {
       if (!b64) return false;
       return hostReady().then(function (ok) {
@@ -761,11 +810,17 @@ var Store = (function () {
           var p = joinWinPath(dir, ['covers', id + '.' + e]);
           return FS.host.exists(p).then(function (kind) {
             if (kind !== 'file') return null;
+            var mime = e === 'png' ? 'image/png' : (e === 'webp' ? 'image/webp' : (e === 'gif' ? 'image/gif' : 'image/jpeg'));
+            if (bytesMode()) {
+              return FS.host.readBytes(p).then(function (bytes) {
+                return new Blob([bytes], { type: mime });
+              }).catch(function () { return null; });
+            }
             return FS.host.readFileBase64(p).then(function (j) {
-              if (!j || !j.base64) return null;
-              var bin = atob(j.base64), arr = new Uint8Array(bin.length);
+              var b64 = (j && (j.dataBase64 || j.base64)) || '';
+              if (!b64) return null;
+              var bin = atob(b64), arr = new Uint8Array(bin.length);
               for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-              var mime = e === 'png' ? 'image/png' : (e === 'webp' ? 'image/webp' : (e === 'gif' ? 'image/gif' : 'image/jpeg'));
               return new Blob([arr], { type: mime });
             });
           }).catch(function () { return null; });

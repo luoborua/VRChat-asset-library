@@ -83,6 +83,41 @@ pub fn app_paths() -> Value {
     })
 }
 
+/* ---------------- 原始字节通道（v6.1：彻底不再过 base64） ----------------
+ * 读：返回 tauri::ipc::Response，页面直接拿到 ArrayBuffer；
+ * 写：请求体就是裸字节（invoke 传 Uint8Array），路径放在 x-vrc-path 头里（percent 编码，保证 ASCII）。
+ * 相比原来的 base64：不膨胀 33%、不产生中间字符串、没有 64MB 请求体上限。 */
+
+#[tauri::command]
+pub async fn host_read_bytes(path: String) -> Result<tauri::ipc::Response, String> {
+    let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
+pub fn host_write_bytes(request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let raw = request
+        .headers()
+        .get("x-vrc-path")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if raw.is_empty() {
+        return Err("缺少路径".into());
+    }
+    let path = percent_encoding::percent_decode_str(raw)
+        .decode_utf8_lossy()
+        .to_string();
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(b) => b.to_vec(),
+        _ => return Err("请求体必须是二进制".into()),
+    };
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    Ok(json!({ "ok": true, "size": bytes.len(), "path": path }))
+}
+
 #[tauri::command]
 pub fn win_action(app: AppHandle, action: String) -> bool {
     let Some(win) = app.get_webview_window("main") else {

@@ -178,6 +178,23 @@ var FS = (function () {
     pack: function (api, payload) { return hostCall('/api/pack/' + api, payload || {}); },
     /** v6.0：素材主库（SQLite）—— load / save / info */
     db: function (op, payload) { return hostCall('/api/db/' + op, payload || {}); },
+    /** v6.1：原始字节通道。读回 Uint8Array，写入直接给 Uint8Array —— 全程不碰 base64。 */
+    bytesSupported: function () { return !!TAURI_INVOKE; },
+    readBytes: function (p) {
+      if (!TAURI_INVOKE) return Promise.reject(new Error('当前载体不支持原始字节读取'));
+      return TAURI_INVOKE('host_read_bytes', { path: p }).then(function (buf) {
+        return (buf instanceof Uint8Array) ? buf : new Uint8Array(buf);
+      });
+    },
+    writeBytes: function (p, bytes) {
+      if (!TAURI_INVOKE) return Promise.reject(new Error('当前载体不支持原始字节写入'));
+      var u8 = (bytes instanceof Uint8Array) ? bytes : new Uint8Array(bytes);
+      return TAURI_INVOKE('host_write_bytes', u8, { headers: { 'x-vrc-path': encodeURIComponent(String(p)) } })
+        .then(function (r) {
+          if (!r || r.ok === false) throw new Error((r && r.error) || '写入失败');
+          return r;
+        });
+    },
     scan: function (p, maxDepth) { return hostCall('/api/scan', { path: p, maxDepth: maxDepth || 0 }).then(function (j) { return j.entries || []; }); },
     move: function (src, dst) { return hostCall('/api/move', { src: src, dst: dst }); },
     copy: function (src, dst) { return hostCall('/api/copy', { src: src, dst: dst }); },
@@ -787,6 +804,12 @@ var FS = (function () {
     if (!isAbsoluteWinPath(s) || !blob) return Promise.resolve(false);
     return Host.ensure().then(function (ok) {
       if (!ok) { Toast.warn('内置宿主未就绪：无法把文件写到磁盘路径', 5200); return false; }
+      /* v6.1：能走原始字节就别绕 base64（写封面、导出图片都走这条） */
+      if (Host.bytesSupported && Host.bytesSupported() && blob.arrayBuffer) {
+        return blob.arrayBuffer().then(function (ab) {
+          return Host.writeBytes(s, new Uint8Array(ab)).then(function () { return true; });
+        }).catch(function (e) { Toast.warn('写入文件失败：' + (e && e.message), 5600); return false; });
+      }
       return fileToDataURL(blob).then(function (durl) {
         var base64 = String(durl || '').split(',')[1] || '';
         if (!base64) return false;

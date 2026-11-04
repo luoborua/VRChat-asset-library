@@ -465,15 +465,22 @@ var DropImport = (function () {
     /** 从菜单选文件时没有 File 对象，封面按磁盘路径读成 Blob（drop 场景直接用 File） */
     function coverBlobFromPath(p) {
       if (!p) return Promise.resolve(null);
+      var ext = extOf(p);
+      var mime = ext === 'png' ? 'image/png'
+        : ext === 'webp' ? 'image/webp'
+        : ext === 'gif' ? 'image/gif'
+        : ext === 'bmp' ? 'image/bmp' : 'image/jpeg';
+      if (FS.host.bytesSupported && FS.host.bytesSupported()) {
+        return FS.host.readBytes(p).then(function (bytes) {
+          return new Blob([bytes], { type: mime });
+        }).catch(function () { return null; });
+      }
       return FS.host.readFileBase64(p).then(function (r) {
-        var bin = atob(String((r && r.dataBase64) || ''));
+        var b64 = String((r && (r.dataBase64 || r.base64)) || '');
+        if (!b64) return null;
+        var bin = atob(b64);
         var bytes = new Uint8Array(bin.length);
         for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        var ext = extOf(p);
-        var mime = ext === 'png' ? 'image/png'
-          : ext === 'webp' ? 'image/webp'
-          : ext === 'gif' ? 'image/gif'
-          : ext === 'bmp' ? 'image/bmp' : 'image/jpeg';
         return new Blob([bytes], { type: mime });
       }).catch(function () { return null; });
     }

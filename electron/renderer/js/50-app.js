@@ -1351,6 +1351,55 @@ var App = {
     delete App.coverCache[id];
   },
 
+  /* ---------------- 缩略图（v6.2） ----------------
+   * 网格用 covers\thumb\<id>.jpg（400px），详情页仍用原图。
+   * 缩略图按需生成：首次渲染该素材时 404 → 自动退回原图并补生成一次，下次就命中。
+   * 这样启动不必解码上千张图，也不会改动任何既有数据结构。 */
+  _thumbMissing: {},
+  _thumbTried: {},
+  thumbDir: function () {
+    var d = App.localDir || (Store.local && Store.local.dataDir ? Store.local.dataDir(App.settings) : '');
+    return d ? joinWinPath(d, ['covers', 'thumb']) : '';
+  },
+  thumbURLFor: function (asset) {
+    if (!asset || !asset.id || !asset.hasCover) return '';
+    if (!(FS.host && FS.host.bytesSupported && FS.host.bytesSupported())) return '';
+    if (App._thumbMissing[asset.id]) return '';
+    var dir = App.thumbDir();
+    if (!dir) return '';
+    return 'http://vrcasset.localhost/' + encodeURIComponent(joinWinPath(dir, [asset.id + '.jpg']));
+  },
+  /** 原图在磁盘上的路径（covers\<id>.<ext>），找不到返回 '' */
+  coverPathOnDisk: function (id) {
+    var dir = (App.localDir || (Store.local && Store.local.dataDir ? Store.local.dataDir(App.settings) : ''));
+    if (!dir || !id) return Promise.resolve('');
+    var chain = Promise.resolve('');
+    ['png', 'jpg', 'webp', 'gif'].forEach(function (e) {
+      chain = chain.then(function (hit) {
+        if (hit) return hit;
+        var p = joinWinPath(dir, ['covers', id + '.' + e]);
+        return FS.host.exists(p).then(function (k) { return k === 'file' ? p : ''; }).catch(function () { return ''; });
+      });
+    });
+    return chain;
+  },
+  /** 生成该素材的缩略图（每次会话只尝试一次） */
+  requestThumb: function (asset) {
+    if (!asset || !asset.id || !asset.hasCover) return Promise.resolve(false);
+    if (!(FS.host && FS.host.thumb)) return Promise.resolve(false);
+    if (App._thumbTried[asset.id]) return Promise.resolve(false);
+    App._thumbTried[asset.id] = true;
+    var dstDir = App.thumbDir();
+    if (!dstDir) return Promise.resolve(false);
+    return App.coverPathOnDisk(asset.id).then(function (src) {
+      if (!src) return false;
+      var dst = joinWinPath(dstDir, [asset.id + '.jpg']);
+      return FS.host.thumb(src, dst, App.settings.thumbWidth || 400)
+        .then(function () { delete App._thumbMissing[asset.id]; return true; })
+        .catch(function () { return false; });
+    }).catch(function () { return false; });
+  },
+
   /** v4.7：把一张图片设为封面（拖到卡片缩略图上补图时走这里）。
    *  blob → 压缩 → IndexedDB 封面 → 写 <文件夹名>.png → 落库。 */
   setCoverFromBlob: function (asset, blob) {
@@ -2949,23 +2998,42 @@ var UI = {
     var cover = el('div', { class: 'card-cover' }, [
       el('div', { class: 'cover-ph' }, [App.categoryIcon(a.category, { size: 34 })])
     ]);
-    App.coverURLFor(a).then(function (url) {
-      if (!url) return;
-      // 只要存在封面地址就进入「角标模式」；加载失败时退回大占位图标
-      cover.classList.add('has-img');
-      var img = new Image();
-      img.className = 'cover-img';
-      img.alt = a.title;
-      img.loading = 'lazy';
-      img.onerror = function () {
-        cover.classList.remove('has-img');
-      };
-      /* v5.2：封面图不允许被拖走 —— 以前拖它到别的卡片上，会走「拖图设封面」逻辑，
-       * 把别人卡片的封面换掉。 */
-      img.draggable = false;
-      img.src = url;
-      cover.appendChild(img);
-    });
+    /* v6.2：优先用 400px 缩略图，缺失时自动退回原图并补生成一次 */
+    (function () {
+      var img = null;
+      function paint(url, isThumb) {
+        if (!url) return;
+        cover.classList.add('has-img');
+        if (!img) {
+          img = new Image();
+          img.className = 'cover-img';
+          img.alt = a.title;
+          img.loading = 'lazy';
+          /* v5.2：封面图不允许被拖走 —— 以前拖它到别的卡片上，会走「拖图设封面」逻辑，
+           * 把别人卡片的封面换掉。 */
+          img.draggable = false;
+          img.onerror = function () {
+            if (isThumb) {
+              /* 缩略图还没生成 / 已损坏：记下来别再试，退回原图，并在后台补一张 */
+              App._thumbMissing[a.id] = true;
+              App.requestThumb(a);
+              App.coverURLFor(a).then(function (u) {
+                if (!u) { cover.classList.remove('has-img'); return; }
+                img.onerror = function () { cover.classList.remove('has-img'); };
+                img.src = u;
+              });
+              return;
+            }
+            cover.classList.remove('has-img');
+          };
+          cover.appendChild(img);
+        }
+        img.src = url;
+      }
+      var thumb = App.thumbURLFor(a);
+      if (thumb) { paint(thumb, true); return; }
+      App.coverURLFor(a).then(function (url) { paint(url, false); });
+    })();
 
     var badges = el('div', { class: 'card-badges' }, [
       /* v2.3.28：类型图标移到封面左上角，与其它角标同排（下方那个重复的分类气泡已去掉） */

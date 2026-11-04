@@ -200,6 +200,24 @@ async function boot() {
     app.quit();
     return;
   }
+  /* v6.0：主库已经迁到 Tauri 版的 SQLite（vrclib-data\library.db）。
+   * Electron 版读不了 SQLite，如果还在用它打开同一个数据目录，会看到「素材库是空的」——
+   * 这会让人以为数据丢了。这里先拦住并说清楚，而不是让它静默显示空库。 */
+  const dbFile = path.join(DATA_DIR, 'library.db');
+  const jsonFile = path.join(DATA_DIR, 'assets.json');
+  if (fs.existsSync(dbFile) && !fs.existsSync(jsonFile)) {
+    dialog.showMessageBox({
+      type: 'info',
+      title: '请使用 Tauri 版启动',
+      message: '素材库已经迁移到新的 Tauri 版（SQLite 主库）。',
+      detail: '数据在：' + dbFile + '\n'
+        + 'Electron 版读不了这个格式，直接打开会显示成空库（数据并没有丢）。\n\n'
+        + '请改用根目录的「启动素材库_Tauri版.bat」。\n'
+        + '迁移时的原始 JSON 仍保留在 vrclib-data\\assets.json.bak。',
+      buttons: ['好，退出']
+    }).then(() => { quitting = true; app.quit(); });
+    return;
+  }
   fs.mkdirSync(RUNTIME_DIR, { recursive: true });
   setLogFile(LOG_FILE);
   logBoot('BOOT app=' + APP_ROOT + ' html=' + ENTRY_HTML);

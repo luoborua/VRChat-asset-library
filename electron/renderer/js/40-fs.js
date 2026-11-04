@@ -195,6 +195,15 @@ var FS = (function () {
           return r;
         });
     },
+    /** v6.2：缩略图（Rust 侧 image crate 生成 400px JPEG） */
+    thumb: function (src, dst, max) {
+      if (!TAURI_INVOKE) return Promise.reject(new Error('当前载体不支持缩略图'));
+      return TAURI_INVOKE('thumb_ensure', { src: src, dst: dst, max: max || 400 });
+    },
+    thumbBatch: function (items, max) {
+      if (!TAURI_INVOKE) return Promise.reject(new Error('当前载体不支持缩略图'));
+      return TAURI_INVOKE('thumb_batch', { items: items || [], max: max || 400 });
+    },
     scan: function (p, maxDepth) { return hostCall('/api/scan', { path: p, maxDepth: maxDepth || 0 }).then(function (j) { return j.entries || []; }); },
     move: function (src, dst) { return hostCall('/api/move', { src: src, dst: dst }); },
     copy: function (src, dst) { return hostCall('/api/copy', { src: src, dst: dst }); },

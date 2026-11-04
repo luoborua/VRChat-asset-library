@@ -31,6 +31,10 @@ desktop.ini
 # ---------------- Rust / Tauri 产物 ----------------
 src-tauri/target/
 src-tauri/gen/
+# 构建脚本会把成品 exe 与 WebView2 加载器复制到根目录；二进制不入库
+VRChat改模素材管理库.exe
+vrclib.exe
+WebView2Loader.dll
 
 # ---------------- 日志 ----------------
 *.log

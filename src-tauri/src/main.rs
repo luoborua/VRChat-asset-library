@@ -210,6 +210,8 @@ fn main() {
             host::host_stream,
             host::host_read_bytes,
             host::host_write_bytes,
+            host::thumb_ensure,
+            host::thumb_batch,
             host::app_paths,
             host::win_action,
             open_external

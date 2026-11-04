@@ -11,6 +11,7 @@ pub mod fs_api;
 pub mod net_api;
 pub mod pack_api;
 pub mod picker_api;
+pub mod thumbs;
 pub mod webdav_api;
 
 use serde_json::{json, Value};
@@ -95,8 +96,7 @@ pub async fn host_read_bytes(path: String) -> Result<tauri::ipc::Response, Strin
 }
 
 #[tauri::command]
-pub fn host_write_bytes(request: tauri::ipc::Request<'_>) -> Result<Value, String> {
-    let raw = request
+pub fn host_write_bytes(request: tauri::ipc::Request<'_>) -> Result<Value, String> {    let raw = request
         .headers()
         .get("x-vrc-path")
         .and_then(|v| v.to_str().ok())
@@ -116,6 +116,24 @@ pub fn host_write_bytes(request: tauri::ipc::Request<'_>) -> Result<Value, Strin
     }
     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(json!({ "ok": true, "size": bytes.len(), "path": path }))
+}
+
+/* ---------------- 缩略图 ---------------- */
+
+#[tauri::command]
+pub async fn thumb_ensure(src: String, dst: String, max: Option<u32>) -> Result<Value, String> {
+    let w = max.unwrap_or(400);
+    tauri::async_runtime::spawn_blocking(move || thumbs::thumb_ensure(&src, &dst, w))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn thumb_batch(items: Vec<Value>, max: Option<u32>) -> Result<Value, String> {
+    let w = max.unwrap_or(400);
+    tauri::async_runtime::spawn_blocking(move || thumbs::thumb_batch(&items, w))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -1,8 +1,32 @@
-# VRChat 改模素材管理库 · Electron 版
+# VRChat 改模素材管理库 · Tauri 版
 
 管理 VRChat 改模素材（衣装 / 发型 / 配饰 / 功能组件 / 着色器 …）的本地工具。界面全中文，数据全部留在本机，不依赖任何服务器，也不上传任何数据。
 
-**当前版本：v1.1。**
+**当前版本：v6.0（Tauri 2）。** 界面与交互与 v1.1 完全一致；底层换成了进程内 Rust 宿主 + SQLite 主库 + 缩略图管线。
+
+---
+
+## v6.0：迁移到 Tauri 2
+
+三件事一起改了，但对使用者来说**没有任何操作变化**：
+
+| 项 | v1.1（Electron） | v6.0（Tauri 2） |
+|---|---|---|
+| 程序本体 | Electron 运行时，数百 MB | 单 exe，约 10 MB 级 |
+| 宿主 | 主进程内起 HTTP 服务（8788~8792 + 访问令牌） | 进程内命令调用，无端口、无令牌 |
+| 素材主库 | `assets.json` 整库 JSON，保存要 base64 过 HTTP，有 64MB 上限 | `vrclib-data\library.db`（SQLite），只写变更行，无体积上限 |
+| 二进制 | 封面/图集/读文件一律 base64（膨胀 33%） | 原始字节通道 + `vrcasset://` 协议直读 |
+| 网格封面 | 直接加载原图 | 400px 缩略图（实测 1.8MB → 5.6KB），详情页仍用原图 |
+
+**运行**：双击 `启动素材库_Tauri版.bat`（首次需先构建，见 `src-tauri/README.md`）。
+
+**数据不会丢**：首次启动会自动把旧的 `vrclib-data\assets.json` 整库导入 SQLite，
+并把原文件改名成 `assets.json.bak` 留底。素材文件、封面、设置都不动。
+
+> 迁移之后不要再双击旧的 `启动素材库_Electron版.bat`：Electron 读不了 SQLite，
+> 会显示成空库（数据还在）。程序本身也加了拦截提示，会告诉你改用新的启动方式。
+
+---
 
 ## v1.1 更新摘要
 
@@ -19,10 +43,11 @@
 ## 快速开始
 
 ```
-双击 启动素材库_Electron版.bat
+双击 启动素材库_Tauri版.bat
 ```
 
-窗口标题为「VRChat 改模素材管理库 · v1.1」。宿主（文件读写 / 目录扫描 / 联网抓取 / 下载 / WebDAV / AI 流式转发）由 Electron 主进程随窗口启动，监听 `127.0.0.1:8788~8792`，**不需要任何外部程序**。
+窗口标题为「VRChat 改模素材管理库 · v1.1」。宿主（文件读写 / 目录扫描 / 联网抓取 / 下载 / WebDAV / AI 流式转发）由 Rust 后端在**同一进程内**直接提供，
+没有端口、没有外部程序，也不需要任何运行时。
 
 快捷键：**F5** 刷新 · **F11** 全屏 · **Esc** 退出全屏 · **Ctrl+Shift+I** 开发者工具 · **Ctrl+O** 打开数据目录。托盘菜单提供显示/隐藏、刷新、打开数据目录、打开素材库目录、**检查更新**、关于、退出。
 
@@ -32,8 +57,14 @@
 
 ```
 VRChat改模素材管理库/
-├── 启动素材库_Electron版.bat   日常启动入口（GBK 编码，会清掉 ELECTRON_RUN_AS_NODE）
-├── VRChat改模素材管理库.html   入口页（按序引入 18 个模块）
+├── 启动素材库_Tauri版.bat     日常启动入口（跑同目录的 exe）
+├── VRChat改模素材管理库.exe   构建产物（由 src-tauri/build/build-tauri.ps1 拷过来）
+├── src-tauri/                 Tauri 后端（Rust）
+│   ├── main.rs                窗口 / 托盘 / 单实例 / 原生拖拽 / vrcasset 协议
+│   ├── host/                  宿主：fs / net / download / webdav / picker / pack / db / thumbs
+│   └── build/                 构建与 CDP 验证脚本
+├── VRChat改模素材管理库.html   旧入口页（Electron 用；Tauri 用 electron/renderer/index.html）
+├── 启动素材库_Electron版.bat   旧入口（v6 起仅作归档，检测到 SQLite 库会自动拦下）
 ├── electron/
 │   ├── main/                  Electron 主进程
 │   │   ├── main.js            窗口、托盘、快捷键、单实例、日志

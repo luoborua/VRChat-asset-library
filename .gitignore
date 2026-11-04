@@ -28,6 +28,10 @@ desktop.ini
 .idea/
 .vscode/
 
+# ---------------- Rust / Tauri 产物 ----------------
+src-tauri/target/
+src-tauri/gen/
+
 # ---------------- 日志 ----------------
 *.log
 

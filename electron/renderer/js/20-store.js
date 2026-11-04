@@ -563,6 +563,10 @@ var Store = (function () {
 
   function htmlDir() {
     try {
+      /* 桌面壳（Electron / Tauri）由主进程直接给根目录 —— Tauri 的页面地址是
+       * http://tauri.localhost，从 location 推不出文件系统路径。
+       * 数据目录仍固定在 <程序根>\vrclib-data，与旧版完全一致，不会让老库「消失」。 */
+      if (window.vrcElectron && window.vrcElectron.appRoot) return String(window.vrcElectron.appRoot);
       if (String(location.protocol) !== 'file:') return '';
       if (/[?&]nolocal=1\b/.test(String(location.search || ''))) return '';   // 冒烟/测试用：不在产物目录写 vrclib-data
       var p = decodeURIComponent(String(location.pathname || '')).replace(/^\/+/, '').replace(/\//g, '\\');

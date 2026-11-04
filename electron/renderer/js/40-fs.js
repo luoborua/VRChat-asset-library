@@ -13,6 +13,21 @@ var FS = (function () {
   var HOST_PORTS = [8788, 8789, 8790, 8791, 8792];
   var hostState = { active: false, base: '', checked: false, probeP: null, lastOk: 0, fails: 0, backoffUntil: 0, warned: false };
 
+  /* v6.0（Tauri 载体）：宿主不再是 HTTP 服务，而是进程内的 Rust 命令。
+   * 只换传输，不换契约 —— 下面 hostCall 的 api 名与 payload 与 HTTP 版完全一致，
+   * 于是 25 处 FS.host.* 调用与全部业务逻辑都不用改。 */
+  var TAURI_INVOKE = (function () {
+    try {
+      if (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === 'function') {
+        return window.__TAURI__.core.invoke;
+      }
+    } catch (e) {}
+    return null;
+  })();
+  var TAURI_CHANNEL = (function () {
+    try { return (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.Channel) || null; } catch (e) { return null; }
+  })();
+
   /** v2.5.2：宿主断开提示条（带「重试连接」）——只在首次判定断开时弹一次 */
   function hostDeadBanner() {
     if (typeof document === 'undefined' || document.getElementById('hostDeadBanner')) return;
@@ -42,6 +57,14 @@ var FS = (function () {
   /* v4.1.0（Electron 单载体）：旧 WebView2 壳与其宿主对象桥（window.chrome.webview.vrcHost）已随桌面版一并移除。
    * 现在只有一种载体 —— Electron；它的内置宿主由主进程起 HTTP 服务，走下面统一的分支。 */
   function hostProbe(force) {
+    /* Tauri 载体：宿主就在同一个进程里，没有端口可探，永远在线 */
+    if (TAURI_INVOKE) {
+      hostState.active = true;
+      hostState.checked = true;
+      hostState.base = '';
+      hostState.lastOk = Date.now();
+      return Promise.resolve(true);
+    }
     // v2.5.2：连续探测失败后进入退避窗口——以前每个操作都会重新探测 5 个端口（8788~8792），
     // 宿主一旦退出就是「反复重发」；现在退避期内直接判定离线，只有「重试连接」才强制探测。
     if (!force && hostState.backoffUntil && Date.now() < hostState.backoffUntil) return Promise.resolve(false);
@@ -106,6 +129,16 @@ var FS = (function () {
     return h;
   }
   function hostCall(api, payload, method) {
+    /* Tauri：直接进进程内命令；返回值语义与 HTTP 版逐字段一致（ok=false 抛错、cancelled 原样返回） */
+    if (TAURI_INVOKE) {
+      return TAURI_INVOKE('host_call', { api: api, payload: payload === undefined ? {} : (payload || {}) })
+        .catch(function (e) { throw new Error(String((e && e.message) || e || '宿主调用失败')); })
+        .then(function (j) {
+          if (j && j.ok === false && j.cancelled === true) return j;
+          if (!j || j.ok === false) throw new Error((j && j.error) || ('宿主请求失败 ' + api));
+          return j;
+        });
+    }
     return hostProbe().then(function (ok) {
       if (!ok) throw new Error('内置宿主未就绪');
       // text/plain 是 CORS 简单请求：file:// 页面访问 127.0.0.1 时不再触发
@@ -125,9 +158,12 @@ var FS = (function () {
   }
   var Host = {
     available: function () { return hostState.active; },
-    /** 当前是否跑在原生桌面壳里（Electron）。
+    /** 当前是否跑在原生桌面壳里（Electron / Tauri）。
      *  页面据此切换文案与布局：网页版讲「启动宿主」，桌面版讲「内置宿主」。 */
-    desk: function () { return !!(window.vrcElectron && window.vrcElectron.shell === 'electron'); },
+    desk: function () {
+      var s = window.vrcElectron && window.vrcElectron.shell;
+      return s === 'electron' || s === 'tauri';
+    },
     checked: function () { return hostState.checked; },
     ensure: function (force) { return hostProbe(!!force); },
     /** v2.5.2：用户点「重试连接」——强制探测一次，成功后自动补写待写入的数据 */
@@ -181,6 +217,29 @@ var FS = (function () {
       opts = opts || {};
       var payload = { url: url, headers: headers || {}, method: method || 'GET', body: body };
       if (opts.timeoutMs) payload.timeoutMs = opts.timeoutMs;
+      /* Tauri：SSE 改成 Tauri Channel 传帧。帧结构 {type:'head'|'chunk'|'error'} 与原宿主一致，
+       * 调用方（87-ai.js）拿到的 {status, ok, text, error} 语义不变。 */
+      if (TAURI_INVOKE && TAURI_CHANNEL) {
+        return Promise.resolve().then(function () {
+          var ch = new TAURI_CHANNEL();
+          var out = { status: 0, ok: false, text: '', error: '' };
+          ch.onmessage = function (raw) {
+            var evt = null;
+            try { evt = (typeof raw === 'string') ? JSON.parse(raw) : raw; } catch (e) { return; }
+            if (!evt) return;
+            if (evt.type === 'head') { out.status = evt.status || 0; out.ok = !!evt.ok; }
+            else if (evt.type === 'chunk') {
+              out.text += evt.text || '';
+              if (opts.onChunk) { try { opts.onChunk(evt.text || '', out); } catch (e) {} }
+            } else if (evt.type === 'error') { out.error = String(evt.error || '流式请求失败'); }
+          };
+          return TAURI_INVOKE('host_stream', { payload: payload, onEvent: ch }).then(function (r) {
+            if (out.error) throw new Error(out.error);
+            if (r && r.ok === false && r.error && !out.error) throw new Error(String(r.error));
+            return out;
+          });
+        });
+      }
       return hostProbe().then(function (ok) {
         if (!ok) throw new Error('内置宿主未就绪');
         return fetch(hostState.base + '/api/stream', {

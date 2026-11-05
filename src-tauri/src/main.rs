@@ -1,3 +1,7 @@
+// mingw 工具链下，rustc 会给 exe 塞一份默认清单，tauri-build（embed-resource）又往 .res 里
+// 写了一份 comctl32 的清单，链接时 ld 合并 .rsrc 就会报 "multiple non-default manifests"。
+// 这是 x86_64-pc-windows-gnu 的已知现象，两份清单内容等价、产物正常，只屏蔽这一类噪声。
+#![allow(linker_messages)]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod host;
@@ -8,7 +12,37 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
-const TITLE: &str = "VRChat 改模素材管理库 · v1.1";
+/// WebView2 的用户数据目录不能让运行时自己去「碰运气」创建。
+/// 之前的写法把成败押在「%LOCALAPPDATA%\<identifier> 恰好已经存在」上：
+/// 只要需要新建（首次启动、清理过配置、换了安装位置），就会在
+/// CreateCoreWebView2Environment 阶段失败（0x8000FFFF），表现就是程序闪退。
+/// 这里先由我们自己建好目录，并显式告诉 WebView2 用哪个目录。
+fn ensure_webview_data_dir(app: &tauri::App) -> std::path::PathBuf {
+    let dir = app.path().app_local_data_dir().unwrap_or_else(|_| {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        base.join("com.vrclib.assetlibrary")
+    });
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::create_dir_all(dir.join("EBWebView"));
+    dir
+}
+
+/// 启动失败必须留下可读的记录；没有它只能靠 WER 猜。
+fn log_startup(dir: &std::path::Path, line: &str) {
+    use std::io::Write;
+    let path = dir.join("startup-error.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{}] {}", stamp, line);
+    }
+}
+
+const TITLE: &str = "VRChat 改模素材管理库 · v1.2";
 
 /// 页面侧的 vrcElectron 兼容层：Electron 的 preload 暴露了什么，这里就补齐什么。
 /// 页面据此判断「跑在原生壳里」，并拿到数据目录（Tauri 的 URL 不是 file://，推导不出来）。
@@ -105,7 +139,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 use tauri_plugin_dialog::DialogExt;
                 app.dialog()
                     .message(format!(
-                        "VRChat 改模素材管理库 · Tauri 版\n版本 1.1.0\n数据目录：{}",
+                        "VRChat 改模素材管理库 · Tauri 版\n版本 1.2.0\n数据目录：{}",
                         host::data_dir().to_string_lossy()
                     ))
                     .title("关于")
@@ -198,7 +232,38 @@ fn main() {
                 Err(_) => Response::builder().status(404).body(Vec::new()).unwrap(),
             }
         })
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .register_uri_scheme_protocol("vrclibdev", |_app, request| {
+            use tauri::http::Response;
+            /* 开发模式专用：页面直接从 renderer/ 目录读，但走的是自定义协议，
+               与内置资源同理属于「自家源」，Tauri 的 IPC 才不会被拒。 */
+            let root = std::env::var("VRCLIB_DEV_DIR").unwrap_or_default();
+            if root.is_empty() {
+                return Response::builder().status(404).body(Vec::new()).unwrap();
+            }
+            let raw = request.uri().path().trim_start_matches('/');
+            let rel = if raw.is_empty() { "index.html" } else { raw };
+            let decoded = percent_encoding::percent_decode_str(rel)
+                .decode_utf8_lossy()
+                .to_string();
+            let root_path = std::path::Path::new(&root);
+            let target = root_path.join(&decoded);
+            let ok = target
+                .canonicalize()
+                .map(|p| p.starts_with(root_path))
+                .unwrap_or(false);
+            if !ok {
+                return Response::builder().status(404).body(Vec::new()).unwrap();
+            }
+            match std::fs::read(&target) {
+                Ok(bytes) => Response::builder()
+                    .status(200)
+                    .header("Content-Type", mime_of(&target.to_string_lossy()))
+                    .header("Cache-Control", "no-store")
+                    .body(bytes)
+                    .unwrap(),
+                Err(_) => Response::builder().status(404).body(Vec::new()).unwrap(),
+            }
+        })        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
                 let _ = w.unminimize();
@@ -226,6 +291,16 @@ fn main() {
             /* 素材主库在窗口之前就绪：首次启动要把老的 assets.json 迁进来 */
             app.manage(host::AppState::new(&host::data_dir()));
 
+            /* 上次如果是「导入还没跑完就关窗口」，进程是被直接杀掉的：
+               临时解压目录会留在素材旁边。启动时在后台清掉（单实例插件保证此刻没有别的实例在导入），
+               不清的话用户会在素材库里看到一堆 `<包名>`、`<包名> (2)` 的临时目录。 */
+            std::thread::spawn(|| {
+                let (removed, kept) = host::workbench_api::sweep_orphan_extracts();
+                if removed > 0 || kept > 0 {
+                    eprintln!("[vrclib] 启动清理：删除 {removed} 个临时解压目录，保留 {kept} 个等待 Unity 回执的目录");
+                }
+            });
+
             /* v6.5：默认窗口按「中等卡片刚好一排 6 张」定宽。
              * 算法：侧栏 300 + 主区内边距 32 + (6×220 + 5×14) + 竖向滚动条约 17 = 1739。
              * 7 列需要容器 1624 以上，所以 1722~1956 这个区间内一排稳定是 6 张。
@@ -239,15 +314,53 @@ fn main() {
                 win_h = win_h.min(sh * 0.90);
             }
 
-            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title(TITLE)
-                .inner_size(win_w, win_h)
-                .min_inner_size(1160.0, 620.0)
-                .decorations(false)
-                .background_color(tauri::window::Color(14, 16, 20, 255))
-                .initialization_script(init_script())
-                .visible(false)
-                .build()?;
+            let wv_dir = ensure_webview_data_dir(app);
+            let mut attempt = 0;
+            /* 开发模式：设置 VRCLIB_DEV_URL 时页面直接从本地静态服务加载，
+               改前端（JS/CSS/HTML）后按 Ctrl+R 即可，不必重新编译 exe。
+               该源已在 capabilities/default.json 的 remote.urls 里登记，IPC 不会被拒。 */
+            let webview_url = match std::env::var("VRCLIB_DEV_URL") {
+                Ok(u) if !u.trim().is_empty() => match u.trim().parse::<tauri::Url>() {
+                    Ok(url) => WebviewUrl::External(url),
+                    Err(_) => WebviewUrl::App("index.html".into()),
+                },
+                _ => WebviewUrl::App("index.html".into()),
+            };            let win = loop {
+                attempt += 1;
+                let mut builder = WebviewWindowBuilder::new(app, "main", webview_url.clone())
+                    .title(TITLE)
+                    .inner_size(win_w, win_h)
+                    .min_inner_size(1160.0, 620.0)
+                    .decorations(false)
+                    .background_color(tauri::window::Color(14, 16, 20, 255))
+                    .initialization_script(init_script())
+                    .visible(false);
+                #[cfg(windows)]
+                {
+                    builder = builder.data_directory(wv_dir.clone());
+                }
+                match builder.build() {
+                    Ok(w) => break w,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        log_startup(&wv_dir, &format!("webview attempt {} failed: {}", attempt, msg));
+                        /* 0x8000FFFF（灾难性故障）几乎都是配置目录本身坏了或建不出来：
+                           把坏目录挪走再试一次，而不是让用户去删 %LOCALAPPDATA%。 */
+                        if attempt == 1 && msg.contains("0x8000FFFF") {
+                            let profile = wv_dir.join("EBWebView");
+                            if profile.exists() {
+                                let bak = wv_dir.join(format!("EBWebView.broken-{}", std::process::id()));
+                                let _ = std::fs::rename(&profile, &bak);
+                                log_startup(&wv_dir, &format!("profile moved to {}", bak.display()));
+                                let _ = std::fs::create_dir_all(&profile);
+                            }
+                            continue;
+                        }
+                        log_startup(&wv_dir, "giving up");
+                        return Err(e.into());
+                    }
+                }
+            };
 
             win.show()?;
 
@@ -282,6 +395,15 @@ fn main() {
                             "vrc://drag",
                             serde_json::json!({ "kind": kind, "paths": paths, "x": x, "y": y }),
                         );
+                    }
+                }
+                /* 导入还在跑的时候，先别关：让页面弹一次确认。
+                   busy 是「租约」而不是布尔值（见 workbench_api::import_busy_now），
+                   页面崩了或事件没绑上，租约过期后照样能关，不会把窗口锁死。 */
+                WindowEvent::CloseRequested { api, .. } => {
+                    if host::workbench_api::import_busy_now() {
+                        api.prevent_close();
+                        let _ = w.emit("wb-busy-close", ());
                     }
                 }
                 WindowEvent::Resized(_) => {

@@ -2883,6 +2883,8 @@ var UI = {
     if (bar) {
       var ids = App.selectedIds();
       bar.classList.toggle('show', App.selectMode);
+      var fab = document.getElementById('fabGroup');
+      if (fab) fab.classList.toggle('show', App.selectMode);
       var c = $('#bulkCount'); if (c) c.textContent = String(ids.length);
     }
     var g = $('#grid');
@@ -3203,6 +3205,7 @@ var UI = {
       class: 'card' + (selected ? ' selected' : '') + (App.activeAssetId === a.id ? ' card-active' : ''),
       dataset: { id: a.id },
       onclick: function (e) {
+        if (App._suppressClick) { App._suppressClick = false; e.stopPropagation(); return; }
         if (App.selectMode) {
           App.selection[a.id] = !App.selection[a.id];
           UI.renderMain();
@@ -3213,12 +3216,29 @@ var UI = {
         }
       }
     }, [cover, body]);
-
     if (App.selectMode) {
       card.appendChild(el('div', { class: 'sel-mark' + (selected ? ' on' : '') }, selected ? ICONS.label('\u2714') : ''));
     }
     /* v4.4：右键菜单（编辑 / 分类 / 标签 / 角色 / 复制 / 喜欢 / 隐藏 / 导出 / 删除） */
-    if (typeof AssetMenu !== 'undefined' && AssetMenu.attach) AssetMenu.attach(card, a);
+      /* 长按卡片进入多选 */
+    (function () {
+      var pressTimer = null;
+      card.addEventListener('pointerdown', function () {
+        pressTimer = setTimeout(function () {
+          pressTimer = null;
+          App._suppressClick = true;
+          App.selectMode = true;
+          App.selection[a.id] = true;
+          UI.renderMain();
+        }, 450);
+      });
+      ['pointerup', 'pointerleave', 'pointercancel'].forEach(function (ev) {
+        card.addEventListener(ev, function () {
+          if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+        });
+      });
+    })();
+  if (typeof AssetMenu !== 'undefined' && AssetMenu.attach) AssetMenu.attach(card, a);
     return card;
   }
 };

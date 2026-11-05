@@ -1179,7 +1179,7 @@ var Modals = {
         ]),
         el('div', { class: 'detail-actions' }, [
           el('div', { class: 'detail-actions-cell' }, [primaryBtn, hint]),   // v2.5.8：注释跟着它注释的按钮走
-          el('div', { class: 'detail-actions-cell' }, [editBtn])
+          el('div', { class: 'detail-actions-cell' }, [editBtn, el('button', { class: 'btn btn-lg', onclick: function () { if (window.WB && WB.importToUnity) { WB.importToUnity(a); } else { Toast.err('工作台还没加载，稍后再试'); } } }, '导入到 Unity')])
         ])
       ])
     ]);

@@ -3,5 +3,6 @@
   "identifier": "default",
   "description": "默认能力：核心 API + 原生对话框 + 打开外部链接",
   "windows": ["main"],
+  "remote": { "urls": ["http://127.0.0.1:8765"] },
   "permissions": ["core:default", "dialog:default", "opener:default"]
 }

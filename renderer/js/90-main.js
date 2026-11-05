@@ -197,8 +197,15 @@ function bindEvents() {
     $('#bulkDownloaded').addEventListener('click', function () { Tools.rescanDiskState(); });   // v2.5.1（P5）：原来是只写个 UI 无入口字段的「标记已下载」
     $('#bulkHide').addEventListener('click', function () { Tools.bulkToggleHidden(true); });
     $('#bulkExport').addEventListener('click', function () { Tools.bulkExport(); });
+    $('#fabImportUnity').addEventListener('click', function () {
+      var ids = App.selectedIds();
+      if (!ids.length) { Toast.err('先勾选要导入的素材'); return; }
+      var list = ids.map(function (id) { return App.assets.find(function (a) { return a.id === id; }); }).filter(Boolean);
+      if (window.WB && WB.importToUnity) WB.importToUnity(list);
+      else Toast.err('工作台还没加载，稍后再试');
+    });
     /* v4.2.0：把选中的素材连文件一起打成 .vrcpack（标准 zip），发给别人导入 */
-    $('#bulkExportPack').addEventListener('click', function () {
+    $('#fabExportPack').addEventListener('click', function () {
       var ids = App.selectedIds();
       if (!ids.length) { Toast.warn('先勾选要导出的素材'); return; }
       var list = (App.assets || []).filter(function (a) { return ids.indexOf(a.id) >= 0; });

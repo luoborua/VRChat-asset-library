@@ -1,6 +1,6 @@
 [package]
 name = "vrclib"
-version = "1.1.0"
+version = "1.2.0"
 description = "VRChat 改模素材管理库 · Tauri 版"
 edition = "2021"
 
@@ -8,7 +8,10 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# custom-protocol 必须开：tauri 的 build.rs 用 `dev = !custom-protocol` 决定运行模式，
+# 不开的话即使是 --release 也会被当成 dev，窗口去加载 devUrl（127.0.0.1:8765），
+# 没起开发服务器就是 ERR_CONNECTION_REFUSED —— 打包版打不开就是这个原因。
+tauri = { version = "2", features = ["custom-protocol", "tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
@@ -28,3 +31,10 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 strip = true
+
+# 日常调试用：跳过 LTO/全量链接，改一行代码几十秒出 exe。发布仍用 --release。
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false

@@ -1430,7 +1430,7 @@ var Settings = {
     // 会误导成「环境不满足」。同进程后端接管文件操作后，这项检查与「重新检测后端」按钮一并移除。
 
     // v2.5.1（L4）：原来写「尚未选择素材库根目录」，而下面的输入框里显示着默认路径——看着自相矛盾
-var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '已授权目录：' + App.settings.libraryRootName : '未手动设置 · 当前使用默认路径（下方输入框里显示的就是它）' });
+var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '已选择目录：' + App.settings.libraryRootName : '未手动设置 · 当前使用默认路径（下方输入框里显示的就是它）' });
     box.appendChild(Field.row('素材库根目录', el('div', {}, [
       rootInfo,
       el('div', { class: 'btn-row' }, [
@@ -1445,35 +1445,15 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
             // 与手动填写保持一致：路径一旦改变就清掉旧句柄，避免句柄/路径指向不同目录
             Store.kvSet('libraryRoot', null).catch(function () {});
             App.saveSettings();
-            rootInfo.textContent = '已授权目录：' + r.name + '（' + r.path + '）';
+            rootInfo.textContent = '已选择目录：' + r.name + '（' + r.path + '）';
             Toast.ok('已填入素材库完整路径：' + r.path);
+            /* v6.8：选定根目录后立即扫描——里面已有整理好的素材就直接登记进主库 */
+            Settings.scanLibraryRoot();
           });
         } }, ICONS.label('\u{1F4C2} 选择文件夹（自动填路径）')),
         el('button', { class: 'btn btn-sm', onclick: function () {
-          /* 授权浏览器目录句柄：导入/搬运/扫描要用它（浏览器 API 不返回路径，只给句柄） */
-          FS.setLibraryRoot().then(function (r) {
-            if (!r) return;
-            rootInfo.textContent = '已授权目录：' + r.name;
-            Toast.ok('已授权浏览器访问该目录：' + r.name + '（导入 / 扫描 / 建文件夹可用）');
-          });
-        } }, ICONS.label('\u{1F513} 授权目录（供浏览器导入）')),
-        el('button', { class: 'btn btn-sm', onclick: function () {
-          FS.getLibraryRoot().then(function (root) {
-            if (!root) { Toast.warn('尚未选择根目录'); return; }
-            return FS.ensurePermission(root, 'read').then(function (ok) {
-              if (!ok) { Toast.err('未获得访问权限'); return; }
-              Toast.info('正在扫描目录 …');
-              return FS.scanDirectory(root, 2).then(function (r) {
-                Modal.open({
-                  title: '目录扫描结果', size: 'md', body: [
-                    el('p', { text: '文件数：' + r.files + '，总大小：' + fmtSize(r.size) }),
-                    el('h3', { text: '一级子文件夹（' + r.folders.length + '）' }),
-                    el('div', { class: 'chip-wrap' }, r.folders.slice(0, 200).map(function (f) { return el('span', { class: 'chip' }, f); }))
-                  ]
-                });
-              });
-            });
-          });
+          /* v6.8：桌面版直接扫配置的根目录（原生 /api/scan），不再依赖浏览器目录句柄 */
+          Settings.scanLibraryRoot();
         } }, ICONS.label('\u{1F50D} 扫描目录')),
         el('button', { class: 'btn btn-sm', onclick: function () {
           FS.createCategoryFolders().then(function (created) {
@@ -1816,6 +1796,184 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
       el('li', { text: '默认「手动粘贴源码」下，工具不会向任何外部服务器发送请求。' })
     ]));
     return box;
+  },
+
+  /* ================= 扫描库根并登记已有素材（v6.8） =================
+   * 桌面版原生实现：直接扫「设置里的根目录」(/api/scan)，识别 分类\素材 两层结构，
+   * 每个素材文件夹登记为一条主库记录（只登记路径，绝不移动/复制/删除文件）。
+   * 取代旧的浏览器目录句柄扫描（桌面载体下 getLibraryRoot() 恒为 null，必然报
+   * 「尚未选择根目录」）。 */
+  scanLibraryRoot: function () {
+    var root = App.libraryRoot();
+    if (!root) { Toast.warn('尚未选择根目录'); return Promise.resolve(); }
+    var ARCHIVE_EXT = ['zip', 'rar', '7z', 'unitypackage', 'vrca', 'fbx', 'blend', 'psd', 'clip', 'pmx', 'tar', 'gz'];
+    var IMAGE_EXT = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'];
+    function extOf(name) {
+      var m = String(name).toLowerCase().match(/\.([a-z0-9]+)$/);
+      return m ? m[1] : '';
+    }
+    /** 分类文件夹名 → 分类 id（先按内置/自定义分类的中文标签精确匹配，失败再按名称智能推断） */
+    function catIdFor(label, name) {
+      var want = String(label || '').trim();
+      if (want) {
+        var hit = App.allCategories().find(function (c) { return String(c.label).trim() === want; });
+        if (hit) return hit.id;
+      }
+      var guessed = Smart.guessCategory({ originalTitle: name, tags: [], description: '' });
+      return guessed || 'other';
+    }
+    /** 这条路径是否已被现有素材登记过（防重复登记） */
+    function pathKnown(p) {
+      return App.assets.some(function (a) {
+        return (a.paths || []).some(function (x) { return normalizeWinPath(x.path || '') === p; });
+      });
+    }
+
+    Toast.info('正在扫描目录 …');
+    return FS.host.exists(root).then(function (kind) {
+      if (kind !== 'dir') {
+        Toast.warn('根目录不存在：' + root + '。请先在上方选择有效的素材库根目录。', 6000);
+        return null;
+      }
+      /* 深度 3：一级=分类、二级=素材文件夹、三级=素材文件夹里的文件（不再更深） */
+      return FS.host.scan(root, 3).then(function (entries) {
+        var dirs1 = {}, loose = 0, totalFiles = 0, totalSize = 0;
+        entries.forEach(function (e) {
+          var parts = String(e.rel || '').split('\\');
+          if (e.kind === 'file') { totalFiles++; totalSize += e.size || 0; }
+          if (parts.length === 1) {
+            if (e.kind === 'directory') dirs1[e.name] = { name: e.name, subs: {}, files: [] };
+            else loose++;
+          } else if (parts.length === 2) {
+            var d = dirs1[parts[0]]; if (!d) return;
+            if (e.kind === 'directory') d.subs[parts[1]] = { name: parts[1], files: [] };
+            else d.files.push(e);
+          } else if (parts.length === 3) {
+            var d2 = dirs1[parts[0]], s = d2 && d2.subs[parts[1]];
+            if (s && e.kind === 'file') s.files.push(e);
+          }
+        });
+
+        /* 组装候选：分类\素材 双层 → 每个二级文件夹一条；单层库（一级文件夹本身就是素材）也认 */
+        var cands = [];
+        Object.keys(dirs1).forEach(function (k) {
+          var d = dirs1[k];
+          var subs = Object.keys(d.subs);
+          if (subs.length) {
+            subs.forEach(function (sk) {
+              var s = d.subs[sk];
+              cands.push({ name: sk, catLabel: k, files: s.files, path: joinWinPath(root, [k, sk]), selected: true });
+            });
+          } else {
+            cands.push({ name: k, catLabel: '', files: d.files, path: joinWinPath(root, [k]), selected: true });
+          }
+        });
+
+        cands.forEach(function (c) {
+          c.cat = catIdFor(c.catLabel, c.name);
+          c.size = c.files.reduce(function (s, f) { return s + (f.size || 0); }, 0);
+          c.archives = c.files.filter(function (f) { return ARCHIVE_EXT.indexOf(extOf(f.name)) >= 0; })
+            .sort(function (a, b) { return (b.mtime || 0) - (a.mtime || 0); });
+          c.image = c.files.filter(function (f) { return IMAGE_EXT.indexOf(extOf(f.name)) >= 0; })
+            .sort(function (a, b) { return (b.size || 0) - (a.size || 0); })[0] || null;
+          c.dup = pathKnown(c.path) || App.assets.some(function (a) {
+            return (a.title || '').trim() === c.name.trim() && a.category === c.cat;
+          });
+          if (c.dup) c.selected = false;
+        });
+
+        var fresh = cands.filter(function (c) { return !c.dup; });
+        var known = cands.length - fresh.length;
+
+        var listBox = el('div', { class: 'scan-cand-list' });
+        function renderList() {
+          listBox.innerHTML = '';
+          if (!cands.length) {
+            listBox.appendChild(el('div', { class: 'multi-empty', text: '根目录下没有识别到素材文件夹。' }));
+            return;
+          }
+          cands.slice(0, 300).forEach(function (c) {
+            var cb = el('input', { type: 'checkbox', checked: c.selected, disabled: c.dup, onchange: function () { c.selected = cb.checked; } });
+            listBox.appendChild(el('div', { class: 'import-row' }, [
+              el('label', { class: 'check' }, [cb]),
+              App.categoryIcon(c.cat, { size: 22 }),
+              el('div', { class: 'import-main' }, [
+                el('div', { class: 'scan-cand-name', text: c.name }),
+                el('div', { class: 'field-hint' },
+                  App.categoryLabel(c.cat) + ' · ' + c.files.length + ' 个文件 · ' + fmtSize(c.size) +
+                  (c.archives.length ? ' · ' + c.archives.length + ' 个压缩包' : '') +
+                  (c.image ? ' · 含封面图' : '') +
+                  (c.dup ? ' · 已登记过（跳过）' : ''))
+              ])
+            ]));
+          });
+          if (cands.length > 300)
+            listBox.appendChild(el('div', { class: 'field-hint', text: '… 其余 ' + (cands.length - 300) + ' 项结构相同，全部按勾选处理。' }));
+        }
+        renderList();
+
+        var coverCheck = el('input', { type: 'checkbox', checked: true });
+        var regBtn = null, registering = false;
+
+        function register() {
+          if (registering) return;
+          var sel = cands.filter(function (c) { return c.selected && !c.dup; });
+          if (!sel.length) { Toast.warn('请至少勾选一项'); return; }
+          registering = true;
+          if (regBtn) { regBtn.disabled = true; }
+          var chain = Promise.resolve(), done = 0, fail = 0;
+          sel.forEach(function (c) {
+            chain = chain.then(function () {
+              var asset = Store.normalizeAsset({
+                title: c.name,
+                source: 'other',
+                category: c.cat,
+                downloaded: true, downloadedAt: nowISO(),
+                fileSize: c.size,
+                importedFrom: 'folder',
+                paths: [{ path: c.path, note: '本地登记（文件未移动）' }],
+                versions: c.archives.map(function (f, i) {
+                  return { name: String(f.name).replace(/\.[^.]+$/, ''), fileName: f.name, size: f.size || 0, isLatest: i === 0 };
+                })
+              });
+              var coverStep = Promise.resolve();
+              if (coverCheck.checked && c.image && (c.image.size || 0) < 16 * 1024 * 1024) {
+                coverStep = FS.host.readFileBase64(joinWinPath(c.path, [c.image.name])).then(function (r) {
+                  var bin = atob(r.dataBase64), arr = new Uint8Array(bin.length);
+                  for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+                  return compressImage(new Blob([arr], { type: 'image/' + (extOf(c.image.name) === 'jpg' ? 'jpeg' : extOf(c.image.name)) }),
+                    App.settings.imageMaxWidth, App.settings.imageQuality).then(function (b) {
+                      asset.hasCover = true;
+                      return Store.putCover(asset.id, b);
+                    });
+                }).catch(function () { /* 单张封面失败不影响登记 */ });
+              }
+              return coverStep.then(function () { return App.save(asset); }).then(function () { done++; });
+            }).catch(function (e) { fail++; console.warn('登记失败：' + c.name, e); });
+          });
+          return chain.then(function () {
+            UI.renderAll();
+            Toast.ok('已登记 ' + done + ' 项素材' + (fail ? '，' + fail + ' 项失败' : '') + '。文件均未移动，位置记录在素材详情里。', 7000);
+            Modal.close(h);
+          });
+        }
+
+        var h = Modal.open({
+          title: '扫描结果 · ' + root, size: 'lg',
+          body: [
+            el('p', { text: '文件数：' + totalFiles + '，总大小：' + fmtSize(totalSize) +
+              (loose ? '，根目录散文件 ' + loose + ' 个（不会登记）' : '') }),
+            el('p', { class: 'field-hint', text: '识别到 ' + cands.length + ' 个素材文件夹，其中 ' + known + ' 个已登记过。勾选后「登记到主库」——只记录名称、分类和路径，不移动、不复制、不删除任何文件。' }),
+            el('label', { class: 'check check-row' }, [coverCheck, el('span', { text: '用文件夹里最大的图片作封面' })]),
+            listBox
+          ],
+          footer: [
+            el('button', { class: 'btn', onclick: function () { Modal.close(h); } }, '关闭'),
+            (regBtn = el('button', { class: 'btn btn-primary', onclick: register }, '登记 ' + fresh.length + ' 项到主库'))
+          ]
+        });
+      });
+    }).catch(function (e) { Toast.err('扫描失败：' + ((e && e.message) || e)); });
   },
 
   /* ================= 数据目录（v6.2） =================

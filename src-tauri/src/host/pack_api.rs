@@ -5,7 +5,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
@@ -587,29 +587,3 @@ pub fn pack_extract(pack: &PackState, payload: &Value) -> Result<Value, String> 
     }))
 }
 
-pub fn suggest_name(nickname: &str) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let _ = now;
-    let prefix = if nickname.is_empty() {
-        String::new()
-    } else {
-        format!("{}_{}", safe_file_name(nickname, "user"), "")
-    };
-    format!("素材包_{}{}.vrcpack", prefix, stamp())
-}
-
-fn stamp() -> String {
-    // 只用于默认文件名，精度到分钟即可
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = secs / 86400;
-    let rem = secs % 86400;
-    format!("{}_{:02}{:02}", days, rem / 3600, (rem % 3600) / 60)
-}
-
-pub fn _unused_pathbuf(_p: PathBuf) {}

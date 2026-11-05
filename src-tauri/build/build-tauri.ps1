@@ -37,7 +37,8 @@ if (-not (Test-Path $exe)) {
   exit 1
 }
 
-$dest = Join-Path $repo "VRChat改模素材管理库.exe"
+# 产物与仓库同目录：VRCLib.exe（启动.bat 引用这个名字）
+$dest = Join-Path $repo "VRCLib.exe"
 Copy-Item $exe $dest -Force
 $size = [math]::Round((Get-Item $dest).Length / 1MB, 1)
 Write-Host "[完成] $dest（$size MB）" -ForegroundColor Green
@@ -51,4 +52,4 @@ if (Test-Path $dll) {
   Write-Host "[警告] 未找到 WebView2Loader.dll，程序会启动失败" -ForegroundColor Yellow
 }
 
-Write-Host "双击根目录的 启动素材库_Tauri版.bat 即可运行。"
+Write-Host "双击根目录的 VRCLib.exe 即可运行。"

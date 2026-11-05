@@ -73,6 +73,8 @@ var FS = (function () {
     saveFile: function (p) { return hostCall('/api/saveFile', p || {}); },
     pickOneFile: function (p) { return hostCall('/api/pickOneFile', p || {}); },
     pack: function (api, payload) { return hostCall('/api/pack/' + api, payload || {}); },
+    /** v6.8：改模工作台 —— probe / hash / plan / execute / listDir / findUnity / launchUnity / logTail / receipt / installBridge / maRequest / maReceipt */
+    wb: function (op, payload) { return hostCall('/api/wb/' + op, payload || {}); },
     /** v6.0：素材主库（SQLite）—— load / save / info */
     db: function (op, payload) { return hostCall('/api/db/' + op, payload || {}); },
     /** v6.1：原始字节通道。读回 Uint8Array，写入直接给 Uint8Array —— 全程不碰 base64。 */

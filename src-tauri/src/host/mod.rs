@@ -14,6 +14,7 @@ pub mod pack_api;
 pub mod picker_api;
 pub mod thumbs;
 pub mod webdav_api;
+pub mod workbench_api;
 
 use serde_json::{json, Value};
 use tauri::ipc::Channel;
@@ -245,8 +246,7 @@ pub async fn host_call(
         "/api/webdav/get" => webdav_api::get(&p).await,
         "/api/webdav/mkcol" => webdav_api::mkcol(&p).await,
 
-        "/api/pack/export" => pack_api::pack_create(&state.pack, &p),
-        "/api/pack/inspect" => pack_api::pack_inspect(&p),
+        "/api/pack/export" => pack_api::pack_create(&state.pack, &p),        "/api/pack/inspect" => pack_api::pack_inspect(&p),
         "/api/pack/extract" => pack_api::pack_extract(&state.pack, &p),
         "/api/pack/progress" => Ok(pack_api::progress_json(&state.pack)),
 
@@ -258,6 +258,30 @@ pub async fn host_call(
             state.db.save(&list, &at)
         }
         "/api/db/info" => Ok(state.db.info()),
+
+        /* ---- 改模工作台（工程登记 / 导入预检 / 复制）---- */
+        "/api/wb/probe" => workbench_api::probe(&p).await,
+        "/api/wb/setImportBusy" => workbench_api::set_import_busy(&p).await,
+        "/api/wb/quitNow" => workbench_api::quit_now(&p).await,
+        "/api/wb/hash" => workbench_api::hash(&p).await,
+        "/api/wb/plan" => workbench_api::plan(&p).await,
+        "/api/wb/execute" => workbench_api::execute(&p).await,
+        "/api/wb/importPath" => workbench_api::import_path(&p).await,
+        "/api/wb/importProgress" => workbench_api::import_progress(&p).await,
+        "/api/wb/projectStatus" => workbench_api::project_status(&p).await,
+        "/api/wb/inspectPath" => workbench_api::inspect_path(&p).await,
+        "/api/wb/listExtract" => workbench_api::list_extract(&p).await,
+        "/api/wb/importSelected" => workbench_api::import_selected(&p).await,
+        "/api/wb/discardExtract" => workbench_api::discard_extract(&p).await,
+        "/api/wb/listDir" => workbench_api::list_dir(&p).await,
+        "/api/wb/findUnity" => workbench_api::find_unity(&p).await,
+        "/api/wb/launchUnity" => workbench_api::launch_unity(&p).await,
+        "/api/wb/logTail" => workbench_api::log_tail(&p).await,
+        "/api/wb/receipt" => workbench_api::receipt(&p).await,
+        "/api/wb/allowOverwrite" => workbench_api::allow_overwrite(&p).await,
+        "/api/wb/installBridge" => workbench_api::install_bridge(&p).await,
+        "/api/wb/maRequest" => workbench_api::ma_request(&p).await,
+        "/api/wb/maReceipt" => workbench_api::ma_receipt(&p).await,
 
         other => return Ok(fail(format!("unknown api: {other}"))),
     };

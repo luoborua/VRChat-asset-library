@@ -1271,6 +1271,75 @@ var App = {
     return clean(base).slice(0, MAX) || '未命名';
   },
 
+  /**
+   * 新建素材前给库内目录挑一个没被占用的名字。
+   *
+   * 为什么需要（v6.6）：导入时原来是 getDirectoryHandle(name, {create:true})，
+   * 目录已存在就直接复用 —— 两条素材算出同一个目录名时，同名文件被静默覆盖，
+   * 两条记录还会指向同一个 path，之后删一条另一条就悬空了。
+   *
+   * 占用判定有两路：
+   *   ① 已有素材登记的存储路径正好是这个绝对路径（含分类目录比较，同名的不同分类不算冲突）
+   *   ② 磁盘上目录真的存在（opts.exists 优先用调用方手上的句柄探，更准）
+   * 撞名依次试 名字_2、名字_3……最多 99 次，再不行带时间戳。
+   *
+   * opts.exists(name) → Promise<boolean>  自定义存在性探测
+   * opts.excludeId  改已有素材时把自身排除
+   * → Promise<{ name, renamed }>
+   */
+  pickFreeFolderName: function (desired, catLabel, opts) {
+    opts = opts || {};
+    var base = String(desired == null ? '' : desired)
+      .replace(/[\\/:*?"<>|]/g, '_').replace(/^\s+|\s+$/g, '').slice(0, 120) || '未命名';
+    var cat = String(catLabel == null ? '' : catLabel).trim();
+    var root = '';
+    try { root = normalizeWinPath(App.libraryRoot()); } catch (eRoot) { root = ''; }
+
+    var taken = Object.create(null);
+    var lastSegs = Object.create(null);
+    (App.assets || []).forEach(function (x) {
+      if (!x || (opts.excludeId && x.id === opts.excludeId)) return;
+      var p = '';
+      try { p = App.primaryLocalPath(x); } catch (ePath) { p = ''; }
+      if (!p) return;
+      var norm = normalizeWinPath(p);
+      taken[norm.toLowerCase()] = 1;
+      lastSegs[String(norm.split(/[\\/]/).pop() || '').toLowerCase()] = 1;
+    });
+
+    function absOf(name) { return cat && root ? joinWinPath(root, [cat, name]) : ''; }
+    function inRegistry(name) {
+      var abs = absOf(name);
+      // 能拼出「库根\分类\名字」就按完整路径比（同名的不同分类不算冲突）；
+      // 拼不出来（没配库根 / 没分类）就退回只比末段，宁可多改一次名也不覆盖别人的文件
+      if (abs) return !!taken[normalizeWinPath(abs).toLowerCase()];
+      return !!lastSegs[String(name).toLowerCase()];
+    }
+    function onDisk(name) {
+      if (typeof opts.exists === 'function') {
+        return Promise.resolve().then(function () { return opts.exists(name); })
+          .then(function (v) { return !!v; }).catch(function () { return false; });
+      }
+      var abs = absOf(name);
+      if (!abs || !FS.host || typeof FS.host.exists !== 'function') return Promise.resolve(false);
+      return FS.host.exists(abs).then(function (kind) { return kind === 'file' || kind === 'dir'; })
+        .catch(function () { return false; });
+    }
+
+    var n = 1;
+    function step() {
+      var cand = n === 1 ? base : base + '_' + n;
+      if (n > 99) return Promise.resolve({ name: base + '_' + Date.now(), renamed: true });
+      if (inRegistry(cand)) { n++; return step(); }
+      return onDisk(cand).then(function (occupied) {
+        if (!occupied) return { name: cand, renamed: cand !== base };
+        n++;
+        return step();
+      });
+    }
+    return step();
+  },
+
   cleanTitle: function (s) {
     return String(s || '').trim()
       .replace(/\s*[-–—|]\s*(BOOTH|Gumroad|pixiv)\s*$/i, '')

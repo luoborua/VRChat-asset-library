@@ -485,8 +485,17 @@ var DropImport = (function () {
       }).catch(function () { return null; });
     }
 
+    /* 目标目录撞名时自动换成 _2、_3…并提示一句 ——
+       原来的 mkdir 会直接复用已有目录，同名文件被静默覆盖，两条素材还指向同一个 path。 */
     function importOne(g) {
-      var dst = destOf(g);
+      var wanted = safeName(g.title || '未命名', '未命名');
+      return App.pickFreeFolderName(wanted, App.categoryLabel(g.category)).then(function (pick) {
+        if (pick.renamed) setProg('素材库已有同名目录，改导入到「' + pick.name + '」', null);
+        return run(g, joinWinPath(state.root || '', [App.categoryLabel(g.category), pick.name]));
+      });
+    }
+
+    function run(g, dst) {
       var moved = [];
       var failed = [];
       var onlyDir = (g.files.length === 1 && g.files[0].isDir) ? g.files[0] : null;

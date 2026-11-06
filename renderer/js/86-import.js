@@ -269,34 +269,46 @@ var Importer = (function () {
         if (!ok) return null;
         var safe = String(cand.name).replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || '未命名';
         return root.getDirectoryHandle(categoryLabel, { create: true }).then(function (catDir) {
-          return catDir.getDirectoryHandle(safe, { create: true }).then(async function (dstDir) {
-            var rootPath = App.libraryRoot();
-            var dstAbs = joinWinPath(rootPath, [categoryLabel, safe]);
-            // 单个文件夹：只枚举其顶层子项并整体搬运；多个文件/文件夹：同样只处理顶层项。
-            // 统一走 importTopLevelEntries，不再把子目录递归拍平成逐文件移动。
-            var counter;
-            if (cand.dirHandle && cand.dirHandle.values) {
-              counter = await importTopLevelEntries(cand.dirHandle, dstDir, onProgress, { dstAbs: dstAbs, srcRootAbs: moveOpts.srcRootAbs || '' });
-            } else {
-              counter = { copied: 0, moved: 0, failed: 0 };
-              for (var f of cand.files) {
-                var entry = {
-                  kind: 'file', name: f.name, getFile: function () { return f.handle.getFile(); },
-                  move: f.handle && f.handle.move ? function (d) { return f.handle.move(d); } : null,
-                  remove: f.handle && f.handle.remove ? function () { return f.handle.remove(); } : null
-                };
-                var moved = await tryMoveEntry(entry, dstDir);
-                if (moved) { counter.moved++; continue; }
-                if (App.settings.importMoveInsteadOfCopy) {
-                  counter.failed++;
-                  if (onProgress) onProgress('\u26A0 移动失败，已跳过（不复制）：' + f.name);
-                } else {
-                  await copyEntryTo(entry, dstDir, entry.name);
-                  counter.copied++;
+          /* 同名目录不能直接复用：create:true 会拿回已有的那个目录，
+             同名文件被静默覆盖，两条素材还会指向同一个 path。撞名就换 _2、_3。 */
+          return App.pickFreeFolderName(safe, categoryLabel, {
+            exists: function (n) {
+              return catDir.getDirectoryHandle(n).then(function () { return true; }, function (err) {
+                // NotFoundError / TypeError（名字不合法）= 确实没有；其它错误按「占用」处理，让名字继续往后试
+                return !(err && (err.name === 'NotFoundError' || err.name === 'TypeError'));
+              });
+            }
+          }).then(function (pick) {
+            if (pick.renamed && onProgress) onProgress('\u26A0 素材库已有同名目录「' + safe + '」，改导入到「' + pick.name + '」');
+            return catDir.getDirectoryHandle(pick.name, { create: true }).then(async function (dstDir) {
+              var rootPath = App.libraryRoot();
+              var dstAbs = joinWinPath(rootPath, [categoryLabel, pick.name]);
+              // 单个文件夹：只枚举其顶层子项并整体搬运；多个文件/文件夹：同样只处理顶层项。
+              // 统一走 importTopLevelEntries，不再把子目录递归拍平成逐文件移动。
+              var counter;
+              if (cand.dirHandle && cand.dirHandle.values) {
+                counter = await importTopLevelEntries(cand.dirHandle, dstDir, onProgress, { dstAbs: dstAbs, srcRootAbs: moveOpts.srcRootAbs || '' });
+              } else {
+                counter = { copied: 0, moved: 0, failed: 0 };
+                for (var f of cand.files) {
+                  var entry = {
+                    kind: 'file', name: f.name, getFile: function () { return f.handle.getFile(); },
+                    move: f.handle && f.handle.move ? function (d) { return f.handle.move(d); } : null,
+                    remove: f.handle && f.handle.remove ? function () { return f.handle.remove(); } : null
+                  };
+                  var moved = await tryMoveEntry(entry, dstDir);
+                  if (moved) { counter.moved++; continue; }
+                  if (App.settings.importMoveInsteadOfCopy) {
+                    counter.failed++;
+                    if (onProgress) onProgress('\u26A0 移动失败，已跳过（不复制）：' + f.name);
+                  } else {
+                    await copyEntryTo(entry, dstDir, entry.name);
+                    counter.copied++;
+                  }
                 }
               }
-            }
-            return { dir: categoryLabel + '/' + safe, copied: counter.copied, moved: counter.moved, failed: counter.failed, total: counter.copied + counter.moved };
+              return { dir: categoryLabel + '/' + pick.name, copied: counter.copied, moved: counter.moved, failed: counter.failed, total: counter.copied + counter.moved };
+            });
           });
         });
       });
@@ -332,16 +344,32 @@ var Importer = (function () {
         if (!ok) return asset;
         var catLabel = App.categoryLabel(asset.category);
         var safe = App.folderName(asset);
+        var hasLocal = (asset.paths || []).some(function (x) {
+          return x && x.path && !App.isWebdavPath(x.path);
+        });
         return root.getDirectoryHandle(catLabel, { create: true }).then(function (catDir) {
-          return catDir.getDirectoryHandle(safe, { create: true }).then(function () {
-            var rel = catLabel + '\\' + safe;
-            var rootPath = App.libraryRoot();
-            var path = joinWinPath(rootPath, [rel]);
-            if (!(asset.paths || []).some(function (x) { return x.path === path; })) {
-              setPathEntry(asset, path, '存储路径');
-              onLog('\u{1F4C1} 已创建下载文件夹：' + rel);
-            }
-            return asset;
+          /* 已经有本地路径的素材照旧用原目录；只有新建的才挑空名字，避免两条素材共用一个目录 */
+          var pickP = hasLocal ? Promise.resolve({ name: safe, renamed: false })
+            : App.pickFreeFolderName(safe, catLabel, {
+              excludeId: asset.id,
+              exists: function (n) {
+                return catDir.getDirectoryHandle(n).then(function () { return true; }, function (err) {
+                  return !(err && (err.name === 'NotFoundError' || err.name === 'TypeError'));
+                });
+              }
+            });
+          return pickP.then(function (pick) {
+            if (pick.renamed) onLog('\u26A0 素材库已有同名目录「' + safe + '」，改用「' + pick.name + '」');
+            return catDir.getDirectoryHandle(pick.name, { create: true }).then(function () {
+              var rel = catLabel + '\\' + pick.name;
+              var rootPath = App.libraryRoot();
+              var path = joinWinPath(rootPath, [rel]);
+              if (!(asset.paths || []).some(function (x) { return x.path === path; })) {
+                setPathEntry(asset, path, '存储路径');
+                onLog('\u{1F4C1} 已创建下载文件夹：' + rel);
+              }
+              return asset;
+            });
           });
         }).catch(function () { return asset; });
       });

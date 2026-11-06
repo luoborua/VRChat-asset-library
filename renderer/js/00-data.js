@@ -7,7 +7,7 @@
 /** 应用信息 */
 var APP = {
   name: 'VRChat 改模素材管理库',
-  version: '1.2',
+  version: '1.2.1',
   dbName: 'vrc_asset_library',
   dbVersion: 3,
   lsKey: 'vrc_asset_library_fallback'

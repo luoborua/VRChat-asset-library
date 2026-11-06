@@ -1,6 +1,6 @@
 [package]
 name = "vrclib"
-version = "1.2.0"
+version = "1.2.1"
 description = "VRChat 改模素材管理库 · Tauri 版"
 edition = "2021"
 

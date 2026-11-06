@@ -263,6 +263,9 @@ var Packer = (function () {
                 category: a.category, source: a.source,
                 tags: a.tags, avatars: a.avatars,
                 itemId: a.itemId, shop: a.shop, author: a.author,
+                /* v6.6：带上商店链接 —— 接收方靠它判重（对方库里同链接的素材能认出来）。
+                   下载直链（downloadLinks）故意不带：那是本人的订单地址，给出去等于把付费内容送人。 */
+                links: (a.links || []).slice(),
                 isFree: a.isFree, fileSize: a.fileSize,
                 note: a.note,
                 purchasePrice: a.purchasePrice, purchaseCurrency: a.purchaseCurrency,
@@ -1015,6 +1018,21 @@ var Packer = (function () {
         if (String(assets[j].itemId || '').trim() === iid) return { asset: assets[j], by: '商品 ID' };
       }
     }
+    /* v6.6：商店链接重叠也算同一条（老包没有 links 字段，取到空数组自然跳过）。
+       这一档补的是「对方改过标题、又没有商品 ID」的情况 —— 链接一样就是同一件东西。 */
+    var mLinks = (meta.links || []).map(function (l) {
+      return String((l && l.url) || l || '').trim();
+    }).filter(isHttpUrl);
+    if (mLinks.length) {
+      for (var n = 0; n < assets.length; n++) {
+        var bLinks = ((assets[n] && assets[n].links) || []).map(function (l) {
+          return String((l && l.url) || l || '').trim();
+        });
+        for (var q = 0; q < bLinks.length; q++) {
+          if (bLinks[q] && mLinks.indexOf(bLinks[q]) >= 0) return { asset: assets[n], by: '商店链接' };
+        }
+      }
+    }
     var t = String(meta.title || '').trim().toLowerCase();
     if (!t) return null;
     for (var k = 0; k < assets.length; k++) {
@@ -1033,14 +1051,39 @@ var Packer = (function () {
   function showPreview(path, res) {
     var mf = res.manifest || {};
     var assets = App.assets || [];
+    /* 包内自查重（v6.6）：对方库里本身就有两条同商品/同链接的记录时，以前会原样建两条。
+       现在后出现的那条标成「包内重复」并默认不勾 —— 要留着自己勾上就行。 */
+    var seenInPack = Object.create(null);
+    function packKeys(m) {
+      var keys = [];
+      var iid = String(m.itemId || '').trim();
+      if (iid) keys.push({ key: 'iid:' + iid, by: '商品 ID' });
+      (m.links || []).forEach(function (l) {
+        var u = String((l && l.url) || l || '').trim();
+        if (isHttpUrl(u)) keys.push({ key: 'url:' + u, by: '商店链接' });
+      });
+      return keys;
+    }
     var plan = (mf.assets || []).map(function (m) {
       var hit = findExisting2(m, assets);
+      var dupeOf = null;
+      if (!hit) {
+        var keys = packKeys(m);
+        for (var i = 0; i < keys.length && !dupeOf; i++) {
+          var prev = seenInPack[keys[i].key];
+          if (prev) dupeOf = { title: prev.title, by: keys[i].by };
+        }
+        keys.forEach(function (k) {
+          if (!seenInPack[k.key]) seenInPack[k.key] = { title: String(m.title || '（无标题）') };
+        });
+      }
       return {
         meta: m,
         existing: hit ? hit.asset : null,
         by: hit ? hit.by : '',
-        sel: !hit,
-        act: hit ? 'skip' : 'keep'
+        dupeOf: dupeOf,
+        sel: !hit && !dupeOf,
+        act: (hit || dupeOf) ? 'skip' : 'keep'
       };
     });
     var nickname = String((mf.exporter && mf.exporter.nickname) || '').trim();
@@ -1097,8 +1140,10 @@ var Packer = (function () {
     function refreshStats() {
       var c = counts();
       var picked = plan.filter(function (p) { return p.sel; }).length;
+      var dupe = plan.filter(function (p) { return p.dupeOf; }).length;
       statsLine.textContent = '已勾选 ' + picked + ' 条'
-        + ' · 新增 ' + c.add + ' · 更新元数据 ' + c.upd + ' · 更新+文件 ' + c.app + ' · 跳过 ' + c.skip;
+        + ' · 新增 ' + c.add + ' · 更新元数据 ' + c.upd + ' · 更新+文件 ' + c.app + ' · 跳过 ' + c.skip
+        + (dupe ? '（其中 ' + dupe + ' 条包内重复，默认不勾）' : '');
     }
 
     function applyStrategy(val) {
@@ -1143,6 +1188,14 @@ var Packer = (function () {
         p.existing
           ? el('span', { class: 'chip chip-warn', title: '按「' + p.by + '」判定为你库里已有的一条', text: '已有 · ' + p.by })
           : el('span', { class: 'chip', text: '新素材' }),
+        p.dupeOf
+          ? el('span', {
+            class: 'chip chip-warn',
+            title: '这个包里前面已经有一条同' + p.dupeOf.by + '的素材：' + p.dupeOf.title
+              + '\n默认跳过。确认是两件不同的东西，勾上就会照样新建一条。',
+            text: '包内重复 · ' + p.dupeOf.title
+          })
+          : null,
         el('span', { class: 'chip chip-dim', text: (m.files && m.files.length ? m.files.length + ' 个文件' : '无文件') })
       ]);
 
@@ -1237,6 +1290,19 @@ var Packer = (function () {
       ['title', 'originalTitle', 'category', 'source', 'shop', 'author', 'itemId'].forEach(function (k) {
         if (m[k]) live[k] = m[k];
       });
+      /* v6.6：链接按 url 去重后并入，不覆盖已有的（对方那条可能只是同一商品的另一个页面） */
+      if (Array.isArray(m.links) && m.links.length) {
+        var have = Object.create(null);
+        (live.links || []).forEach(function (l) { if (l && l.url) have[l.url] = 1; });
+        var extra = [];
+        m.links.forEach(function (l) {
+          var u = String((l && l.url) || l || '').trim();
+          if (!isHttpUrl(u) || have[u]) return;
+          have[u] = 1;
+          extra.push({ url: u, label: (l && l.label) || hostOf(u) });
+        });
+        if (extra.length) live.links = (live.links || []).concat(extra);
+      }
       if (Array.isArray(m.tags) && m.tags.length) live.tags = m.tags.slice();
       if (Array.isArray(m.avatars) && m.avatars.length) live.avatars = m.avatars.slice();
       if (m.isFree != null) live.isFree = m.isFree;
@@ -1319,6 +1385,10 @@ var Packer = (function () {
             tags: (m.tags || []).slice(),
             avatars: (m.avatars || []).slice(),
             itemId: m.itemId || '',
+            /* 包里可能是 {url,label}，也可能只有一串 url（别人手改过清单），统一成 {url,label} */
+            links: (m.links || []).map(function (l) { return String((l && l.url) || l || '').trim(); })
+              .filter(isHttpUrl)
+              .map(function (u) { return { url: u, label: hostOf(u) }; }),
             shop: m.shop || '',
             author: m.author || '',
             isFree: (m.isFree === true) ? true : (m.isFree === false ? false : null),

@@ -139,7 +139,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 use tauri_plugin_dialog::DialogExt;
                 app.dialog()
                     .message(format!(
-                        "VRChat 改模素材管理库 · Tauri 版\n版本 1.2.0\n数据目录：{}",
+                        "VRChat 改模素材管理库 · Tauri 版\n版本 1.2.1\n数据目录：{}",
                         host::data_dir().to_string_lossy()
                     ))
                     .title("关于")

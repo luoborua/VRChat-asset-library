@@ -319,6 +319,8 @@ pub fn pack_create(pack: &PackState, payload: &Value) -> Result<Value, String> {
                 "itemId": s_of(e, "itemId"),
                 "shop": s_of(e, "shop"),
                 "author": s_of(e, "author"),
+                /* 商店链接：接收方靠它判重。老包没这个字段，导出侧缺省成空数组即可。 */
+                "links": e.get("links").cloned().unwrap_or(json!([])),
                 "isFree": is_free,
                 "fileSize": total_size,
                 "files": files_out,

@@ -1,6 +1,6 @@
 /* ============ 91-workbench.js ============ */
 /* =====================================================================
- * 91-workbench.js  —  改模工作台
+ * 91-workbench.js  —  导入与工程（原「改模工作台」，v6.8 改名并成为左侧页签）
  *
  * 这一页只做三件事（对应 docs/改模工作台-逻辑拆分.md）：
  *   1. 登记 Unity 工程、检查准备情况      —— L01~L13
@@ -87,13 +87,17 @@ var WB = (function () {
     });
   }
 
-  /* 工作台数据懒加载：以前只在打开工作台时读，导致没开过工作台就导入时
-     state.projects 还是空的，被误判成「没有配置工程」。这里做成幂等加载。 */
+  /* v6.7（用户要求「工作台不要懒加载」）：启动后由 90-main 的空闲回调调用 preload()，
+     把工程列表 / 导入队列提前读进内存；ensureLoaded 保留幂等语义，
+     供「万一 preload 还没跑完就点了导入」这种情况兜底。 */
   var loadingPromise = null;
   function ensureLoaded() {
     if (state.loaded) return Promise.resolve();
     if (!loadingPromise) loadingPromise = load();
     return loadingPromise;
+  }
+  function preload() {
+    return ensureLoaded().catch(function () { /* 首次运行没有文件也算加载完成 */ });
   }
   function validProjectRecord(p) {
     return p && typeof p.id === 'string' && typeof p.path === 'string' && p.path.length > 1;
@@ -156,17 +160,6 @@ var WB = (function () {
     if (job.state === 'completed') return 'completed';
   if (job.state === 'cancelled' || job.state === 'blocked') return 'attention';
     return 'waiting';
-  }
-
-  function maLineText(job) {
-    var where = job.maHierarchy || job.maAvatar || '';
-    if (job.maState === 'applied')
-      return 'MA 装配：已完成' + (where ? (' → ' + where) : '')
-        + (job.maMenuMode === 'created' ? '（已建显隐菜单开关）' : (job.maMenuMode === 'preserved' ? '（保留作者菜单）' : ''));
-    if (job.maState === 'skipped') return 'MA 装配：已在 Unity 里跳过';
-    if (job.maState === 'error') return 'MA 装配：失败 —— ' + (job.maMessage || '见 Unity 控制台');
-    if (job.maState === 'failed') return job.maMessage || 'MA 装配请求失败';
-    return 'MA 装配：等待 Unity 处理' + (job.maMessage ? (' —— ' + job.maMessage) : '（打开 Unity 后自动继续）');
   }
 
   function toastErr(e) {
@@ -270,8 +263,7 @@ var WB = (function () {
         checkedAt: r.checkedAt || 0,
         dependencies: r.dependencies || [],
         notes: r.notes || [],
-        bridgeInstalled: !!r.bridgeInstalled,
-        maInstalled: !!r.maInstalled
+        bridgeInstalled: !!r.bridgeInstalled
       };
       return save();
     }).catch(function (e) {
@@ -281,26 +273,22 @@ var WB = (function () {
   }
 
   /* =====================================================================
-   * 安装 Unity 助手（导入桥 + MA 装配，一次装两个）
+   * 安装 Unity 助手（导入桥）
    * ===================================================================== */
 
   function helperButtonLabel() {
     var r = state.readiness;
     if (!r) return '安装 Unity 助手';
-    if (r.bridgeInstalled && r.maInstalled) return '更新 Unity 助手';
-    if (r.bridgeInstalled || r.maInstalled) return '补装 Unity 助手';
-    return '安装 Unity 助手';
+    return r.bridgeInstalled ? '更新 Unity 助手' : '安装 Unity 助手';
   }
 
   function helperStatusText() {
     var r = state.readiness;
     if (!r) return 'Unity 助手状态未知，点「重新检查」后再看。';
-    var b = r.bridgeInstalled ? '导入助手 ✓' : '导入助手 ✗';
-    var m = r.maInstalled ? 'MA 装配助手 ✓' : 'MA 装配助手 ✗';
-    var tail = (r.bridgeInstalled && r.maInstalled)
-      ? '都在。程序更新后可用按钮升级助手；删除 Assets/Editor/ 里的文件即可移除。'
-      : '缺的可用按钮补装；装完回 Unity 编译一次（右下角转圈结束）即生效。';
-    return b + ' · ' + m + ' —— ' + tail;
+    return (r.bridgeInstalled ? '导入助手 ✓' : '导入助手 ✗')
+      + ' —— ' + (r.bridgeInstalled
+        ? '已装好。程序更新后可用按钮升级助手；删除 Assets/Editor/VrclibImportBridge.cs 即可移除。'
+        : '用按钮装一次；装完回 Unity 编译一次（右下角转圈结束）即生效。');
   }
 
   function installHelpers() {
@@ -454,26 +442,6 @@ var WB = (function () {
         : '点「导入到工程」之前，程序不会写任何文件。导入只是复制，不会移动或改动原素材。'
     }));
 
-    // 阶段 4：导入后可顺手发起 MA 装配（在 Unity 里执行，这里只写请求）
-    var maRow = el('label', { class: 'wb-ma-opt' }, [
-      el('input', {
-        type: 'checkbox',
-        onchange: function (e) { plan.ma = e.target.checked; menuWrap.style.display = e.target.checked ? '' : 'none'; }
-      }),
-      el('span', { text: '导入后用 Modular Avatar 装配到角色（在 Unity 里完成，可一次撤销）' })
-    ]);
-    var menuWrap = el('label', { class: 'wb-ma-opt wb-ma-sub', style: { display: 'none' } }, [
-      el('input', {
-        type: 'checkbox',
-        checked: true,
-        onchange: function (e) { plan.maMenu = e.target.checked; }
-      }),
-      el('span', { text: '同时接入游戏内显隐菜单开关（作者已带 MA 菜单则保留原样）' })
-    ]);
-    plan.maMenu = true;
-    body.push(maRow);
-    body.push(menuWrap);
-
     var h = Modal.open({
       title: '导入预览 · ' + plan.sourceName,
       size: 'lg',
@@ -535,26 +503,6 @@ var WB = (function () {
       ]));
     }
     body.push(el('p', { class: 'wb-hint', text: '点「发送到 Unity」只会写入一个很小的请求文件；素材包本身不动，导入动作由你在 Unity 弹窗里确认。' }));
-
-    // 阶段 4：包导入完成后可顺手发起 MA 装配
-    var maRow = el('label', { class: 'wb-ma-opt' }, [
-      el('input', {
-        type: 'checkbox',
-        onchange: function (e) { plan.ma = e.target.checked; menuWrap.style.display = e.target.checked ? '' : 'none'; }
-      }),
-      el('span', { text: '导入完成后用 Modular Avatar 装配到角色（在 Unity 里完成，可一次撤销）' })
-    ]);
-    var menuWrap = el('label', { class: 'wb-ma-opt wb-ma-sub', style: { display: 'none' } }, [
-      el('input', {
-        type: 'checkbox',
-        checked: true,
-        onchange: function (e) { plan.maMenu = e.target.checked; }
-      }),
-      el('span', { text: '同时接入游戏内显隐菜单开关（作者已带 MA 菜单则保留原样）' })
-    ]);
-    plan.maMenu = true;
-    body.push(maRow);
-    body.push(menuWrap);
 
     var h = Modal.open({
       title: '导入预览 · ' + plan.sourceName,
@@ -631,20 +579,6 @@ var WB = (function () {
       } else {
         Toast.ok('已导入 ' + job.completedFiles + ' 个文件到 ' + r.destRel);
       }
-      // 阶段 4：勾了 MA 装配 → 复制完成后立刻发装配请求
-      if (plan.ma) {
-        var prefabs = (r.prefabs && r.prefabs.length) ? r.prefabs : null;
-        if (!prefabs) {
-          Toast.warn('这份素材里没有 .prefab 预制件，MA 装配没有发起。', 5200);
-        } else {
-          return sendMaRequest(job, {
-            mode: 'copy',
-            signature: r.signature || plan.signature,
-            prefabPaths: prefabs,
-            menu: !!plan.maMenu
-          });
-        }
-      }
       return save();
     }).catch(function (e) {
       job.state = 'failed';
@@ -656,32 +590,6 @@ var WB = (function () {
       setBusy(false);
       render();
       startPolling();
-    });
-  }
-
-  /* 发起 MA 装配请求（阶段 4）。job.maRequestId / job.maState 由这里维护 */
-  function sendMaRequest(job, opts) {
-    var p = state.projects.filter(function (x) { return x.id === job.projectId; })[0];
-    if (!p) return Promise.resolve();
-    return wb('maRequest', {
-      projectRoot: job.projectPath,
-      sourceName: job.sourceName || '素材',
-      mode: opts.mode,
-      signature: opts.signature,
-      importId: opts.importId || '',
-      prefabPaths: opts.prefabPaths || [],
-      menu: !!opts.menu
-    }).then(function (r) {
-      job.maRequestId = (r && r.requestId) || '';
-      job.maState = 'waiting';
-      job.maMessage = (r && r.message) || '';
-      startPolling();
-      return save();
-    }).catch(function (e) {
-      job.maState = 'failed';
-      job.maMessage = 'MA 装配请求失败：' + String((e && e.message) || e);
-      Toast.warn(job.maMessage, 6000);
-      return save();
     });
   }
 
@@ -700,9 +608,7 @@ var WB = (function () {
       state: 'waiting-unity',
       fileCount: 1,
       bytes: plan.bytes,
-      signature: plan.signature,     // 阶段 4：MA 请求要用同一个身份
-      maWanted: !!plan.ma,           // 导入完成后要发起 MA 装配
-      maMenu: !!plan.maMenu,
+      signature: plan.signature,
       requestId: '',
       createdAt: Date.now()
     };
@@ -743,13 +649,8 @@ var WB = (function () {
       var pendingImports = state.jobs.filter(function (j) {
         return j.state === 'waiting-unity' && j.requestId;
       });
-      var pendingMa = state.jobs.filter(function (j) {
-        return j.maRequestId && j.maState !== 'applied' && j.maState !== 'skipped'
-          && j.maState !== 'error' && j.maState !== 'failed';
-      });
-      if (!pendingImports.length && !pendingMa.length) { stopPolling(); return; }
+      if (!pendingImports.length) { stopPolling(); return; }
       pendingImports.slice(0, 5).forEach(checkReceipt);
-      pendingMa.slice(0, 5).forEach(checkMaReceipt);
     }, 3000);
   }
   function stopPolling() {
@@ -804,16 +705,6 @@ var WB = (function () {
             + (r.assetsComplete === false ? '（列表超长已截断）' : '')
             + (job.overwrote.length ? ('，覆盖了 ' + job.overwrote.length + ' 个已有资源') : ''))
           : (r.message || '导入完成，具体位置请在 Unity 的 Project 窗口确认。');
-        // 阶段 4：包导入完成后，按需发起 MA 装配
-        if (job.maWanted && !job.maRequestId && job.maState !== 'failed') {
-          sendMaRequest(job, {
-            mode: 'unitypackage',
-            signature: job.signature,
-            importId: job.requestId,
-            prefabPaths: [],
-            menu: !!job.maMenu
-          });
-        }
       } else if (r.state === 'cancelled') {
         job.state = 'cancelled';
         job.message = r.message || '在 Unity 弹窗里取消了导入。';
@@ -858,28 +749,6 @@ var WB = (function () {
     job.message = '已放弃，Unity 不会再导入这个请求';
     job.finishedAt = Date.now();
     save().then(render);
-  }
-
-  function checkMaReceipt(job) {
-    wb('maReceipt', { projectRoot: job.projectPath, requestId: job.maRequestId }).then(function (r) {
-      if (!r || !r.found) return;
-      if (r.state === 'waiting-import' || r.state === 'waiting-selection') {
-        var msg = r.message || '';
-        if (job.maMessage !== msg) { job.maMessage = msg; render(); }
-        return;
-      }
-      job.maState = r.state === 'applied' ? 'applied' : (r.state === 'skipped' ? 'skipped' : 'error');
-      job.maMessage = r.message || '';
-      job.maAvatar = r.avatarName || '';
-      job.maHierarchy = r.hierarchyPath || '';
-      job.maMenuMode = r.menuMode || '';
-      save().then(render);
-      if (job.maState === 'applied') {
-        Toast.ok('MA 装配完成：' + (job.maHierarchy || job.maAvatar || job.sourceName));
-      } else if (job.maState === 'error') {
-        Toast.err('MA 装配失败：' + job.maMessage, 7000);
-      }
-    }).catch(function () { /* 单次查询失败不打扰 */ });
   }
 
   /* ---------------- 记录操作 ---------------- */
@@ -1087,9 +956,6 @@ var WB = (function () {
         (job.overwrote && job.overwrote.length)
           ? el('div', { class: 'wb-job-dest wb-mono', text: '覆盖了 ' + job.overwrote.length + ' 个已有资源' + (job.overwrote.length > 3 ? '（只列前 3 条）' : '') + '\n' + job.overwrote.slice(0, 3).join('\n') })
           : null,
-        job.maRequestId || job.maState
-          ? el('div', { class: 'wb-job-msg wb-ma-line', text: maLineText(job) })
-          : null,
         (job.importedAssets && job.importedAssets.length)
           ? el('div', { class: 'wb-job-dest wb-mono', text: job.importedAssets.slice(0, 3).join('\n') + (job.importedAssets.length > 3 ? ('\n… 共 ' + job.importedAssets.length + ' 个') : '') })
           : null
@@ -1120,7 +986,7 @@ var WB = (function () {
     var root = el('div', { class: 'wb-page' }, [
       el('header', { class: 'wb-head' }, [
         el('div', { class: 'wb-head-title' }, [
-          el('b', { text: '改模工作台' }),
+          el('b', { text: '导入与工程' }),
           el('small', { text: '选工程 · 看准备情况 · 导入素材 · 记账' })
         ]),
         el('div', { class: 'grow' }),
@@ -1130,7 +996,8 @@ var WB = (function () {
           onclick: function () { if (taskPanel) openTaskPanel(); }
         }, '导入队列'),
         el('button', { class: 'btn', onclick: showLog }, 'Unity 日志'),
-        el('button', { class: 'icon-btn', title: '关闭 (Esc)', onclick: close }, ICONS.label('\u2715'))
+        /* v6.8：工作台是页签，这里不再是「关闭」而是「切回素材库」 */
+        el('button', { class: 'icon-btn', title: '回到素材库 (Esc)', onclick: backToLibrary }, ICONS.label('\u2715'))
       ]),
       el('div', { class: 'wb-body' }, [
         el('p', { class: 'wb-hint', text: '正在读取…' })
@@ -1162,12 +1029,29 @@ var WB = (function () {
     setTimeout(function () { if (node.parentNode) node.parentNode.removeChild(node); }, 200);
   }
 
+  /* v6.8：页签切换只隐藏，不销毁 —— 回来时不用重建 DOM、也不用重读 workbench.json，
+   * 导入队列的轮询在后台照常跑（切回素材库也能继续收回执）。 */
+  function show() {
+    if (!state.opened) { open(); return; }
+    if (state.root) state.root.classList.add('in');
+    document.body.classList.add('wb-open');
+  }
+  function hide() {
+    if (!state.root) return;
+    state.root.classList.remove('in');
+    document.body.classList.remove('wb-open');
+  }
+  /** ✕ / Esc：切回素材库页签（由 AppTab 负责同步 body class 与页签高亮） */
+  function backToLibrary() {
+    if (window.AppTab) AppTab.set('library');
+    else hide();
+  }
+
   function boot() {
     initCloseGuard();
-    var btn = document.getElementById('btnWorkbench');
-    if (btn) btn.addEventListener('click', open);
+    /* 入口已经挪到左侧页签栏（90-main 的 Tab 模块），这里不再绑顶栏按钮 */
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' && state.opened && !document.querySelector('.modal-overlay')) close();
+      if (e.key === 'Escape' && state.opened && !document.querySelector('.modal-overlay')) backToLibrary();
     });
   }
 
@@ -1380,7 +1264,7 @@ var WB = (function () {
   function taskPanelSetCollapsed(on) {
     if (!taskPanel) return;
     taskPanel.root.classList.toggle('wb-task-collapsed', !!on);
-    taskPanel.root.title = on ? '导入队列还在跑，点这里展开' : '';
+    taskPanel.root.title = on ? '导入队列 · 鼠标移入展开' : '';
     taskPanel.place();
     refreshQueueEntry();
   }
@@ -1465,32 +1349,47 @@ var WB = (function () {
       refreshQueueEntry();
     }
 
-    var st = { dock: 'right', x: null, y: null };
+    /* v6.9：跟下载气泡一样，只贴右边。按住标题栏只剩上下拖，横向锁在右边缘。 */
+    var st = { y: null };
     function place() {
       var w = root.offsetWidth || 320;
       var h = root.offsetHeight || 90;
-      var x = st.dock === 'left' ? 0 : Math.max(0, window.innerWidth - w);
-      if (!st.dock && st.x != null) x = Math.max(0, Math.min(window.innerWidth - w, st.x));
-      var y = (st.y == null) ? Math.max(0, window.innerHeight - h - 96) : st.y;
+      var x = Math.max(0, window.innerWidth - w);
       root.style.left = x + 'px';
-      root.style.top = Math.max(0, Math.min(window.innerHeight - h, y)) + 'px';
-      // 贴左边时向右指，贴右边时向左指
-      stripArrow.textContent = st.dock === 'left' ? '\u203a' : '\u2039';
+      if (st.y == null) {
+        /* v6.9：默认贴底 170px（右下角是多选时的浮动动作区，约 133px 高 + 22px 边距）。
+         * 必须用 bottom 而不是算 top —— 折叠成竖条时高度只有 34px，用 top 定位会让面板
+         * 每次展开/收起上下跳 80 多 px，鼠标刚移上去面板就跳走，hover 会来回抖。 */
+        root.style.top = 'auto';
+        root.style.bottom = '170px';
+      } else {
+        root.style.bottom = 'auto';
+        root.style.top = Math.max(0, Math.min(window.innerHeight - h, st.y)) + 'px';
+      }
+      stripArrow.textContent = '\u2039';
     }
 
-    // 按住标题拖动；松手后吸附到最近的一侧，避免悬在中间挡住素材
+    /* v6.9：与下载面板同一套交互 —— 平时收成 34px 竖条，鼠标移入展开、移出收起。
+       拖动过程中不收起，否则拖到面板外会当场塌成条。 */
+    root.addEventListener('mouseenter', function () {
+      if (root.classList.contains('wb-task-dragging')) return;
+      taskPanelSetCollapsed(false);
+    });
+    root.addEventListener('mouseleave', function () {
+      if (root.classList.contains('wb-task-dragging')) return;
+      taskPanelSetCollapsed(true);
+    });
+
+    // 按住标题上下拖；贴边方向固定朝右，不再吸附到左边（左边是页签栏）
     head.addEventListener('mousedown', function (ev) {
       if (ev.target && ev.target.tagName === 'BUTTON') return;
       // 收起态标题栏是隐藏的；再兜一层，别让拖动抢走「展开」
       if (root.classList.contains('wb-task-collapsed')) return;
       var r = root.getBoundingClientRect();
-      var ox = ev.clientX - r.left, oy = ev.clientY - r.top;
-      st.dock = '';
-      st.x = r.left;
+      var oy = ev.clientY - r.top;
       st.y = r.top;
       root.classList.add('wb-task-dragging');
       function mv(e) {
-        st.x = Math.max(0, Math.min(window.innerWidth - r.width, e.clientX - ox));
         st.y = Math.max(0, Math.min(window.innerHeight - r.height, e.clientY - oy));
         place();
       }
@@ -1498,11 +1397,8 @@ var WB = (function () {
         document.removeEventListener('mousemove', mv);
         document.removeEventListener('mouseup', up);
         root.classList.remove('wb-task-dragging');
-        var rr = root.getBoundingClientRect();
-        st.dock = (st.x + rr.width / 2) < window.innerWidth / 2 ? 'left' : 'right';
-        st.x = null;
-        root.classList.toggle('wb-task-docked-left', st.dock === 'left');
-        root.classList.toggle('wb-task-docked-right', st.dock === 'right');
+        root.classList.add('wb-task-docked-right');
+        root.classList.remove('wb-task-docked-left');
         place();
       }
       document.addEventListener('mousemove', mv);
@@ -1518,7 +1414,7 @@ var WB = (function () {
 
     taskPanel = {
       root: root, badge: badge, status: status, sub: sub, resumeBtn: resumeBtn, requeueBtn: requeueBtn,
-      resumeDismissBtn: resumeDismissBtn, running: false, place: place,
+      resumeDismissBtn: resumeDismissBtn, running: false, place: place, setBadge: setBadge,
       /* 显示一个临时动作按钮；传空则收起 */
       action: function (text, fn) {
         if (!text || !fn) { actionBtn.style.display = 'none'; actionBtn.disabled = false; return; }
@@ -1554,6 +1450,19 @@ var WB = (function () {
     return taskPanel;
   }
 
+  /* v6.9：导入队列常驻 —— 启动就在右下角把面板摆出来，空队列也显示，
+     不用等第一次导入才凭空冒出来一个。导入时 openTaskPanel() 复用它。
+     用户点 ✕ 关掉后本次运行不再自动重建（下次导入仍会新建）。 */
+  function initIdlePanel() {
+    if (taskPanel && document.body.contains(taskPanel.root)) return;
+    var p = openTaskPanel();
+    p.setBadge('0');
+    p.status.textContent = '队列为空';
+    p.sub.textContent = '选中素材后右键「导入到 Unity」，任务会排到这里。';
+    taskPanelSetCollapsed(true);   // 与下载面板一致：启动就收成竖条，鼠标移入展开
+    refreshQueueEntry();
+  }
+
   function taskPanelDestroy() {
     if (!taskPanel) return;
     // 队列还在跑：只收起，绝不把入口弄丢
@@ -1575,7 +1484,7 @@ var WB = (function () {
       return;
     }
     ensureLoaded().then(function () {
-      if (!state.projects.length) { Toast.err('先在工作台里添加 Unity 工程，再回来导入'); return; }
+      if (!state.projects.length) { Toast.err('先在「导入与工程」里添加 Unity 工程，再回来导入'); return; }
       /* 续传：上次用的工程还在，就直接续，不再让用户选一遍 */
       var wantId = (opts && opts.projectId) || '';
       var reuse = wantId ? state.projects.filter(function (p) { return p.id === wantId; })[0] : null;
@@ -2209,6 +2118,10 @@ var WB = (function () {
       }
     }
   }
+  /* 常驻的导入队列面板必须在这里创建 —— boot() 在这份文件的中段就可能跑（DOM 已 ready），
+     那一刻下面的 `var taskPanel = null` 还没执行，创建出来的面板随后会被重置成 null：
+     面板看得见，但关不掉、也折叠不了，下次导入还会再建一个同 id 的。 */
+  try { initIdlePanel(); } catch (e) {}
   ensureLoaded();
-  return { open: open, close: close, addProject: addProject, check: check, importFlow: importFlow, importToUnity: importToUnity };
+  return { open: open, close: close, show: show, hide: hide, addProject: addProject, check: check, importFlow: importFlow, importToUnity: importToUnity, preload: preload, initIdlePanel: initIdlePanel };
 })();

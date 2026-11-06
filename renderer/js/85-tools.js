@@ -77,14 +77,9 @@ var Tools = {
       cancelled = false;
       running = true; startBtn.disabled = true; ICONS.apply(startBtn, ('\u23F3 扫描中 …'));
       logBox.innerHTML = ''; reportBox.innerHTML = '';
-      function hasRemote(a) {
-        return (a.paths || []).some(function (p) { var v = (p && typeof p === 'object') ? p.path : p; return v && App.isWebdavPath(v); });
-      }
-      // v2.5.1（P6）：只有 webdav:// 远端路径的素材不再混进「未关联本地路径」——单列一类
-      var noPath = App.assets.filter(function (a) { return !App.primaryLocalPath(a) && !hasRemote(a); });
-      var remoteOnly = App.assets.filter(function (a) { return !App.primaryLocalPath(a) && hasRemote(a); });
+      var noPath = App.assets.filter(function (a) { return !App.primaryLocalPath(a); });
       var targets = App.assets.filter(function (a) { return !!App.primaryLocalPath(a); });
-      log('未关联本地路径：' + noPath.length + ' 个；仅远端（webdav）路径：' + remoteOnly.length + ' 个；有本地路径：' + targets.length + ' 个，开始逐个扫描 …');
+      log('未关联本地路径：' + noPath.length + ' 个；有本地路径：' + targets.length + ' 个，开始逐个扫描 …');
       var scanned = [], i = 0;
       var chain = Promise.resolve();
       targets.forEach(function (a) {
@@ -107,8 +102,6 @@ var Tools = {
         log((cancelled ? '已停止，' : '') + '扫描完成：' + scanned.length + ' 个素材。');
         reportBox.appendChild(el('h3', { text: '未关联本地路径（' + noPath.length + '）' }));
         reportBox.appendChild(listOf(noPath.map(function (a) { return { node: itemBtn(a) }; })));
-        reportBox.appendChild(el('h3', { text: '仅远端（webdav）路径，未本地化（' + remoteOnly.length + '）' }));
-        reportBox.appendChild(listOf(remoteOnly.map(function (a) { return { node: itemBtn(a) }; })));
         reportBox.appendChild(el('h3', { text: '存储目录不存在 / 扫不到（' + badDir.length + '）' }));
         reportBox.appendChild(listOf(badDir.map(function (x) { return { node: itemBtn(x.a, '— ' + x.st.dir) }; })));
         reportBox.appendChild(el('h3', { text: '库里有记录但磁盘缺失（' + miss.length + ' 个素材 / ' + missFiles + ' 个文件）' }));
@@ -244,12 +237,11 @@ var Tools = {
      * 本入口是**只读对账**，后端不可用时不再早退 —— App.localFileAudit 会降级到浏览器库根句柄（FSA）枚举；
      * 只有「后端离线 且 没有可用的库目录句柄」这一档才如实说明"拿不到数字"，且**不用「（未校验）」这类标注**（不可判定 ≠ 没有文件）。 */
     FS.hostEnsure().then(function (hostOk) {
-      var okN = 0, missN = 0, missFiles = 0, badN = 0, remoteN = 0, fsaN = 0, unverifiedN = 0;
+      var okN = 0, missN = 0, missFiles = 0, badN = 0, fsaN = 0, unverifiedN = 0;
       var chain = Promise.resolve();
       list.forEach(function (a) {
         chain = chain.then(function () {
           return App.localFileAudit(a).then(function (st) {
-            if (st.error === 'remote-only') { remoteN++; return; }
             if (st.error === 'offline' || st.error === 'no-host') { unverifiedN++; return; }   // 第三档：不可判定
             if (st.error) { badN++; return; }
             if (st.via === 'fsa') fsaN++;
@@ -260,12 +252,11 @@ var Tools = {
       return chain.then(function () {
         if (!hostOk && !fsaN && unverifiedN) {
           Toast.warn('磁盘状态：后端不可用，且没有可用的素材库目录句柄，暂时无法核对磁盘（到「设置 → 本地库目录」选择一次即可）。共 ' + list.length + ' 个素材'
-            + (remoteN ? '；仅远端路径 ' + remoteN + ' 个' : '') + '。', 7600);
+            + '。', 7600);
           return;
         }
         var how = hostOk ? '' : '（浏览器库目录校验）';
         Toast.ok('磁盘状态' + how + '：正常 ' + okN + ' 个；缺文件 ' + missN + ' 个（共 ' + missFiles + ' 个文件）；路径失效 ' + badN + ' 个'
-          + (remoteN ? '；仅远端路径 ' + remoteN + ' 个' : '')
           + (unverifiedN ? '；另有 ' + unverifiedN + ' 个暂时无法核对' : ''), 7600);
       });
     }).catch(function (e) { Toast.err('扫描失败：' + ((e && e.message) || e)); });

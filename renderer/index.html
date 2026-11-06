@@ -42,9 +42,8 @@
 
   <div class="topbar-actions">
     <button class="icon-btn" id="btnTheme" title="切换主题 (T)">&#x1F319;</button>
-    <button class="btn" id="btnSelectMode" title="多选模式：勾选多个素材后批量操作">&#x2611;<span class="label">多选</span></button>
+    <button class="icon-btn" id="btnP2PRecv" title="接收好友传来的文件">&#x1F517;</button>
     <button class="btn" id="btnImport" title="导入本地文件夹 / 已购素材 / 粘贴多个链接批量添加">&#x1F4E5;<span class="label">导入</span></button>
-    <button class="btn" id="btnWorkbench" title="改模工作台：把素材导入 Unity 工程并记账">&#x1F9F0;<span class="label">工作台</span></button>
     <button class="btn btn-primary" id="btnAdd" title="添加素材 (N)">&#x2795;<span class="label">添加素材</span></button>
     <button class="btn" id="btnSettings" title="设置">&#x2699;<span class="label">设置</span></button>
   </div>
@@ -56,7 +55,17 @@
 </header>
 
 <div class="layout">
-  <!-- 侧栏筛选 -->
+  <!-- 左侧页签：素材库 / 导入与工程。工作台不再是全屏浮层，而是与素材库并列的第二个页签 -->
+  <nav class="tabrail" id="tabRail">
+    <button class="tabrail-btn active" id="tabLibrary" data-tab="library" title="素材库：筛选、搜索、浏览素材">
+      <span class="ico"></span><span class="tx">素材库</span>
+    </button>
+    <button class="tabrail-btn" id="tabWorkbench" data-tab="workbench" title="导入与工程：把素材导入 Unity 工程并记账">
+      <span class="ico"></span><span class="tx">导入与工程</span>
+    </button>
+  </nav>
+
+  <!-- 侧栏筛选（只属于「素材库」页签） -->
   <aside class="sidebar">
     <div id="sidebarBody"></div>
   </aside>
@@ -64,6 +73,7 @@
   <!-- 主区域 -->
   <main class="main">
     <div class="toolbar">
+      <button class="btn btn-sm btn-select-toggle" id="btnSelectMode" title="多选模式：勾选多个素材后批量操作（也可以按住卡片拖动连选）">&#x2611;<span class="label">多选</span></button>
       <span id="resultInfo">共 0 项</span>
       <span class="grow"></span>
       <span class="toolbar-controls">
@@ -90,8 +100,6 @@
       
     
       <button class="btn btn-sm btn-danger-ghost" id="bulkDelete">删除</button>
-      <span class="grow"></span>
-      <button class="btn btn-sm" id="bulkExit">退出多选</button>
     </div>
 
     <div class="grid" id="grid" data-size="m"></div>
@@ -132,11 +140,17 @@
   <script src="js/89-pack.js"></script>
   <script src="js/89b-drop-import.js"></script>
   <script src="js/91-workbench.js"></script>
+  <script src="js/92-p2p.js"></script>
   <script src="js/95-shell-bridge.js"></script>
   <script src="js/90-main.js"></script>
-<div class="fab-group" id="fabGroup">
-  <button class="fab" id="fabExportPack">导出素材包</button>
-  <button class="fab fab-primary" id="fabImportUnity">导入到 Unity</button>
+<!-- 多选模式的浮动操作区：退出在最上面（独立配色），下面两个是常用动作 -->
+<div class="fab-dock" id="fabDock">
+  <button class="fab-exit" id="bulkExit" title="退出多选（Esc）">退出多选</button>
+  <div class="fab-group" id="fabGroup">
+    <button class="fab" id="fabP2P">传给好友</button>
+    <button class="fab" id="fabExportPack">导出素材包</button>
+    <button class="fab fab-primary" id="fabImportUnity">导入到 Unity</button>
+  </div>
 </div>
 </body>
 </html>

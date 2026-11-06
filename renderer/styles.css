@@ -9,6 +9,7 @@
   --mono: ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace;
   --topbar-h: 58px;
   --sidebar-w: 300px;
+  --tabrail-w: 78px;          /* v6.8：左侧页签栏宽度，工作台页靠它让位 */
   --tr: .18s ease;
   /* v4.5：弹窗遮罩色。以前写死成接近黑的蓝，粉/蓝主题下打开详情页会像被蒙了一层灰。 */
   --scrim: rgba(6,8,12,.62);
@@ -344,6 +345,37 @@ html[data-theme="light"] .btn-update { color: #fff; }
  * 多不多、会不会出滚动条」而变。否则卡片宽度按无滚动条时算好，卡片一多滚动条出现，
  * 可用宽度少 10px，一行就少排一张、右侧空出一条。 */
 .layout { display: flex; align-items: flex-start; position: fixed; left: 0; right: 0; top: var(--topbar-h); bottom: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; }
+
+/* ---------------- v6.8：左侧页签栏 ----------------
+ * 素材库 / 导入与工程两条竖排页签。原来是顶栏一个「工作台」按钮 + 全屏浮层，
+ * 现在工作台成了并列页签（浮层仍在，只是 left 让出这条栏的宽度）。 */
+.tabrail {
+  width: var(--tabrail-w); flex: 0 0 var(--tabrail-w);
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 8px;
+  background: var(--bg-2); border-right: 1px solid var(--border);
+  height: calc(100vh - var(--topbar-h)); position: sticky; top: 0; z-index: 5;
+}
+.tabrail-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 11px 4px 9px; border-radius: 10px;
+  border: 1px solid transparent; background: transparent;
+  color: var(--text-3); font: inherit; font-size: 11.5px; line-height: 1.15;
+  cursor: pointer; transition: background .16s ease, color .16s ease, border-color .16s ease;
+  -webkit-app-region: no-drag;
+}
+.tabrail-btn .ico { display: flex; align-items: center; justify-content: center; height: 20px; }
+.tabrail-btn:hover { background: var(--bg-hover); color: var(--text); }
+.tabrail-btn.active { background: var(--primary-soft); color: var(--primary); border-color: var(--primary); }
+.tabrail-btn.active .ico { transform: scale(1.06); }
+.tabrail-btn .tx { white-space: nowrap; }
+@media (max-width: 900px) {
+  /* 窗口很窄时只留图标，把文字藏掉（宽度改的是变量，工作台页的 left 跟着一起收） */
+  :root { --tabrail-w: 54px; }
+  .tabrail { padding: 8px 6px; }
+  .tabrail-btn .tx { display: none; }
+}
+
 .sidebar {
   width: var(--sidebar-w); flex: 0 0 var(--sidebar-w); background: var(--bg-2);
   border-right: 1px solid var(--border); padding: 12px; overflow-y: auto;
@@ -403,6 +435,12 @@ body.sidebar-hidden .sidebar { width: 0; flex-basis: 0; padding-left: 0; padding
 }
 .toolbar .grow { flex: 1; }
 #resultInfo { color: var(--text-3); font-size: 12.5px; }
+/* v6.6：多选开关挪到结果行左侧（原来在右上角工具组里，离内容太远）；
+   开着的时候整体染成主色，一眼能看出「现在点卡片是勾选」 */
+.btn-select-toggle.active {
+  background: var(--primary); border-color: var(--primary); color: #fff;
+}
+.btn-select-toggle.active:hover { background: var(--primary); filter: brightness(1.06); }
 .toolbar-controls .view-btn { width: 34px; height: 30px; min-width: 34px; padding: 0; font-size: 15px; line-height: 1; }
 select.input, .toolbar select {
   height: 30px; background: var(--bg-3); color: var(--text); border: 1px solid var(--border);
@@ -412,13 +450,36 @@ select.input, .toolbar select {
 .toolbar #pageSizeSelect { width: 112px; }
 
 /* 批量条 */
+/* v6.6：进出都带动画 —— 原来是 display:none ↔ flex 硬切，出现得很突兀。
+   改成 max-height / 内边距 / 透明度一起过渡，收起时不占布局。 */
 .bulk-bar {
-  display: none; align-items: center; gap: 8px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   background: var(--primary-soft); border: 1px solid var(--primary);
-  border-radius: var(--radius); padding: 8px 12px; margin-bottom: 12px;
+  border-radius: var(--radius);
+  max-height: 0; opacity: 0; transform: translateY(-8px);
+  padding: 0 12px; margin-bottom: 0; border-width: 0;
+  overflow: hidden; pointer-events: none;
+  transition: max-height .24s ease, opacity .18s ease, transform .24s ease,
+              padding .24s ease, margin-bottom .24s ease, border-width .24s ease;
 }
-.bulk-bar.show { display: flex; }
+.bulk-bar.show {
+  max-height: 220px; opacity: 1; transform: none;
+  padding: 8px 12px; margin-bottom: 12px; border-width: 1px;
+  pointer-events: auto;
+}
+.bulk-bar > * { opacity: 0; transform: translateY(-4px); transition: opacity .2s ease .06s, transform .2s ease .06s; }
+.bulk-bar.show > * { opacity: 1; transform: none; }
 .bulk-bar b { color: var(--primary); }
+#bulkCount { display: inline-block; }
+#bulkCount.bump { animation: bulkCountPop .3s cubic-bezier(.4, 1.6, .5, 1); }
+@keyframes bulkCountPop {
+  0% { transform: scale(1); }
+  45% { transform: scale(1.4); }
+  100% { transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bulk-bar, .bulk-bar > *, #bulkCount.bump { transition: none; animation: none; }
+}
 
 /* ---------------- 卡片纵向分割栏（轮转分栏：1,7,13… / 2,8,14…） ---------------- */
 /* v5.0：CSS grid —— 列数 = 可用宽度 / 固定卡宽；收起侧栏只会多排几列，卡片不变形。
@@ -446,7 +507,7 @@ body.has-pager #grid { padding-bottom: 76px; }
   border-radius: var(--radius); overflow: hidden; cursor: pointer; transition: var(--tr);
   display: flex; flex-direction: column;
 }
-.card:hover { transform: translateY(-3px); border-color: var(--border-2); box-shadow: var(--shadow); }
+.card:hover { transform: translateY(-2px); border-color: var(--border-2); box-shadow: var(--shadow); }
 .card.selected { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-soft); }
 .card-cover {
   position: relative; aspect-ratio: 4 / 3; background: var(--cover-bg);
@@ -570,8 +631,10 @@ body.has-pager #grid { padding-bottom: 76px; }
 .tag-click { cursor: pointer; transition: var(--tr); }
 .tag-click:hover { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
 /* v2.5.10（用户要求）：卡片上的标签 / 适用角色 chip 若正是**当前生效的筛选条件** → 常亮高亮
- * （复用侧栏选中项的视觉语言：主色描边 + 主色淡底 + 主色文字） */
-.tag.tag-on, .chip-av.chip-on { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
+ * （复用侧栏选中项的视觉语言：主色描边 + 主色淡底 + 主色文字）
+ * v6.7：分类 / 来源 chip 也纳入了「点一下筛，再点取消」的开关逻辑，所以一并高亮 —— 否则用户看不出
+ * 第二下会取消，只当成又点了一次。 */
+.tag.tag-on, .chip.chip-on { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
 .tag-untrans { color: var(--warn); border-color: rgba(245,180,69,.35); }
 /* v3.0.0（用户要求）：标签筛选三态 —— 排除态与包含态一眼可分（红色系描边 + 删除线）；包含态沿用 .tag-on。
  * 侧栏标签项（.side-item.tag-out）与卡片/详情标签（.tag.tag-out）共用同一套视觉语言。 */
@@ -630,10 +693,12 @@ body.has-pager #grid { padding-bottom: 76px; }
 .empty-state p { max-width: 460px; margin: 0 auto 18px; }
 
 /* ---------------- 弹窗 ---------------- */
-/* z-index 490：要盖过改模工作台整页（400）和下载面板（480），但仍在 toast（500）和全屏页（900+）之下。
+/* z-index 560：要盖过改模工作台整页（400）、下载面板（480）和导入队列（520），
+   但仍在 toast（570）和全屏页（900+）之下。
+   原来是 490，比导入队列的 520 低 —— 设置页打开时右下角那个折叠角标会浮在弹窗上面。
  * 2022.3 起工作台里也会开模态弹窗（导入预览/双选），低于工作台会被整页压住。 */
 .modal-overlay {
-  position: fixed; inset: 0; z-index: 490; background: var(--scrim);
+  position: fixed; inset: 0; z-index: 560; background: var(--scrim);
   display: flex; align-items: center; justify-content: center; padding: 24px;
   opacity: 0; transition: opacity .2s ease;
 }
@@ -813,7 +878,7 @@ body.has-pager #grid { padding-bottom: 76px; }
 .audit-item:hover { background: var(--bg-hover); color: var(--primary); }
 
 /* ---------------- 提示条 ---------------- */
-.toasts { position: fixed; right: 18px; bottom: 18px; z-index: 500; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+.toasts { position: fixed; right: 18px; bottom: 18px; z-index: 570; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
 .toast {
   display: flex; align-items: center; gap: 8px; background: var(--bg-2); color: var(--text);
   border: 1px solid var(--border); border-left: 3px solid var(--text-3); border-radius: var(--radius-sm);
@@ -1066,6 +1131,14 @@ button.chip-ver-off:hover { border-color: var(--primary); color: var(--text); }
 .card-cover.has-img .cat-badge { display: flex; }
 .card-cover.has-img .cover-ph { display: none; }
 .cat-badge:hover { transform: scale(1.12); border-color: var(--primary); }
+/* v6.7：分类角标现在是个开关 —— 已按这个分类筛选时点亮成实心主色，
+   用户一眼能看出「再点一下就是取消」。图标是白色的，压在浅色主题的封面上仍然看得清。 */
+.cat-badge.cat-badge-on {
+  background: var(--primary);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, .3);
+}
+.cat-badge.cat-badge-on:hover { background: var(--primary); filter: brightness(1.08); }
 .card-cover .cover-img { position: relative; z-index: 1; }
 /* ---------------- v2.3.29：封面左下角的文件关联角标（本地路径 / 网盘，可点击打开） ---------------- */
 .card-corner { position: absolute; left: 7px; bottom: 7px; z-index: 3; display: flex; align-items: center; gap: 4px; }
@@ -1480,19 +1553,19 @@ body.desk-mode #hostDeadBanner { display: none !important; }   /* 桌面版有�
 
 
 /* ---------------- v5.1 动效（让切换/翻页更顺滑） ---------------- */
+/* v6.7（用户反馈「小卡片弹出跳动不好看」）：原来是「下落 → 过冲弹回 → 再收一点」的三段回弹，
+ * 一页几十张卡同时弹，画面很吵。改成一次到位的淡入上浮：没有回弹、没有缩放，只留位移和透明度，
+ * 时长也从 .44s 收到 .26s，翻页/筛选后立刻能看清内容。 */
 @keyframes cardIn {
-  0%   { opacity: 0; transform: translateY(14px) scale(.93); }
-  55%  { opacity: 1; transform: translateY(-4px) scale(1.015); }
-  78%  { transform: translateY(1.5px) scale(.995); }
-  100% { opacity: 1; transform: none; }
+  from { opacity: 0; transform: translateY(7px); }
+  to   { opacity: 1; transform: none; }
 }
-/* backwards：动画结束就交还给普通样式，不会压住 :hover 的位移。
- * v5.3（用户要求「更 Q 弹」）：入场先落下再弹过一点；hover 上浮也用同一条过冲曲线。 */
+/* backwards：动画结束就交还给普通样式，不会压住 :hover 的位移。 */
 .grid .card {
-  animation: cardIn .44s cubic-bezier(.34, 1.45, .64, 1) backwards;
-  transition: transform .26s cubic-bezier(.34, 1.56, .64, 1), box-shadow .26s ease, border-color .26s ease;
+  animation: cardIn .26s cubic-bezier(.25, .8, .35, 1) backwards;
+  transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
 }
-.grid.list-view .card { animation-duration: .22s; }
+.grid.list-view .card { animation-duration: .18s; }
 
 /* 悬浮翻页条：出现时轻轻上浮 */
 @keyframes pagerIn {
@@ -1541,29 +1614,80 @@ input, textarea, select, [contenteditable="true"] {
   user-select: text;
 }
 
-/* 右下角悬浮操作组（多选模式显示） */
-.fab-group {
+/* 右下角悬浮操作区（多选模式显示）
+ * 容器常驻、只切 .show：以前是 display:none → flex，没法做过渡，按钮是「啪」地出现。
+ * 现在三个按钮都从右侧滑入（右移 + 轻微缩小 → 归位），并按顺序错开 60ms。 */
+.fab-dock {
   position: fixed;
   right: 22px;
   bottom: 22px;
-  display: none;
+  display: flex;
   flex-direction: column;
+  align-items: flex-end;
   gap: 10px;
   z-index: 60;
+  pointer-events: none;          /* 容器不吃点击，只有按钮自己吃 */
 }
-.fab-group.show { display: flex; }
-.fab {
+.fab-group { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
+
+.fab, .fab-exit {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   padding: 10px 18px;
   border-radius: 999px;
   border: 1px solid var(--border-2);
   background: var(--bg-2);
   color: inherit;
   font: inherit;
+  line-height: 1.2;
   cursor: pointer;
   box-shadow: var(--shadow);
+  /* 收起态：整体推到右侧外面一点，带淡出 */
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(34px) scale(.96);
+  pointer-events: none;
+  transition: opacity .18s ease, transform .18s ease, visibility 0s linear .2s,
+              border-color .2s ease, background .2s ease, box-shadow .2s ease;
 }
-.fab:hover { border-color: var(--primary); }
+.fab-dock.show .fab,
+.fab-dock.show .fab-exit {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  pointer-events: auto;
+  transition: opacity .2s ease, transform .34s cubic-bezier(.22, 1.06, .36, 1), visibility 0s,
+              border-color .2s ease, background .2s ease, box-shadow .2s ease;
+}
+/* 展开时自下而上逐个滑出：先退出，再导出，最后导入（最常用的那个压轴） */
+.fab-dock.show .fab-exit { transition-delay: .02s; }
+.fab-dock.show .fab-group .fab:nth-child(1) { transition-delay: .08s; }
+.fab-dock.show .fab-group .fab:nth-child(2) { transition-delay: .15s; }
+
+.fab:hover, .fab-dock.show .fab:hover { border-color: var(--primary); transform: translateY(-1px); }
+/* 图标与文字的间距由 flex gap 统一控制，屏蔽 ico-pre 自带的 5px 右边距（否则会叠成 12px） */
+.fab .ico-pre, .fab-exit .ico-pre { margin-right: 0; }
 .fab-primary { background: var(--primary); color: #fff; border-color: transparent; }
+.fab-primary:hover { filter: brightness(1.06); }
+
+/* 退出多选：独立配色（实心红），比下面两个动作更抢眼，但它自己是「退路」所以尺寸克制 */
+.fab-exit {
+  padding: 9px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  border-color: transparent;
+  background: var(--danger);
+  color: #fff;
+  box-shadow: 0 8px 22px rgba(220, 60, 60, .35);
+}
+.fab-exit:hover, .fab-dock.show .fab-exit:hover { background: var(--danger); filter: brightness(1.08); transform: translateY(-1px); }
+.fab-exit .ico { opacity: .95; }
+
+/* 多选模式下右下的浮动块要给翻页条让位：翻页条在底部中间，两者不重叠，无需额外偏移 */
+@media (prefers-reduced-motion: reduce) {
+  .fab, .fab-exit { transition: opacity .12s ease, visibility 0s !important; transform: none !important; }
+}
 
 /* 详情弹窗里的文字仍可选中复制 */
 .modal, .modal-body, .detail-body, .detail-desc {
@@ -1571,90 +1695,187 @@ input, textarea, select, [contenteditable="true"] {
   user-select: text;
 }
 
-/* 导入队列悬浮窗（与下载面板同一形态：可拖动 / 贴边 / 收起成竖条） */
+/* 导入队列悬浮窗（v6.9：外观与下载面板 .dl-panel 完全对齐：同宽 / 同圆角 / 同头部 / 同按钮，
+   折叠态同样是 34px 竖条 + 角标，鼠标移入自动展开） */
 .wb-task {
   position: fixed;
   /* 要盖住工作台整页（z-index 400）和下载面板（480），但不能盖弹窗（900） */
   z-index: 520;
   width: 320px;
+  max-height: 46vh;
   display: flex;
   flex-direction: column;
-  border-radius: 12px;
-  border: 1px solid var(--border-2);
-  background: var(--bg-2);
-  box-shadow: var(--shadow);
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  box-shadow: 0 8px 26px rgba(0,0,0,.16);
   overflow: hidden;
-  font-size: 12.5px;
+  font-size: 11px;
 }
 .wb-task-head {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 7px 10px;
+  padding: 6px 8px;
   cursor: move;
   user-select: none;
-  border-bottom: 1px solid var(--border-2);
-  background: var(--bg-soft, var(--bg-2));
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-soft, #f4f4f6);
 }
-.wb-task-title { font-weight: 600; white-space: nowrap; }
+.wb-task-title { font-size: 12px; font-weight: 600; white-space: nowrap; }
 .wb-task-badge {
   font-size: 10px;
-  padding: 1px 6px;
+  padding: 0 6px;
   border-radius: 8px;
-  background: var(--primary-soft, rgba(43, 108, 255, 0.12));
+  background: var(--primary-soft, #e8f0ff);
   color: var(--primary, #2b6cff);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .wb-task-spacer { flex: 1 1 auto; }
 .wb-task-btn {
   font-family: inherit;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1;
-  padding: 2px 6px;
-  border: 1px solid var(--border-2);
-  background: transparent;
-  color: inherit;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-2, #555);
   border-radius: 6px;
   cursor: pointer;
-  opacity: 0.75;
 }
-.wb-task-btn:hover { opacity: 1; border-color: var(--primary, currentColor); }
-.wb-task-body { padding: 9px 12px 11px; display: flex; flex-direction: column; gap: 5px; }
+.wb-task-btn:hover { border-color: var(--primary); color: var(--text); }
+.wb-task-body { overflow: auto; padding: 6px 8px; display: flex; flex-direction: column; gap: 7px; }
 .wb-task-line { margin-bottom: 0; }
-/* 误关选择弹窗后的恢复按钮：队列停在这里，点它回到勾选界面 */
-.wb-task-resume { margin-top: 4px; align-self: flex-start; }
-.wb-task-sub { color: var(--text-dim, inherit); opacity: 0.75; word-break: break-all; line-height: 1.55; }
+.wb-task-sub { color: var(--text-3, #888); word-break: break-all; line-height: 1.55; }
+/* 面板里的操作按钮收成小一号，别比面板本身还抢眼（与 dl-btn 的观感一致） */
+.wb-task-body .btn { font-size: 11px; padding: 4px 9px; border-radius: 6px; }
+.wb-task-resume { margin-top: 2px; align-self: flex-start; }
+/* v6.9：折叠态改用角标，不再用竖排文字条 */
 .wb-task-strip { display: none; }
-.wb-task-dragging { opacity: 0.9; }
-/* 收起态：整条就是一个按钮（角标 + 竖排标题 + 展开箭头），点一下展开。
-   这条不能复用标题栏——标题栏上绑着拖动，点击会被拖动逻辑吃掉。 */
-.wb-task-collapsed { width: 44px; }
-.wb-task-collapsed .wb-task-head,
+.wb-task-dragging { opacity: .88; }
+/* 折叠态：与下载面板一致 —— 34px 宽、只剩角标、鼠标移入展开 */
+.wb-task-collapsed { width: 34px; }
+.wb-task-collapsed .wb-task-head { flex-direction: column; gap: 4px; padding: 6px 2px; }
+.wb-task-collapsed .wb-task-title,
+.wb-task-collapsed .wb-task-btn,
 .wb-task-collapsed .wb-task-body { display: none; }
-.wb-task-collapsed .wb-task-strip {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 10px 2px 9px;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
+.wb-task-collapsed .wb-task-spacer { flex: 0 0 auto; }
+.wb-task-collapsed .wb-task-badge {
+  padding: 0 3px;
+  font-size: 9.5px;
+  max-width: 30px;
+  overflow: hidden;
+  text-overflow: clip;
 }
-.wb-task-strip-text {
-  writing-mode: vertical-rl;
-  text-orientation: upright;
-  letter-spacing: 2px;
-  font-size: 11px;
-  color: var(--text-dim, inherit);
-  opacity: 0.85;
+.wb-task-collapsed:hover { border-color: var(--primary); }
+.wb-task-docked-left { border-radius: 0 10px 10px 0; }
+.wb-task-docked-right { border-radius: 10px 0 0 10px; }
+/* =====================================================================
+ * P2P 传文件（92-p2p.js）
+ * 面板本体复用 .dl-panel / .dl-head / .dl-body / .dl-task / .dl-bar，
+ * 这里只补传输特有的排版，保证两块悬浮窗看起来是同一套东西。
+ * ===================================================================== */
+
+.p2p-panel .dl-title { display: flex; align-items: center; gap: 5px; }
+
+.p2p-task .p2p-code {
+  display: flex; align-items: center; gap: 8px;
+  margin: 7px 0 5px; padding: 7px 10px;
+  background: var(--bg-3); border: 1px solid var(--border); border-radius: var(--radius-sm);
 }
-.wb-task-strip-arrow { font-size: 13px; line-height: 1; opacity: 0.65; }
-.wb-task-collapsed:hover { border-color: var(--primary, currentColor); }
-.wb-task-collapsed:hover .wb-task-strip-text { opacity: 1; }
-.wb-task-collapsed:hover .wb-task-strip-arrow { opacity: 1; }
-.wb-task-docked-left { border-radius: 0 12px 12px 0; }
-.wb-task-docked-right { border-radius: 12px 0 0 12px; }
+.p2p-task .p2p-code b {
+  font-family: var(--mono); font-size: 16px; letter-spacing: .16em; color: var(--primary);
+}
+.p2p-task .p2p-acts { display: flex; gap: 6px; margin-top: 7px; }
+.p2p-task .p2p-acts .btn { flex: 1; min-height: 27px; font-size: 12px; }
+
+/* ---- 确认 / 发起 / 接收 遮罩 ---- */
+.p2p-confirm-mask {
+  position: fixed; inset: 0; z-index: 900;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--scrim);
+}
+.p2p-confirm-card {
+  width: 380px; max-width: calc(100vw - 48px);
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: 22px 22px 18px;
+}
+.p2p-confirm-card h3 { margin: 0 0 16px; font-size: 15px; font-weight: 600; color: var(--text); }
+.p2p-confirm-who { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.p2p-confirm-who b { display: block; font-size: 14px; font-weight: 500; color: var(--text); }
+.p2p-confirm-who .dim { font-size: 12px; }
+.p2p-avatar {
+  width: 42px; height: 42px; flex: 0 0 42px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--primary-soft); color: var(--primary);
+  font-size: 16px; font-weight: 500;
+}
+.p2p-confirm-stats { display: flex; gap: 10px; margin-bottom: 12px; }
+.p2p-confirm-stats > div {
+  flex: 1; padding: 9px 12px; border-radius: var(--radius-sm);
+  background: var(--bg-3); font-size: 12px; color: var(--text-2);
+}
+.p2p-confirm-stats b { font-size: 15px; font-weight: 500; color: var(--text); margin-right: 2px; }
+.p2p-confirm-dst {
+  font-size: 11px; line-height: 1.5; margin-bottom: 16px;
+  word-break: break-all; max-height: 34px; overflow: hidden;
+}
+.p2p-confirm-btns { display: flex; gap: 8px; justify-content: flex-end; }
+.p2p-confirm-btns .btn { min-width: 84px; }
+
+/* ---- 发起：大字口令 ---- */
+.p2p-hint { font-size: 12px; margin: 0 0 14px; line-height: 1.6; }
+.p2p-bigcode {
+  font-family: var(--mono); font-size: 30px; letter-spacing: .18em;
+  text-align: center; color: var(--primary);
+  padding: 14px 0 16px; margin-bottom: 4px;
+  background: var(--bg-3); border-radius: var(--radius-sm);
+}
+.p2p-dlg-stat { font-size: 12px; margin-bottom: 16px; min-height: 18px; }
+
+/* ---- 接收：口令输入 ---- */
+.p2p-code-input {
+  width: 100%; box-sizing: border-box;
+  font-family: var(--mono); font-size: 22px; letter-spacing: .2em; text-align: center;
+  padding: 12px 10px; margin-bottom: 12px;
+  background: var(--bg-3); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); outline: none;
+}
+.p2p-code-input:focus { border-color: var(--primary); }
+.p2p-dst-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
+  font-size: 12px; color: var(--text-2);
+}
+.p2p-dst-path {
+  flex: 1; min-width: 0; font-weight: 400; font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-2);
+}
+
+/* 设置页里的说明段与要点列表（点对点传输那页用） */
+.settings-desc { font-size: 12px; line-height: 1.75; color: var(--text-2); margin: 0 0 18px; }
+.settings-list { margin: 0; padding-left: 18px; font-size: 12px; line-height: 1.85; color: var(--text-2); }
+.settings-list li { margin-bottom: 4px; }
+
+/* 信令地址怎么填：两条并排说明 */
+.p2p-howto { display: flex; flex-direction: column; gap: 10px; margin: 2px 0 18px; }
+.p2p-howto-row {
+  display: flex; gap: 14px; padding: 10px 13px;
+  background: var(--bg-3); border-radius: var(--radius-sm);
+  font-size: 12px; line-height: 1.7; color: var(--text-2);
+}
+.p2p-howto-row b { flex: 0 0 62px; font-weight: 500; color: var(--text); }
+
+/* 本机信令服务：开关 + 两行地址 */
+.p2p-signal-box {
+  padding: 12px 14px; margin-bottom: 16px;
+  background: var(--bg-3); border-radius: var(--radius-sm);
+}
+.p2p-signal-head { display: flex; align-items: center; gap: 10px; }
+.p2p-signal-head b { font-size: 13px; font-weight: 500; color: var(--text); }
+.p2p-signal-state { font-size: 11px; color: var(--text-3); }
+.p2p-signal-on { font-size: 11px; color: var(--ok); }
+.p2p-signal-head .btn { margin-left: auto; }
+.p2p-signal-note { margin: 10px 0 0; font-size: 11px; line-height: 1.6; color: var(--text-3); }

@@ -38,6 +38,25 @@ var Packer = (function () {
     return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '_' + p(d.getHours()) + p(d.getMinutes());
   }
 
+  /* v6.6：单个素材包上限 1 GB。
+     超了就按体积拆成 xxx-part1.vrcpack / part2 …，每个包都是**完整可独立导入**的，
+     不是必须凑齐才能解的分卷。理由很实际：U 盘 FAT32 单文件上限 4 GB、
+     微信/QQ 传文件有大小限制、部分网盘单文件也卡 1～4 GB，
+     给对方一个 3 GB 的包等于让他没法接收。 */
+  var PART_LIMIT = 1024 * 1024 * 1024;
+
+  /** 按 fileSize 顺序装箱：同一素材不会被拆到两个包里，单个超限的素材自己占一包。 */
+  function chunkBySize(items, limit) {
+    var out = [], cur = [], curSize = 0;
+    (items || []).forEach(function (a) {
+      var sz = Number(a && a.fileSize) || 0;
+      if (cur.length && curSize + sz > limit) { out.push(cur); cur = []; curSize = 0; }
+      cur.push(a); curSize += sz;
+    });
+    if (cur.length) out.push(cur);
+    return out;
+  }
+
   /* ------------------------------------------------------------------ */
   /* 收集待打包的文件                                                    */
   /* ------------------------------------------------------------------ */
@@ -47,12 +66,11 @@ var Packer = (function () {
    * 路径可能是单个压缩包，也可能是解压后的整个文件夹：
    *   · 文件  → 直接收，rel = 文件名
    *   · 目录  → **递归全收**，rel = 相对该目录的路径（保留 textures/、materials/ 这类子结构）
-   * webdav:// 之类的远端路径跳过（不是本地文件）。
    */
   function collectFiles(asset) {
     var roots = ((asset && asset.paths) || [])
       .map(function (p) { return p && p.path ? String(p.path).trim() : ''; })
-      .filter(function (p) { return p && !App.isWebdavPath(p); });
+      .filter(function (p) { return !!p; });
 
     var out = [];
     var seen = Object.create(null);
@@ -154,6 +172,16 @@ var Packer = (function () {
         el('span', { class: 'pack-dim', text: ' · 记录体积约 ' + fmtSize(totalBytes) + '（实际以打包结果为准）' })
       ]));
 
+      var partCount = chunkBySize(list, PART_LIMIT).length;
+      if (partCount > 1) {
+        body.appendChild(el('div', { class: 'pack-sec' }, [
+          el('div', { class: 'pack-label', text: '分包导出' }),
+          el('p', { class: 'field-hint', text:
+            '超过 1 GB，会拆成 ' + partCount + ' 个包：文件名后面加 -part1、-part2…… '
+            + '每个包都能单独拖进程序导入，不用按顺序、也不用凑齐。' })
+        ]));
+      }
+
       body.appendChild(el('div', { class: 'pack-sec' }, [
         el('label', { class: 'pack-check' }, [
           el('input', {
@@ -230,7 +258,6 @@ var Packer = (function () {
     }
 
     function doExport() {
-      var outPath = '';
       var name = '素材包_' + nowStamp() + '.vrcpack';
       FS.host.saveFile({
         title: '保存素材包',
@@ -241,72 +268,50 @@ var Packer = (function () {
         ]
       }).then(function (r) {
         if (!r || r.ok === false) return null;
-        outPath = r.path;
+        var outPath = r.path;
         if (!/\.(vrcpack|zip)$/i.test(outPath)) outPath += '.vrcpack';
 
         setButtonsDisabled(true);
-        setProg('正在整理文件…', 0);
 
-        // 逐个素材收集文件与封面（大库时不至于卡住 UI）
-        var entries = [];
+        /* 超过 1 GB 就分批：文件名加 -part1 / -part2…，每个包都能单独导入 */
+        var chunks = chunkBySize(list, PART_LIMIT);
+        var multi = chunks.length > 1;
+        var m = outPath.match(/\.(vrcpack|zip)$/i);
+        var ext = m ? m[0] : '.vrcpack';
+        var base = outPath.slice(0, outPath.length - ext.length);
+        var results = [];
+
         var chain = Promise.resolve();
-        list.forEach(function (a, i) {
+        chunks.forEach(function (items, idx) {
           chain = chain.then(function () {
-            setProg('正在整理 ' + (i + 1) + '/' + list.length + '：' + (a.title || '未命名'), (i / list.length) * 100);
-            return Promise.all([
-              opt.withFiles ? collectFiles(a) : Promise.resolve([]),
-              opt.withCovers ? coverData(a) : Promise.resolve(null)
-            ]).then(function (r) {
-              entries.push({
-                id: a.id,
-                title: a.title, originalTitle: a.originalTitle,
-                category: a.category, source: a.source,
-                tags: a.tags, avatars: a.avatars,
-                itemId: a.itemId, shop: a.shop, author: a.author,
-                /* v6.6：带上商店链接 —— 接收方靠它判重（对方库里同链接的素材能认出来）。
-                   下载直链（downloadLinks）故意不带：那是本人的订单地址，给出去等于把付费内容送人。 */
-                links: (a.links || []).slice(),
-                isFree: a.isFree, fileSize: a.fileSize,
-                note: a.note,
-                purchasePrice: a.purchasePrice, purchaseCurrency: a.purchaseCurrency,
-                files: r[0],
-                /* v6.1：Tauri 下封面走磁盘路径（后端直接流式写进包），不再转 base64；
-                 * Electron 仍走 base64 分支，两边产物完全一致。 */
-                coverPath: r[1] && r[1].path ? r[1].path : '',
-                coverBase64: r[1] && r[1].b64 ? r[1].b64 : '',
-                coverExt: r[1] ? r[1].ext : ''
-              });
-            });
+            var partPath = multi ? base + '-part' + (idx + 1) + ext : outPath;
+            var tag = multi ? '分包 ' + (idx + 1) + '/' + chunks.length : '';
+            return exportChunk(items, partPath, tag).then(function (res) { results.push(res); });
           });
         });
 
         return chain.then(function () {
-          setProg('正在写入素材包…（大文件请稍候，不要关闭窗口）', 0);
-          startPoll();
-          return FS.host.pack('export', {
-            outPath: outPath,
-            withFiles: opt.withFiles,
-            withCovers: opt.withCovers,
-            withNote: opt.withNote,
-            withPrice: false,
-            exporter: {
-              deviceId: (App.settings.deviceId || ''),
-              nickname: String(signName || '').trim()
-            },
-            entries: entries
-          });
-        }).then(function (res) {
           stopPoll();
           var nm = String(signName || '').trim();
           if (nm && App.settings.nickname !== nm) { App.settings.nickname = nm; App.saveSettings(); }
           Modal.close(handle);
-          Toast.ok('已导出 ' + res.count + ' 个素材、' + res.files + ' 个文件，'
-            + '包体 ' + fmtSize(res.packageBytes), 7000);
-          Toast.info('位置：' + res.path, 9000);
+          var cnt = 0, files = 0, bytes = 0;
+          results.forEach(function (x) {
+            cnt += Number(x.count || 0);
+            files += Number(x.files || 0);
+            bytes += Number(x.packageBytes || 0);
+          });
+          if (!multi) {
+            Toast.ok('已导出 ' + cnt + ' 个素材、' + files + ' 个文件，包体 ' + fmtSize(bytes), 7000);
+            Toast.info('位置：' + results[0].path, 9000);
+          } else {
+            Toast.ok('已导出 ' + cnt + ' 个素材、' + files + ' 个文件，分成 ' + results.length + ' 个包（合计 ' + fmtSize(bytes) + '）', 9000);
+            results.forEach(function (x, i2) { Toast.info('第 ' + (i2 + 1) + ' 包：' + x.path, 9000); });
+          }
           Toast.info('对方收到后，把包直接拖进程序窗口就能导入（也可以双击解压当普通压缩包用）', 9000);
           /* openPath 是「触发式」的：它内部自己处理失败并给提示，返回 undefined（没有 Promise）——
            * 这里加 .catch 会直接抛 "Cannot read properties of undefined"。 */
-          try { FS.openPath(dirName(res.path)); } catch (e) {}
+          try { FS.openPath(dirName(results[0].path)); } catch (e) {}
         });
       }).catch(function (e) {
         stopPoll();
@@ -316,14 +321,65 @@ var Packer = (function () {
       });
     }
 
-    function startPoll() {
+    /** 收集这一批素材的文件与封面，写成一个包（分包由 doExport 决定调用几次） */
+    function exportChunk(items, partPath, tag) {
+      var entries = [];
+      var chain = Promise.resolve();
+      items.forEach(function (a, i) {
+        chain = chain.then(function () {
+          setProg((tag ? tag + ' · ' : '') + '正在整理 ' + (i + 1) + '/' + items.length + '：' + (a.title || '未命名'), (i / items.length) * 100);
+          return Promise.all([
+            opt.withFiles ? collectFiles(a) : Promise.resolve([]),
+            opt.withCovers ? coverData(a) : Promise.resolve(null)
+          ]).then(function (r) {
+            entries.push({
+              id: a.id,
+              title: a.title, originalTitle: a.originalTitle,
+              category: a.category, source: a.source,
+              tags: a.tags, avatars: a.avatars,
+              itemId: a.itemId, shop: a.shop, author: a.author,
+              /* v6.6：带上商店链接 —— 接收方靠它判重（对方库里同链接的素材能认出来）。
+                 下载直链（downloadLinks）故意不带：那是本人的订单地址，给出去等于把付费内容送人。 */
+              links: (a.links || []).slice(),
+              isFree: a.isFree, fileSize: a.fileSize,
+              note: a.note,
+              purchasePrice: a.purchasePrice, purchaseCurrency: a.purchaseCurrency,
+              files: r[0],
+              /* v6.1：Tauri 下封面走磁盘路径（后端直接流式写进包），不再转 base64；
+               * Electron 仍走 base64 分支，两边产物完全一致。 */
+              coverPath: r[1] && r[1].path ? r[1].path : '',
+              coverBase64: r[1] && r[1].b64 ? r[1].b64 : '',
+              coverExt: r[1] ? r[1].ext : ''
+            });
+          });
+        });
+      });
+      return chain.then(function () {
+        setProg((tag ? tag + ' · ' : '') + '正在写入素材包…（大文件请稍候，不要关闭窗口）', 0);
+        startPoll(tag);
+        return FS.host.pack('export', {
+          outPath: partPath,
+          withFiles: opt.withFiles,
+          withCovers: opt.withCovers,
+          withNote: opt.withNote,
+          withPrice: false,
+          exporter: {
+            deviceId: (App.settings.deviceId || ''),
+            nickname: String(signName || '').trim()
+          },
+          entries: entries
+        });
+      });
+    }
+
+    function startPoll(tag) {
       stopPoll();
       st.polling = setInterval(function () {
         FS.host.pack('progress', {}).then(function (p) {
           if (!p) return;
           if (p.running) {
             var pct = p.total ? (p.done / p.total) * 100 : 0;
-            setProg('正在打包 ' + (p.done || 0) + '/' + (p.total || 0)
+            setProg((tag ? tag + ' · ' : '') + '正在打包 ' + (p.done || 0) + '/' + (p.total || 0)
               + ' · 已写入 ' + fmtSize(p.bytes || 0)
               + (p.current ? ' · ' + p.current : ''), pct);
           }
@@ -1488,6 +1544,9 @@ var Packer = (function () {
     installDropZone: installDropZone,
     compareDialog: compareDialog,
     diffAgainst: diffAgainst,
-    collectFiles: collectFiles
+    collectFiles: collectFiles,
+    /* 给自测用：分包规则单独暴露一份，免得为了测它真去导 1 GB 的包 */
+    partLimit: PART_LIMIT,
+    chunkBySize: chunkBySize
   };
 })();

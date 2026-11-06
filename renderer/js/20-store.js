@@ -570,12 +570,12 @@ var Store = (function () {
   /* ================= 文件主库（v2.3.0） =================
    * 位置：<HTML 同目录>\vrclib-data\{assets.json, settings.json, covers\<id>.<ext>}
    * 语义：文件为准，IndexedDB 降为缓存；后端离线时 App 走只读缓存。
-   * settings.json 刻意排除凭据类字段（Cookie / AI Key / WebDAV 密码），
+   * settings.json 刻意排除凭据类字段（Cookie / AI Key），
    * 这些只留在 IndexedDB 的加密存储里，不落旁路明文文件。
    */
   var DATA_DIRNAME = 'vrclib-data';
   // 只排除【凭据类】与【环境相关】字段；fuzzyDict 是普通词表，必须落盘（v2.3.1 修正）
-  var SETTINGS_SKIP = ['credentials', 'ai', 'webdavAccounts', 'githubToken'];   // v2.3.25：Token 只留浏览器本机库
+  var SETTINGS_SKIP = ['credentials', 'ai', 'githubToken'];   // v2.3.25：Token 只留浏览器本机库
 
   function htmlDir() {
     try {

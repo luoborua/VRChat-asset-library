@@ -210,16 +210,13 @@ var Field = {
       data.forEach(function (d) {
         var v = String(d.url || '').trim();
         if (!v) return;
-        /* v4.3.2：webdav:// 是本程序支持的一等路径（详情页有「浏览网盘」），
-         * 但这里只认绝对路径，保存时把它当非法值丢掉 —— 用户登记的网盘位置静默消失。 */
-        var isDav = /^webdav:\/\//i.test(v);
-        if (opts.asPath && !isDav && !isAbsoluteWinPath(v)) { bad.push(v); return; }
+        if (opts.asPath && !isAbsoluteWinPath(v)) { bad.push(v); return; }
         out.push(opts.asPath
-          ? { path: isDav ? v : normalizeWinPath(v), note: d.label }
+          ? { path: normalizeWinPath(v), note: d.label }
           : { url: v, label: d.label });
       });
       if (opts.dedupe) out = uniqBy(out, function (x) { return String(x.path || x.url || ''); });
-      if (bad.length) Toast.warn('有 ' + bad.length + ' 条本地路径不是完整路径，未保存：' + bad.join('；') + '。请补全为 G:\\… 、\\\\服务器\\… 或 webdav://账号/路径。', 7200);
+      if (bad.length) Toast.warn('有 ' + bad.length + ' 条本地路径不是完整路径，未保存：' + bad.join('；') + '。请补全为 G:\\… 或 \\\\服务器\\… 。', 7200);
       return out;
     };
     wrap.setValue = function (arr) {

@@ -238,7 +238,7 @@ DLQueue.onChange(function (tasks) {
 /* ---------------- 下载任务悬浮窗 ---------------- */
 var DLPanel = (function () {
   var root = null, bodyEl = null, headEl = null, badgeEl = null;
-  var st = { x: null, y: null, dock: '' };
+  var st = { y: null, dock: '' };
 
   function sz(n) {
     n = Number(n) || 0;
@@ -249,32 +249,27 @@ var DLPanel = (function () {
   }
   function loadState() {
     var s = (App.settings && App.settings.dlPanel) || {};
-    st.x = (typeof s.x === 'number') ? s.x : null;
     st.y = (typeof s.y === 'number') ? s.y : null;
-    st.dock = s.dock === 'left' ? 'left' : 'right';   // v2.3.8：只贴边显示，默认贴右边
+    /* v6.9：只贴右边。左边是页签栏，吸附过去会压住导航，所以干脆不给这个能力；
+     * 老配置里存的 dock:'left' 与 x 一律忽略（下次保存就被覆盖掉）。 */
+    st.dock = 'right';
   }
   function saveState() {
-    App.settings.dlPanel = { x: st.x, y: st.y, dock: st.dock };
+    App.settings.dlPanel = { y: st.y, dock: 'right' };
     App.saveSettings();
   }
   function place() {
     if (!root) return;
-    if (st.dock === 'right') { root.style.left = 'auto'; root.style.right = '0px'; }
-    else if (st.dock === 'left') { root.style.left = '0px'; root.style.right = 'auto'; }
-    else {
-      root.style.right = 'auto';
-      var w = root.offsetWidth || 320;
-      var x = (st.x == null) ? Math.max(12, window.innerWidth - w - 18) : st.x;
-      root.style.left = Math.max(0, Math.min(window.innerWidth - w, x)) + 'px';
-    }
+    root.style.left = 'auto';
+    root.style.right = '0px';
     var h = root.offsetHeight || 80;
     var y = (st.y == null) ? 96 : st.y;
     root.style.top = Math.max(0, Math.min(window.innerHeight - h, y)) + 'px';
   }
   function applyDock() {
-    root.classList.toggle('dl-docked-left', st.dock === 'left');
-    root.classList.toggle('dl-docked-right', st.dock === 'right');
-    root.classList.toggle('dl-collapsed', !!st.dock);
+    root.classList.add('dl-docked-right');
+    root.classList.remove('dl-docked-left');
+    root.classList.add('dl-collapsed');
   }
   /** 显示悬浮窗（v2.3.12：隐藏态已随「关闭」按钮一起移除） */
   function show() { if (!root) return; root.style.display = ''; }
@@ -291,16 +286,15 @@ var DLPanel = (function () {
     root = el('div', { class: 'dl-panel', id: 'dlPanel' }, [headEl, bodyEl]);
     document.body.appendChild(root);
 
-    // 拖动（按住标题栏）；松手时贴边吸附
+    /* v6.9：只能在右边。按住标题栏只剩下上下拖，横向锁死在右边缘——
+     * 以前松手会按水平中心吸附左/右，拖到左半边就贴在页签栏上盖住导航，很碍事。 */
     headEl.addEventListener('mousedown', function (ev) {
       if (ev.target && ev.target.tagName === 'BUTTON') return;
       var r = root.getBoundingClientRect();
-      var ox = ev.clientX - r.left, oy = ev.clientY - r.top;
+      var oy = ev.clientY - r.top;
       root.classList.add('dl-dragging');
-      root.classList.remove('dl-docked-left', 'dl-docked-right', 'dl-collapsed');
-      st.dock = '';
+      root.classList.remove('dl-collapsed');
       function mv(e) {
-        st.x = Math.max(0, Math.min(window.innerWidth - r.width, e.clientX - ox));
         st.y = Math.max(0, Math.min(window.innerHeight - r.height, e.clientY - oy));
         place();
       }
@@ -308,10 +302,6 @@ var DLPanel = (function () {
         document.removeEventListener('mousemove', mv);
         document.removeEventListener('mouseup', up);
         root.classList.remove('dl-dragging');
-        // v2.3.8：只贴边——按水平中心就近吸附到左/右边缘，不留中间悬浮态
-        var rr = root.getBoundingClientRect();
-        st.dock = (st.x + rr.width / 2) < window.innerWidth / 2 ? 'left' : 'right';
-        st.x = st.dock === 'left' ? 0 : Math.max(0, window.innerWidth - rr.width);
         applyDock(); place(); saveState();
       }
       document.addEventListener('mousemove', mv);

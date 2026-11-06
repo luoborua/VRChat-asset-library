@@ -9,9 +9,23 @@
   display: flex; flex-direction: column;
   background: var(--bg);
   opacity: 0; transform: translateY(8px);
-  transition: opacity .18s ease, transform .18s ease;
+  /* v6.8：页签切换是「藏起来」而不是拆掉，所以不走 .in 时必须彻底不吃鼠标 */
+  visibility: hidden; pointer-events: none;
+  /* v6.9：这里不能再给 opacity 过渡 —— 淡出期间这层不透明的背景会整整 0.18s 盖在侧栏上，
+   *       看起来就是「侧栏消失了一下又立刻出现」。切走时直接消失，进入的淡入交给 animation。 */
 }
-.wb-page.in { opacity: 1; transform: none; }
+@keyframes wbPageIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+/* v6.8：工作台改成左侧第二个页签内容 —— 让出页签栏的宽度，别把导航盖住。
+ * v6.9：这条不能挂在 body.tab-workbench 上。切回素材库时类先被移除，浮层的 left
+ *       会从 78 瞬间跳回 0，正好压在页签栏上。页签栏是常驻的，所以恒定让位。 */
+.wb-page { left: var(--tabrail-w); }
+.wb-page.in {
+  opacity: 1; transform: none; visibility: visible; pointer-events: auto;
+  animation: wbPageIn .18s ease;
+}
 body.wb-open { overflow: hidden; }
 
 /* ---------------- 头部 ---------------- */
@@ -25,6 +39,9 @@ body.wb-open { overflow: hidden; }
   -webkit-app-region: drag;
 }
 .wb-head .btn, .wb-head .icon-btn { -webkit-app-region: no-drag; }
+/* v6.8：头部右侧的按钮（导入队列 / Unity 日志 / 返回）一直贴在标题后面没靠右 ——
+ * .grow 只在工具栏、详情页那几处定义过，这里补一条。 */
+.wb-head .grow { flex: 1; }
 .wb-head-title { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .wb-head-title b { font-size: 15px; color: var(--text); }
 .wb-head-title small { font-size: 12px; color: var(--text-3); }

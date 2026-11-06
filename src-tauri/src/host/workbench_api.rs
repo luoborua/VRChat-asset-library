@@ -807,10 +807,9 @@ fn probe_sync(v: &Value) -> Result<Value, String> {
         .map(|x| x.to_string_lossy().to_string())
         .unwrap_or_else(|| raw.clone());
 
-    // 两个 Unity 助手的安装状态（Assets 里有界搜索）
+    // Unity 导入助手的安装状态（Assets 里有界搜索）
     let bridge_installed =
         find_named_file(&root.join("Assets"), BRIDGE_FILE_NAME).is_some();
-    let ma_installed = find_named_file(&root.join("Assets"), MA_FILE_NAME).is_some();
 
     Ok(json!({
         "ok": true,
@@ -821,7 +820,6 @@ fn probe_sync(v: &Value) -> Result<Value, String> {
         "dependencies": deps,
         "notes": notes,
         "bridgeInstalled": bridge_installed,
-        "maInstalled": ma_installed,
         "checkedAt": now_ms()
     }))
 }
@@ -1266,11 +1264,6 @@ fn execute_sync(v: &Value) -> Result<Value, String> {
             .as_ref()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default(),
-        // 本次复制进来的预制件（阶段 4：MA 装配请求要用）
-        "prefabs": walked.files.iter()
-            .filter(|(rel, _)| rel.to_lowercase().ends_with(".prefab"))
-            .map(|(rel, _)| format!("{dest_key}/{rel}"))
-            .collect::<Vec<String>>(),
         "warnings": warnings
     }))
 }
@@ -2779,12 +2772,10 @@ pub async fn log_tail(v: &Value) -> Result<Value, String> {
 
 /// 编译期把 Unity 助手源码嵌进二进制 —— 运行时不依赖仓库目录结构
 const BRIDGE_SOURCE: &str = include_str!("../../../assets/unity/VrclibImportBridge.cs");
-const MA_SOURCE: &str = include_str!("../../../assets/unity/VrclibMASetup.cs");
 const BRIDGE_FILE_NAME: &str = "VrclibImportBridge.cs";
 /// 助手心跳里约定的版本号（与 assets/unity/VrclibImportBridge.cs 的 BridgeVersion 一致）。
 /// 不一致说明工程里装的是旧助手，前端会提示「更新 Unity 助手」。
 const BRIDGE_PROTOCOL_VERSION: u32 = 2;
-const MA_FILE_NAME: &str = "VrclibMASetup.cs";
 
 /// 生成 UUID v4（不引 rand：RandomState 的种子每次进程不同，配合版本位足够当请求 ID 用）
 fn uuid_v4() -> String {
@@ -3128,8 +3119,8 @@ fn install_bridge_sync(v: &Value) -> Result<Value, String> {
     let mut skipped: Vec<String> = Vec::new();
     let mut updated: Vec<String> = Vec::new();
 
-    // 两个助手：导入桥 + MA 装配。已存在且内容一致 → 跳过；不一致且允许更新 → 原地覆盖
-    for (file_name, source) in [(BRIDGE_FILE_NAME, BRIDGE_SOURCE), (MA_FILE_NAME, MA_SOURCE)] {
+    // 导入桥。已存在且内容一致 → 跳过；不一致且允许更新 → 原地覆盖
+    for (file_name, source) in [(BRIDGE_FILE_NAME, BRIDGE_SOURCE)] {
         if let Some(existing) = find_named_file(&root.join("Assets"), file_name) {
             let same = fs::read_to_string(&existing)
                 .map(|c| c == source)
@@ -3166,7 +3157,7 @@ fn install_bridge_sync(v: &Value) -> Result<Value, String> {
         parts.push(format!("已更新 {}", updated.join("、")));
     }
     if parts.is_empty() {
-        parts.push("两个 Unity 助手都已是最新版本".to_string());
+        parts.push("Unity 导入助手已是最新版本".to_string());
     } else {
         parts.push("。回到 Unity 让它重新编译一次（右下角转圈结束）即生效".to_string());
     }
@@ -3180,166 +3171,6 @@ fn install_bridge_sync(v: &Value) -> Result<Value, String> {
     }))
 }
 
-/* ============================ 阶段 4：MA 装配请求 ============================ */
-/* 协议与 assets/unity/VrclibMASetup.cs 对应：
- *   请求：Library/VrclibBridge/MARequests/<uuid>.json（本程序写入）
- *   回执：Library/VrclibBridge/MAResults/<uuid>.json（Unity 侧 MA 助手写入）
- * 请求 { schema:1, id, sha256, project, sourceName, mode, importId, prefabPaths, assemble, menu }
- * 回执 { schema:1, id, sha256, state: waiting-import|waiting-selection|applied|skipped|error, message, ... } */
-
-/// /api/wb/maRequest —— 导入完成后发起 MA 装配请求
-pub async fn ma_request(v: &Value) -> Result<Value, String> {
-    let v2 = v.clone();
-    tokio::task::spawn_blocking(move || ma_request_sync(&v2))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-fn ma_request_sync(v: &Value) -> Result<Value, String> {
-    let project = s_of(v, "projectRoot");
-    let source_name = s_of(v, "sourceName");
-    let mode = s_of(v, "mode");
-    let signature = s_of(v, "signature");
-    let import_id = s_of(v, "importId");
-    let menu = v.get("menu").and_then(|x| x.as_bool()).unwrap_or(false);
-    let prefab_paths: Vec<String> = v
-        .get("prefabPaths")
-        .and_then(|x| x.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if project.is_empty() || signature.len() != 64 || !signature.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("缺少工程路径或素材签名不合法。".into());
-    }
-    if mode != "copy" && mode != "unitypackage" {
-        return Err("mode 只能是 copy 或 unitypackage。".into());
-    }
-    if mode == "unitypackage" && import_id.len() != 36 {
-        return Err("包模式必须提供导入请求 ID（importId）。".into());
-    }
-    if source_name.is_empty() || source_name.len() > 1000 {
-        return Err("素材名不合法（1~1000 字符）。".into());
-    }
-    if prefab_paths.len() > 1000 {
-        return Err("预制件路径过多（上限 1000）。".into());
-    }
-    // 预制件路径必须是干净的 Assets/ 相对 .prefab 路径，且真实存在
-    for p in &prefab_paths {
-        let key = p.replace('\\', "/");
-        if !key.to_lowercase().starts_with("assets/")
-            || !key.to_lowercase().ends_with(".prefab")
-            || key.contains("..")
-            || key.contains(':')
-        {
-            return Err(format!("预制件路径不合法：{p}"));
-        }
-        if !native(&PathBuf::from(&project), &key).exists() {
-            return Err(format!("预制件不存在：{p}"));
-        }
-    }
-
-    let root = PathBuf::from(&project);
-    require_project(&root)?;
-    // MA 助手必须已安装（跟导入桥一起装的）
-    if find_named_file(&root.join("Assets"), MA_FILE_NAME).is_none() {
-        return Err("工程里还没有 MA 装配助手，请先安装 Unity 助手。".into());
-    }
-    // 包模式：对应的导入必须已完成
-    if mode == "unitypackage" {
-        let import_receipt = root
-            .join("Library")
-            .join("VrclibBridge")
-            .join("Results")
-            .join(format!("{import_id}.json"));
-        let ok = fs::read_to_string(&import_receipt)
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-            .map(|r| r.get("state").and_then(|s| s.as_str()) == Some("completed"))
-            .unwrap_or(false);
-        if !ok {
-            return Err("对应的素材包还没完成导入，等导入完成后再发起 MA 装配。".into());
-        }
-    }
-
-    let id = uuid_v4();
-    let req = json!({
-        "schema": 1,
-        "id": id,
-        "sha256": signature,
-        "projectRoot": project,
-        "sourceName": source_name,
-        "mode": mode,
-        "importId": if mode == "unitypackage" { import_id } else { "".to_string() },
-        "prefabPaths": prefab_paths,
-        "assemble": true,
-        "menu": menu
-    });
-    let dir = root.join("Library").join("VrclibBridge").join("MARequests");
-    fs::create_dir_all(&dir).map_err(|e| format!("无法创建 MA 请求目录：{e}"))?;
-    let tmp = dir.join(format!("{id}.json.tmp"));
-    let final_path = dir.join(format!("{id}.json"));
-    fs::write(
-        &tmp,
-        serde_json::to_vec(&req).map_err(|e| format!("序列化 MA 请求失败：{e}"))?,
-    )
-    .map_err(|e| format!("写入 MA 请求失败：{e}"))?;
-    fs::rename(&tmp, &final_path).map_err(|e| format!("落盘 MA 请求失败：{e}"))?;
-
-    Ok(json!({
-        "ok": true,
-        "requestId": id,
-        "state": "waiting-selection",
-        "message": "MA 装配请求已放进工程。打开 Unity 后：角色和预制件都唯一时自动装配，否则会弹窗口让你选。"
-    }))
-}
-
-/// /api/wb/maReceipt —— 查询 MA 装配回执
-pub async fn ma_receipt(v: &Value) -> Result<Value, String> {
-    let v2 = v.clone();
-    tokio::task::spawn_blocking(move || ma_receipt_sync(&v2))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-fn ma_receipt_sync(v: &Value) -> Result<Value, String> {
-    let project = s_of(v, "projectRoot");
-    let id = s_of(v, "requestId");
-    if project.is_empty() || id.is_empty() {
-        return Err("缺少工程路径或请求 ID。".into());
-    }
-    let ok_shape = id.len() == 36 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
-    if !ok_shape {
-        return Err("请求 ID 格式不对。".into());
-    }
-    let root = PathBuf::from(&project);
-    require_project(&root)?;
-    let path = root
-        .join("Library")
-        .join("VrclibBridge")
-        .join("MAResults")
-        .join(format!("{id}.json"));
-    if !path.exists() {
-        return Ok(json!({
-            "ok": true,
-            "found": false,
-            "state": "waiting-selection"
-        }));
-    }
-    let text = fs::read_to_string(&path).map_err(|e| format!("读 MA 回执失败：{e}"))?;
-    let mut r: Value =
-        serde_json::from_str(&text).map_err(|e| format!("MA 回执不是合法 JSON：{e}"))?;
-    if let Some(obj) = r.as_object_mut() {
-        obj.insert("ok".into(), json!(true));
-        obj.insert("found".into(), json!(true));
-    }
-    Ok(r)
-}
-
-/// 按文件名在目录树里找文件（有界，跳过噪音目录）—— install_bridge 与 bridge_file 共用
 fn find_named_file(dir: &Path, name: &str) -> Option<std::path::PathBuf> {
     fn rec(dir: &Path, name: &str, budget: &mut usize) -> Option<std::path::PathBuf> {
         if *budget == 0 {
@@ -3636,24 +3467,22 @@ mod tests {
         let pkg_body = fake_package_bytes(b"package bytes");
         fs::write(&pkg, &pkg_body).unwrap();
 
-        // 安装助手（一次装两个）
+        // 安装导入助手
         let r1 = install_bridge_sync(&json!({ "projectRoot": root.to_string_lossy() })).unwrap();
         assert_eq!(r1["ok"], true);
         let installed1: Vec<&str> = r1["installed"].as_array().unwrap()
             .iter().map(|x| x.as_str().unwrap()).collect();
         assert!(installed1.contains(&"VrclibImportBridge.cs"));
-        assert!(installed1.contains(&"VrclibMASetup.cs"));
         assert!(root.join("Assets").join("Editor").join(BRIDGE_FILE_NAME).is_file());
-        assert!(root.join("Assets").join("Editor").join(MA_FILE_NAME).is_file());
         // 内容 = 内嵌源码
         assert_eq!(
             fs::read_to_string(root.join("Assets").join("Editor").join(BRIDGE_FILE_NAME)).unwrap(),
             BRIDGE_SOURCE
         );
-        // 重复安装 → 全部跳过
+        // 重复安装 → 跳过
         let r2 = install_bridge_sync(&json!({ "projectRoot": root.to_string_lossy() })).unwrap();
         assert_eq!(r2["installed"].as_array().unwrap().len(), 0);
-        assert_eq!(r2["skipped"].as_array().unwrap().len(), 2);
+        assert_eq!(r2["skipped"].as_array().unwrap().len(), 1);
 
         // plan 现在报告已安装且 ready
         let plan = plan_sync(&json!({
@@ -3753,103 +3582,6 @@ mod tests {
             assert!(u.as_bytes()[19] == b'8' || u.as_bytes()[19] == b'9'
                 || u.as_bytes()[19] == b'a' || u.as_bytes()[19] == b'b');
         }
-    }
-
-    #[test]
-    fn ma_request_roundtrip_copy_mode() {
-        let t = TempDir::new("macopy");
-        let root = t.path().join("Proj");
-        fake_project(&root, "2022.3.22f1");
-        install_bridge_sync(&json!({ "projectRoot": root.to_string_lossy() })).unwrap();
-
-        // 先复制导入一个带预制件的素材
-        let m = t.path().join("SomeOutfit");
-        fs::create_dir_all(&m).unwrap();
-        fs::write(m.join("Outfit.prefab"), "prefab").unwrap();
-        let plan = plan_sync(&json!({
-            "projectRoot": root.to_string_lossy(),
-            "source": m.to_string_lossy(),
-            "id": "job_ma1"
-        })).unwrap();
-        let done = execute_sync(&json!({
-            "projectRoot": root.to_string_lossy(),
-            "source": m.to_string_lossy(),
-            "destRel": plan["destRel"],
-            "signature": plan["signature"],
-            "id": "job_ma1"
-        })).unwrap();
-        let prefabs: Vec<String> = done["prefabs"].as_array().unwrap()
-            .iter().map(|x| x.as_str().unwrap().to_string()).collect();
-        assert_eq!(prefabs.len(), 1);
-        assert!(prefabs[0].ends_with("/Outfit.prefab"));
-
-        // 发起 MA 装配请求
-        let sig = plan["signature"].as_str().unwrap().to_string();
-        let r = ma_request_sync(&json!({
-            "projectRoot": root.to_string_lossy(),
-            "sourceName": "SomeOutfit",
-            "mode": "copy",
-            "signature": sig,
-            "prefabPaths": prefabs,
-            "menu": true
-        })).unwrap();
-        let rid = r["requestId"].as_str().unwrap().to_string();
-        assert_eq!(rid.len(), 36);
-        let req_text = fs::read_to_string(
-            root.join("Library").join("VrclibBridge").join("MARequests").join(format!("{rid}.json"))
-        ).unwrap();
-        let req: Value = serde_json::from_str(&req_text).unwrap();
-        assert_eq!(req["schema"], 1);
-        assert_eq!(req["mode"], "copy");
-        assert_eq!(req["assemble"], true);
-        assert_eq!(req["menu"], true);
-        assert_eq!(req["sha256"], sig);
-
-        // 回执查询：还没有 → waiting-selection
-        let q = ma_receipt_sync(&json!({
-            "projectRoot": root.to_string_lossy(),
-            "requestId": rid
-        })).unwrap();
-        assert_eq!(q["found"], false);
-        assert_eq!(q["state"], "waiting-selection");
-
-        // 模拟 Unity 写回执
-        let results = root.join("Library").join("VrclibBridge").join("MAResults");
-        fs::create_dir_all(&results).unwrap();
-        fs::write(
-            results.join(format!("{rid}.json")),
-            json!({
-                "schema": 1, "id": rid, "sha256": sig, "state": "applied",
-                "message": "装配完成", "avatarName": "MyAvatar",
-                "hierarchyPath": "MyAvatar/Outfit", "menuMode": "created"
-            }).to_string()
-        ).unwrap();
-        let fin = ma_receipt_sync(&json!({
-            "projectRoot": root.to_string_lossy(),
-            "requestId": rid
-        })).unwrap();
-        assert_eq!(fin["found"], true);
-        assert_eq!(fin["state"], "applied");
-        assert_eq!(fin["avatarName"], "MyAvatar");
-        assert_eq!(fin["menuMode"], "created");
-    }
-
-    #[test]
-    fn ma_request_requires_completed_import_for_package_mode() {
-        let t = TempDir::new("mapkg");
-        let root = t.path().join("Proj");
-        fake_project(&root, "2022.3.22f1");
-        install_bridge_sync(&json!({ "projectRoot": root.to_string_lossy() })).unwrap();
-
-        let err = ma_request_sync(&json!({
-            "projectRoot": root.to_string_lossy(),
-            "sourceName": "Outfit",
-            "mode": "unitypackage",
-            "signature": "a".repeat(64),
-            "importId": "01234567-89ab-4cde-8f01-234567890abc",
-            "menu": false
-        })).unwrap_err();
-        assert!(err.contains("还没完成导入"), "实际错误：{err}");
     }
 
     #[test]

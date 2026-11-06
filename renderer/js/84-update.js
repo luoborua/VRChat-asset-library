@@ -10,19 +10,17 @@
  *   手动点一次完全够）。版本号比较的是 tag_name，所以发版时 tag 必须写成
  *   v4.3.3 这种形式（前后缀 v 会自动去掉）。
  *
- * 没配置仓库时不报错、不联网，只提示去设置里填 owner/repo。
+ * v6.7：更新源直接绑死在本项目仓库上（原先要在设置里填 owner/repo，
+ *   填错只会白查一次 404，用户也根本不知道该填什么）。换仓库就改下面两个常量。
  * ===================================================================== */
 
 var Updater = (function () {
-  /* 出厂的默认更新源。换仓库时改这里，或让用户在设置里覆盖。 */
-  var DEFAULT_OWNER = '';
-  var DEFAULT_REPO = '';
+  /* 唯一的更新源。换仓库改这两行即可（改完记得同步 README / 文档里的地址）。 */
+  var REPO_OWNER = 'luoborua';
+  var REPO_NAME = 'VRChat-asset-library';
 
   function source() {
-    var s = (App.settings && App.settings.updateSource) || {};
-    var owner = String(s.owner || DEFAULT_OWNER || '').trim();
-    var repo = String(s.repo || DEFAULT_REPO || '').trim();
-    return { owner: owner, repo: repo, configured: !!(owner && repo) };
+    return { owner: REPO_OWNER, repo: REPO_NAME, configured: true };
   }
 
   /** "v1.0.0" / "1.0.0" / "1.0" → [1,0,0]；解析不出来返回 null */
@@ -67,10 +65,6 @@ var Updater = (function () {
   function check(opts) {
     opts = opts || {};
     var src = source();
-    if (!src.configured) {
-      Toast.warn('还没有配置更新仓库：请到「设置 → 程序更新」填写 GitHub 的 owner/repo', 7000);
-      return Promise.resolve({ ok: false, reason: 'unconfigured' });
-    }
     if (busy) { Toast.info('正在检查，请稍候…', 2500); return Promise.resolve({ ok: false, reason: 'busy' }); }
     busy = true;
 
@@ -150,10 +144,9 @@ var Updater = (function () {
     });
   }
 
-  /** 设置页用：把当前配置显示出来 */
+  /** 设置页用：把当前更新源显示出来（固定值，只读） */
   function describe() {
     var s = source();
-    if (!s.configured) return '未配置';
     return s.owner + '/' + s.repo;
   }
 

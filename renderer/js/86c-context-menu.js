@@ -426,6 +426,16 @@ var AssetMenu = (function () {
         }
       },
       { label: '导出为素材包', icon: 'parcel', action: function () { Packer.exportDialog([cur]); } },
+      /* v6.7（用户要求）：右键直接送进 Unity —— 以前只有详情页和多选浮动按钮有这个入口 */
+      {
+        label: '导入到 Unity',
+        icon: 'box',
+        hint: '送进导入与工程的队列',
+        action: function () {
+          if (window.WB && WB.importToUnity) WB.importToUnity([cur]);
+          else Toast.err('「导入与工程」页还没加载，稍后再试');
+        }
+      },
 
       { sep: true },
 

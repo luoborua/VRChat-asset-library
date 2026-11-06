@@ -73,7 +73,7 @@ var FS = (function () {
     saveFile: function (p) { return hostCall('/api/saveFile', p || {}); },
     pickOneFile: function (p) { return hostCall('/api/pickOneFile', p || {}); },
     pack: function (api, payload) { return hostCall('/api/pack/' + api, payload || {}); },
-    /** v6.8：改模工作台 —— probe / hash / plan / execute / listDir / findUnity / launchUnity / logTail / receipt / installBridge / maRequest / maReceipt */
+    /** v6.8：导入与工程 —— probe / hash / plan / execute / listDir / findUnity / launchUnity / logTail / receipt / installBridge */
     wb: function (op, payload) { return hostCall('/api/wb/' + op, payload || {}); },
     /** v6.0：素材主库（SQLite）—— load / save / info */
     db: function (op, payload) { return hostCall('/api/db/' + op, payload || {}); },
@@ -93,6 +93,24 @@ var FS = (function () {
           if (!r || r.ok === false) throw new Error((r && r.error) || '写入失败');
           return r;
         });
+    },
+    /** P2P 传文件：磁盘侧会话（prepare / open / status / finish / cancel）+ 分块二进制读写。
+     *  块数据走 host_p2p_read / host_p2p_write，和 readBytes 那条通道一样不过 base64。 */
+    p2p: function (op, payload) { return hostCall('/api/p2p/' + op, payload || {}); },
+    p2pRead: function (session, block) {
+      if (!TAURI_INVOKE) return Promise.reject(new Error('当前载体不支持分块读取'));
+      return TAURI_INVOKE('host_p2p_read', { session: session, block: block })
+        .then(function (buf) { return (buf instanceof Uint8Array) ? buf : new Uint8Array(buf); });
+    },
+    p2pWrite: function (session, block, bytes) {
+      if (!TAURI_INVOKE) return Promise.reject(new Error('当前载体不支持分块写入'));
+      var u8 = (bytes instanceof Uint8Array) ? bytes : new Uint8Array(bytes);
+      return TAURI_INVOKE('host_p2p_write', u8, {
+        headers: { 'x-p2p-session': session, 'x-p2p-block': String(block) }
+      }).then(function (r) {
+        if (!r || r.ok === false) throw new Error((r && r.error) || '分块写入失败');
+        return r;
+      });
     },
     /** v6.2：缩略图（Rust 侧 image crate 生成 400px JPEG） */
     thumb: function (src, dst, max) {
@@ -431,7 +449,6 @@ var FS = (function () {
       (a.paths || []).forEach(function (p) {
         if (!p || typeof p !== 'object' || !p.path) return;
         var path = String(p.path);
-        if (/^webdav:\/\//i.test(path)) return;          // v2.2.12 远端路径不参与本地补全
         if (isAbsoluteWinPath(path)) return;
         chain = chain.then(function () {
           return relativePathExists(path).then(function (exists) {
@@ -673,14 +690,6 @@ var FS = (function () {
       Toast.warn('后端复制失败：' + (e && e.message) + '（目标路径已复制，未做任何回退）', 6800);
       return false;
     }
-  }
-
-  /** v2.2.12 网盘（WebDAV）：统一走后端；后端离线直接抛错 */
-  function davCall(api, payload) {
-    return Host.ensure().then(function (ok) {
-      if (!ok) throw new Error('程序后端未就绪：网盘（WebDAV）功能不可用');
-      return hostCall(api, payload);
-    });
   }
 
   /** 按【完整路径字符串】精确创建目录：后端在线时走后端；返回是否已由后端创建 */
@@ -929,7 +938,6 @@ var FS = (function () {
     createCategoryFolders: createCategoryFolders, openPath: openPath,
     movePath: movePath, copyPath: copyPath, mkdirPath: mkdirPath, writeFileToPath: writeFileToPath, downloadToPath: downloadToPath,
     host: Host, hostAvailable: function () { return !!TAURI_INVOKE; }, hostEnsure: function () { return hostProbe(); },
-    davCall: davCall,
     hostEnsureRetry: hostEnsureRetry,
     renameAssetFolder: renameAssetFolder,
     exportJSON: exportJSON, downloadJSON: downloadJSON, downloadCSV: downloadCSV,

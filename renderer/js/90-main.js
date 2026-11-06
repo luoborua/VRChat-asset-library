@@ -21,8 +21,17 @@
       ['#btnImport', 'importIn', false],
       ['#btnAdd', 'plus', false],
       ['#btnSettings', 'settings', false],
+      ['#btnP2PRecv', 'link', true],
       ['#emptyAdd', 'plus', false],
-      ['#emptyDemo', 'flask', false]
+      ['#emptyDemo', 'flask', false],
+      /* v6.8：左侧页签栏的两个图标 */
+      ['#tabLibrary .ico', 'parcel', true],
+      ['#tabWorkbench .ico', 'importIn', true],
+      /* v6.7：多选浮动区的三个按钮补图标——纯文字堆在右下角，分不清哪个是“退路” */
+      ['#fabP2P', 'link', false],
+      ['#fabExportPack', 'parcel', false],
+      ['#fabImportUnity', 'box', false],
+      ['#bulkExit', 'close', false]
     ];
     map.forEach(function (it) {
       var node = document.querySelector(it[0]);
@@ -202,8 +211,22 @@ function bindEvents() {
       if (!ids.length) { Toast.err('先勾选要导入的素材'); return; }
       var list = ids.map(function (id) { return App.assets.find(function (a) { return a.id === id; }); }).filter(Boolean);
       if (window.WB && WB.importToUnity) WB.importToUnity(list);
-      else Toast.err('工作台还没加载，稍后再试');
+      else Toast.err('「导入与工程」页还没加载，稍后再试');
     });
+    /* P2P：把勾选的素材直接传给好友（点对点，不落服务器） */
+    $('#fabP2P').addEventListener('click', function () {
+      var ids = App.selectedIds();
+      if (!ids.length) { Toast.warn('先勾选要传的素材'); return; }
+      var list = (App.assets || []).filter(function (a) { return ids.indexOf(a.id) >= 0; });
+      P2P.collectItems(list).then(function (items) {
+        if (!items.length) { Toast.err('这些素材没有可读的本地文件'); return; }
+        P2PUI.openSendDialog(items);
+      }).catch(function (e) { Toast.err(e.message || String(e)); });
+    });
+    $('#btnP2PRecv').addEventListener('click', function () {
+      P2PUI.openReceiveDialog();
+    });
+
     /* v4.2.0：把选中的素材连文件一起打成 .vrcpack（标准 zip），发给别人导入 */
     $('#fabExportPack').addEventListener('click', function () {
       var ids = App.selectedIds();
@@ -218,6 +241,59 @@ function bindEvents() {
       $('#btnSelectMode').classList.remove('active');
       UI.renderAll();
     });
+
+    /* v6.6：多选模式下按住卡片拖动 = 连选（画刷）
+       按下那一张决定这次是「选中」还是「取消选中」（看它当时的状态），
+       之后滑过哪张就刷成同一个状态，不用一张张点。
+       这里直接改 App.selection 并就地更新卡片上的勾，不整格重绘 ——
+       重绘会把正在拖的那个 DOM 节点换掉，拖动当场断掉。 */
+    (function () {
+      var paint = null;
+
+      function markOf(card, on) {
+        card.classList.toggle('selected', on);
+        var mark = card.querySelector('.sel-mark');
+        if (!mark) {
+          mark = document.createElement('div');
+          mark.className = 'sel-mark';
+          card.appendChild(mark);
+        }
+        mark.classList.toggle('on', on);
+        mark.textContent = on ? '\u2714' : '';
+      }
+      function paintCard(card) {
+        var id = card.dataset.id;
+        if (!id || paint.done[id]) return;
+        paint.done[id] = 1;
+        App.selection[id] = paint.want;
+        App._suppressClick = true;      // 别让随后的 click 再翻一次
+        markOf(card, paint.want);
+        UI.renderToolbar();             // 只更新计数，不重绘网格
+      }
+      document.addEventListener('pointerdown', function (e) {
+        if (!App.selectMode || e.button !== 0) return;
+        var card = e.target.closest ? e.target.closest('.card[data-id]') : null;
+        if (!card) return;
+        if (e.target.closest('button, a, input, select, textarea')) return;
+        var id = card.dataset.id;
+        App._paintActive = true;
+        paint = { want: !App.selection[id], done: Object.create(null) };
+        paintCard(card);
+        e.preventDefault();             // 不触发文字选择与原生拖拽
+      }, true);
+      document.addEventListener('pointermove', function (e) {
+        if (!paint) return;
+        var hit = document.elementFromPoint(e.clientX, e.clientY);
+        var card = hit && hit.closest ? hit.closest('.card[data-id]') : null;
+        if (card) paintCard(card);
+      }, true);
+      ['pointerup', 'pointercancel'].forEach(function (ev) {
+        document.addEventListener(ev, function () {
+          paint = null;
+          App._paintActive = false;
+        }, true);
+      });
+    })();
 
     // 空状态按钮
     $('#emptyAdd').addEventListener('click', function () { Modals.edit(null); });
@@ -461,6 +537,7 @@ function bindEvents() {
       return App.loadSettings();
     }).then(function () {
       bmark('settings');
+      try { if (typeof P2PUI !== 'undefined') P2PUI.init(); } catch (e) { console.warn('[p2p] init', e); }
       // 每次刷新都重置筛选状态与搜索框（浏览器可能恢复输入框旧值）
       App.filters = { q: '', categories: [], sources: [], avatars: [], tags: [], tagsNot: [], status: 'all', price: 'all', r18: false, delisted: false, wishlist: false };
       App.page = 1;
@@ -480,6 +557,13 @@ function bindEvents() {
       return App.reload();
     }).then(function () {
       bmark('reload');
+      /* v6.7（用户要求）：工作台不再懒加载。
+       * 以前工程列表/导入队列要等第一次点开工作台（或第一次点「导入到 Unity」）才读，
+       * 那时会先闪一下「没有配置工程」，多选里点导入也要多等一次磁盘读。
+       * 现在首屏画完就顺手读进来（空闲回调，不挡启动），之后所有入口拿到的都是就绪状态。 */
+      afterPaint(function () {
+        if (window.WB && WB.preload) { try { WB.preload(); } catch (e) {} }
+      });
       /* v2.5.2：视图状态存取（与使用处同一作用域——上次放到上一个 then 里导致启动失败，这里修正） */
       function saveView() {
         try {
@@ -519,6 +603,7 @@ function bindEvents() {
       if (App.localReadOnly && App.localOffline) App.showLocalBanner();
       if (App.localReadBroken) App.showReadBrokenBanner();   // v2.3.11：数据文件读不出来 → 红色告警
       bindEvents();
+      Tab.init();
       /* v2.5.2：浏览器刷新后回到原位置——先恢复上次的筛选 / 页码 / 当前素材，再渲染，最后还原滚动位置 */
       var savedView = loadView();
       if (savedView) {
@@ -619,6 +704,50 @@ function bindEvents() {
       if (b) b.innerHTML = '<div class="boot-err">启动失败：' + esc(e.message || e) + '</div>';
     });
   }
+
+  /* =====================================================================
+   * v6.8：左侧页签（素材库 / 导入与工程）
+   *
+   * 以前「工作台」是顶栏一个按钮 + 全屏浮层，和素材库是两套东西；
+   * 现在两者是并列页签：body.tab-workbench 让浮层 left 让出页签栏宽度，
+   * 素材库那套（筛选栏 + 网格）原封不动留在浮层下面，切回来不用重建。
+   * ===================================================================== */
+  var Tab = (function () {
+    var cur = 'library';
+
+    function apply(name) {
+      document.body.classList.toggle('tab-workbench', name === 'workbench');
+      var btns = document.querySelectorAll('.tabrail-btn');
+      Array.prototype.forEach.call(btns, function (b) {
+        b.classList.toggle('active', b.dataset.tab === name);
+      });
+    }
+
+    function set(name) {
+      name = (name === 'workbench') ? 'workbench' : 'library';
+      if (name === cur) return;
+      cur = name;
+      apply(name);
+      if (!window.WB) return;
+      if (name === 'workbench') WB.show ? WB.show() : WB.open();
+      else if (WB.hide) WB.hide();
+    }
+
+    function current() { return cur; }
+
+    function init() {
+      var rail = document.getElementById('tabRail');
+      if (!rail) return;
+      rail.addEventListener('click', function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest('.tabrail-btn') : null;
+        if (btn) set(btn.dataset.tab);
+      });
+      apply(cur);
+    }
+
+    return { set: set, current: current, init: init };
+  })();
+  window.AppTab = Tab;
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();

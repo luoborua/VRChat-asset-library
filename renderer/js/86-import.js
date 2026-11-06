@@ -316,7 +316,7 @@ var Importer = (function () {
   }
 
   /**
-   * v4.3.2：登记「存储路径」时**只替换同名的这一条**，其它路径（原始位置、网盘 webdav://）原样保留。
+   * v4.3.2：登记「存储路径」时**只替换同名的这一条**，其它路径（原始位置）原样保留。
    * 原来的写法是 `asset.paths = [{…}]`，一次建档就把用户登记的网盘位置和原始位置全清掉了。
    */
   function setPathEntry(asset, path, note) {
@@ -345,7 +345,7 @@ var Importer = (function () {
         var catLabel = App.categoryLabel(asset.category);
         var safe = App.folderName(asset);
         var hasLocal = (asset.paths || []).some(function (x) {
-          return x && x.path && !App.isWebdavPath(x.path);
+          return x && !!x.path;
         });
         return root.getDirectoryHandle(catLabel, { create: true }).then(function (catDir) {
           /* 已经有本地路径的素材照旧用原目录；只有新建的才挑空名字，避免两条素材共用一个目录 */

@@ -456,7 +456,7 @@ var Modals = {
     // 存储目录优先取 note=存储路径 的那条，不再只认 paths[0]（技术手册 §51.7）。
     function storageDirOf() {
       var ps = a.paths || [];
-      var local = ps.filter(function (x) { return x && x.path && !App.isWebdavPath(x.path); });
+      var local = ps.filter(function (x) { return x && x.path; });
       var hit = local.filter(function (x) { return x.note === '存储路径'; })[0] || local[0];
       return hit && hit.path;
     }
@@ -639,123 +639,7 @@ var Modals = {
       }))
     ]) : null;
 
-    /* v2.2.12 网盘（WebDAV）：远端目录浏览 / 下载到本地 / 上传本地文件 */
-    function openDavBrowser(pStr) {
-      var info = App.webdavOf(pStr);
-      if (!info || !info.account) {
-        Toast.warn('找不到 WebDAV 账号「' + (info ? info.label : '') + '」：请先在 设置 → 本地库与整理 里添加');
-        return;
-      }
-      var rootUrl = String(info.account.url || '').replace(/\/?$/, '/');
-      var cur = info.sub || '';
-      var listBox = el('div', { class: 'link-list' });
-      var head = el('div', { class: 'field-hint' });
-      var logBox = el('div', { class: 'fetch-log', style: { display: 'none' } });
-      function logLine(m) { logBox.style.display = ''; logBox.appendChild(el('div', { class: 'log-line', text: m })); logBox.scrollTop = logBox.scrollHeight; }
-      function encSeg(sub) { return String(sub || '').split('/').filter(function (s) { return s; }).map(encodeURIComponent).join('/'); }
-      function urlOf(sub, isDir) { var p = encSeg(sub); return rootUrl + p + (isDir && p ? '/' : ''); }
-      function localDir() {
-        var ls = (a.paths || []).filter(function (x) { return x && x.path && !App.isWebdavPath(x.path); });
-        var hit = ls.filter(function (x) { return x.note === '存储路径'; })[0] || ls[0];
-        return hit && hit.path;
-      }
-      function creds() {
-        return App.davCredsFor(info.label).then(function (c) {
-          if (!c) throw new Error('WebDAV 账号不存在：' + info.label);
-          return c;
-        });
-      }
-      function downloadRemote(e, btn) {
-        var dir = localDir();
-        if (!dir) { Toast.warn('该素材还没有本地存储路径：请先编辑素材「创建存储路径」再下载'); return; }
-        var dst = joinWinPath(dir, [e.name]);
-        btn.disabled = true; ICONS.apply(btn, ('\u23F3 下载中 …'));
-        creds().then(function (c) {
-          return FS.davCall('/api/webdav/get', { url: urlOf(cur ? cur + '/' + e.name : e.name, false), localPath: dst, username: c.username, password: c.password });
-        }).then(function (r) {
-          ICONS.apply(btn, r.exists ? '已存在' : '\u2714 已下载');
-          logLine('\u2714 ' + e.name + ' → ' + dst + (r.exists ? '（同名已存在，未覆盖）' : ''));
-          if (!r.exists) Toast.ok('已从网盘下载到：' + dst);
-        }).catch(function (err) {
-          btn.disabled = false; ICONS.apply(btn, ('\u2B07 下载到本地'));
-          logLine('\u2716 ' + e.name + '：' + (err && err.message));
-        });
-      }
-      function load(sub) {
-        cur = sub || '';
-        head.textContent = '账号：' + info.label + '　位置：/' + cur;
-        listBox.innerHTML = '';
-        listBox.appendChild(el('div', { class: 'field-hint', text: '正在读取远端目录 …' }));
-        creds().then(function (c) {
-          return FS.davCall('/api/webdav/list', { url: urlOf(cur, true), username: c.username, password: c.password });
-        }).then(function (r) {
-          listBox.innerHTML = '';
-          if (cur) {
-            listBox.appendChild(el('div', { class: 'link-row' }, [
-              el('button', { class: 'btn btn-xs', onclick: function () { load(cur.split('/').slice(0, -1).join('/')); } }, ICONS.label('\u2B06 上一级'))
-            ]));
-          }
-          if (!r.entries.length) listBox.appendChild(el('div', { class: 'field-hint', text: '（空目录）' }));
-          r.entries.forEach(function (e) {
-            if (e.isDir) {
-              listBox.appendChild(el('div', { class: 'link-row' }, [
-                el('code', { class: 'path', title: e.name }, ICONS.label('\u{1F4C1} ' + e.name)),
-                el('button', { class: 'btn btn-xs', onclick: function () { load(cur ? cur + '/' + e.name : e.name); } }, '进入')
-              ]));
-              return;
-            }
-            var btn = el('button', { class: 'btn btn-xs btn-primary' }, ICONS.label('\u2B07 下载到本地'));
-            btn.onclick = function () { downloadRemote(e, btn); };
-            listBox.appendChild(el('div', { class: 'link-row' }, [
-              el('code', { class: 'path', title: e.name }, e.name + (e.size ? '  ·  ' + fmtSize(e.size) : '')),
-              btn
-            ]));
-          });
-        }).catch(function (e) {
-          listBox.innerHTML = '';
-          listBox.appendChild(el('div', { class: 'field-hint' }, ICONS.label('\u2716 ' + (e && e.message))));
-        });
-      }
-      function uploadHere() {
-        FS.host.pickFiles().then(function (r) {
-          if (!r || !r.ok || !(r.paths || []).length) return;
-          var chain = Promise.resolve();
-          r.paths.forEach(function (lp) {
-            chain = chain.then(function () {
-              var nm = String(lp).split('\\').pop();
-              logLine('\u23F3 上传 ' + nm + ' …');
-              return creds().then(function (c) {
-                return FS.davCall('/api/webdav/put', { url: urlOf(cur ? cur + '/' + nm : nm, false), localPath: lp, username: c.username, password: c.password });
-              }).then(function (rr) { logLine('\u2714 ' + nm + ' 已上传（' + fmtSize(rr.size) + '）'); })
-                .catch(function (e) { logLine('\u2716 ' + nm + '：' + (e && e.message)); });
-            });
-          });
-          return chain.then(function () { load(cur); Toast.ok('上传结束，详见下方日志'); });
-        });
-      }
-      Modal.open({
-        title: '网盘目录（WebDAV）', size: 'lg',
-        body: [el('div', { class: 'detail-stack' }, [
-          head,
-          el('div', { class: 'btn-row' }, [
-            el('button', { class: 'btn btn-sm', onclick: function () { load(cur); } }, ICONS.label('\u{1F504} 刷新')),
-            el('button', { class: 'btn btn-sm btn-primary', onclick: function () { uploadHere(); } }, ICONS.label('\u2B06 上传本地文件到此处'))
-          ]),
-          listBox,
-          logBox
-        ])]
-      });
-      load(cur);
-    }
-
     var pathNode = (a.paths || []).length ? el('div', { class: 'link-list' }, a.paths.map(function (p) {
-      if (App.isWebdavPath(p.path)) {
-        return el('div', { class: 'link-row' }, [
-          // v2.5.2：路径本身就是「复制」入口（点一下复制），不再单列一个「复制」按钮
-          el('code', { class: 'path path-copy', title: '点击复制：' + p.path, onclick: function () { copyText(p.path).then(function () { Toast.ok('路径已复制'); }); } }, p.path + (p.note ? '  （' + p.note + '）' : '')),
-          el('button', { class: 'btn btn-xs btn-primary', onclick: function () { openDavBrowser(p.path); } }, ICONS.label('\u2601 浏览网盘'))
-        ]);
-      }
       return el('div', { class: 'link-row' }, [
         el('code', { class: 'path path-copy', title: '点击复制：' + p.path, onclick: function () { copyText(p.path).then(function () { Toast.ok('路径已复制'); }); } }, p.path + (p.note ? '  （' + p.note + '）' : '')),
         el('button', { class: 'btn btn-xs', onclick: function () { FS.openPath(p.path); } }, ICONS.label('\u{1F4C2} 打开'))
@@ -1179,7 +1063,7 @@ var Modals = {
         ]),
         el('div', { class: 'detail-actions' }, [
           el('div', { class: 'detail-actions-cell' }, [primaryBtn, hint]),   // v2.5.8：注释跟着它注释的按钮走
-          el('div', { class: 'detail-actions-cell' }, [editBtn, el('button', { class: 'btn btn-lg', onclick: function () { if (window.WB && WB.importToUnity) { WB.importToUnity(a); } else { Toast.err('工作台还没加载，稍后再试'); } } }, '导入到 Unity')])
+          el('div', { class: 'detail-actions-cell' }, [editBtn, el('button', { class: 'btn btn-lg', onclick: function () { if (window.WB && WB.importToUnity) { WB.importToUnity(a); } else { Toast.err('「导入与工程」页还没加载，稍后再试'); } } }, '导入到 Unity')])
         ])
       ])
     ]);
@@ -1952,7 +1836,7 @@ var Modals = {
     var charNameEn = el('input', { class: 'input', value: a.charNameEn || '', placeholder: '英文名，如 Sophina' });
 
     var authorInput = el('input', { class: 'input', value: a.author || a.shop, placeholder: '作者 / 店铺名' });
-    // v2.2.12 网盘字段（仅记录 + 角标；远端读写走 webdav:// 路径）
+    // 网盘字段（仅记录 + 角标）
     var cloudInput = el('input', { class: 'input', value: a.cloudUrl || '', placeholder: '网盘路径或分享链接（例：百度网盘 / 我的应用数据/xxx，或 https://pan.baidu.com/s/…）' });
     var descInput = el('textarea', { class: 'input textarea', rows: 8, placeholder: '商品简介（自动获取或手动填写）' });
     descInput.value = a.description || '';
@@ -2145,7 +2029,7 @@ var Modals = {
 
       el('div', { class: 'form-section', id: 'downloadSection' }, [
         el('div', { class: 'section-title'}, ICONS.label('\u{1F4C1} 本地文件与下载')),
-        Field.row('网盘', cloudInput, '仅作记录与角标提示，不会自动上传；远端读写请用上面的 webdav:// 路径'),
+        Field.row('网盘', cloudInput, '仅作记录与角标提示，不会自动上传'),
         Field.row('本地文件路径', el('div', {}, [
           pathEditor,
           el('div', { class: 'btn-row' }, [

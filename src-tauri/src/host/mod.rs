@@ -10,10 +10,11 @@ pub mod db;
 pub mod download_api;
 pub mod fs_api;
 pub mod net_api;
+pub mod p2p_api;
 pub mod pack_api;
 pub mod picker_api;
+pub mod signal_api;
 pub mod thumbs;
-pub mod webdav_api;
 pub mod workbench_api;
 
 use serde_json::{json, Value};
@@ -24,6 +25,8 @@ pub struct AppState {
     pub dl: download_api::DlState,
     pub pack: pack_api::PackState,
     pub db: db::DbState,
+    pub p2p: p2p_api::P2pState,
+    pub signal: signal_api::SignalState,
 }
 
 impl AppState {
@@ -39,6 +42,8 @@ impl AppState {
             dl: download_api::DlState::default(),
             pack: pack_api::PackState::default(),
             db,
+            p2p: p2p_api::P2pState::default(),
+            signal: signal_api::SignalState::default(),
         }
     }
 }
@@ -160,6 +165,50 @@ pub fn host_write_bytes(request: tauri::ipc::Request<'_>) -> Result<Value, Strin
     Ok(json!({ "ok": true, "size": bytes.len(), "path": path }))
 }
 
+/* ---------------- P2P 分块二进制通道 ----------------
+ * 跟 host_read_bytes / host_write_bytes 同一套思路：块数据不过 base64。
+ * 一条 64 KB 的块如果走 JSON，序列化 + 字符串化会多出 33% 体积和一次全量拷贝，
+ * 1 GB 下来就是几万次多余分配。 */
+
+fn sid_of(v: &Value) -> &str {
+    v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("")
+}
+
+#[tauri::command]
+pub async fn host_p2p_read(
+    state: State<'_, AppState>,
+    session: String,
+    block: u64,
+) -> Result<tauri::ipc::Response, String> {
+    let bytes = p2p_api::read_block(&state.p2p, &session, block)?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
+pub fn host_p2p_write(
+    state: State<'_, AppState>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<Value, String> {
+    let head = |k: &str| -> String {
+        request
+            .headers()
+            .get(k)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    let sid = head("x-p2p-session");
+    if sid.is_empty() {
+        return Err("缺少会话 ID".into());
+    }
+    let block: u64 = head("x-p2p-block").parse().map_err(|_| "块号非法".to_string())?;
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(b) => b,
+        _ => return Err("请求体必须是二进制".into()),
+    };
+    p2p_api::write_block(&state.p2p, &sid, block, bytes)
+}
+
 /* ---------------- 缩略图 ---------------- */
 
 #[tauri::command]
@@ -240,15 +289,21 @@ pub async fn host_call(
             Ok(download_api::cancel(&state.dl, job_id))
         }
 
-        "/api/webdav/test" => webdav_api::test(&p).await,
-        "/api/webdav/list" => webdav_api::list(&p).await,
-        "/api/webdav/put" => webdav_api::put(&p).await,
-        "/api/webdav/get" => webdav_api::get(&p).await,
-        "/api/webdav/mkcol" => webdav_api::mkcol(&p).await,
-
         "/api/pack/export" => pack_api::pack_create(&state.pack, &p),        "/api/pack/inspect" => pack_api::pack_inspect(&p),
         "/api/pack/extract" => pack_api::pack_extract(&state.pack, &p),
         "/api/pack/progress" => Ok(pack_api::progress_json(&state.pack)),
+
+        /* ---- P2P 传文件：只有磁盘侧，网络在渲染层的 WebRTC ---- */
+        "/api/p2p/prepare" => p2p_api::prepare(&state.p2p, &p),
+        "/api/p2p/open" => p2p_api::open(&state.p2p, &p),
+        "/api/p2p/status" => p2p_api::status(&state.p2p, sid_of(&p)),
+        "/api/p2p/finish" => p2p_api::finish(&state.p2p, sid_of(&p)),
+        "/api/p2p/cancel" => p2p_api::cancel(&state.p2p, sid_of(&p)),
+        "/api/p2p/resumable" => Ok(p2p_api::resumable()),
+        "/api/p2p/signalStart" => signal_api::start(&state.signal, &p).await,
+        "/api/p2p/signalStop" => Ok(signal_api::stop(&state.signal)),
+        "/api/p2p/signalStatus" => Ok(signal_api::status(&state.signal)),
+        "/api/p2p/discover" => signal_api::discover().await,
 
         /* ---- 素材主库（SQLite）---- */
         "/api/db/load" => state.db.load(),
@@ -280,8 +335,6 @@ pub async fn host_call(
         "/api/wb/receipt" => workbench_api::receipt(&p).await,
         "/api/wb/allowOverwrite" => workbench_api::allow_overwrite(&p).await,
         "/api/wb/installBridge" => workbench_api::install_bridge(&p).await,
-        "/api/wb/maRequest" => workbench_api::ma_request(&p).await,
-        "/api/wb/maReceipt" => workbench_api::ma_receipt(&p).await,
 
         other => return Ok(fail(format!("unknown api: {other}"))),
     };

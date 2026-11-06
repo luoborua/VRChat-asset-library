@@ -37,6 +37,11 @@ function fileWriteFailText(kind, info) {
     + '再按 Ctrl+S 或改一次任意素材即可补写落盘；改动仍在本地缓存里。';
 }
 
+/** 带 scheme:// 的条目不是本地磁盘路径（以前登记过的网盘地址之类）。
+ *  normalizeWinPath 会把 // 压成 \，等于把原始信息毁掉 —— 这类条目一律原样保留，
+ *  别的地方要判断「这条路径能不能当本地目录用」也用它。 */
+function isSchemePath(p) { return /^[a-z][a-z0-9+.\-]*:\/\//i.test(String(p || '')); }
+
 var App = {
   assets: [],
   settings: defaultSettings(),
@@ -545,14 +550,14 @@ var App = {
           note: (p && typeof p === 'object' && p.note) || ''
         };
       }).filter(function (x) { return x.path; });
-      // v2.2.12：webdav:// 远端路径不参与本地收敛，原样保留（否则会被当 Windows 路径截断）
-      var remote = all.filter(function (x) { return App.isWebdavPath(x.path); })
-        .map(function (x) { return { path: x.path, note: '网盘路径' }; });
-      var entries = all.filter(function (x) { return !App.isWebdavPath(x.path); }).map(function (x) {
+      /* 非本地路径原样留在旁边：收敛只针对本地路径，不能因此把它们丢掉 */
+      var foreign = all.filter(function (x) { return isSchemePath(x.path); })
+        .map(function (x) { return { path: x.path, note: x.note }; });
+      var entries = all.filter(function (x) { return !isSchemePath(x.path); }).map(function (x) {
         return { path: normalizeWinPath(x.path), note: x.note };
       }).filter(function (x) { return x.path; });
       if (!entries.length) {
-        if (remote.length && JSON.stringify(remote) !== JSON.stringify(a.paths || [])) { a.paths = remote; changed++; }
+        if (foreign.length && JSON.stringify(foreign) !== JSON.stringify(a.paths || [])) { a.paths = foreign; changed++; }
         return;
       }
       var expected = App.folderName(a).toLowerCase();
@@ -569,7 +574,7 @@ var App = {
       }
       var finalPath = (!exact && isLikelyFile(chosen.path)) ? parentDir(chosen.path) : chosen.path;
       finalPath = normalizeWinPath(finalPath);
-      var one = [{ path: finalPath, note: '存储路径' }].concat(remote);
+      var one = [{ path: finalPath, note: '存储路径' }].concat(foreign);
       if (JSON.stringify(one) !== JSON.stringify(a.paths || [])) { a.paths = one; changed++; }
     });
     return { list: list, changed: changed };
@@ -1001,7 +1006,7 @@ var App = {
     onLog = onLog || function () {};
     var rootPath = App.libraryRoot();
     var targets = (App.assets || []).filter(function (a) {
-      var local = (a.paths || []).filter(function (p) { return p && p.path && !App.isWebdavPath(p.path); });
+      var local = (a.paths || []).filter(function (p) { return p && p.path; });
       return !local.length;
     });
     if (!targets.length) return Promise.resolve({ checked: 0, filled: 0, skipped: 0 });
@@ -1129,10 +1134,6 @@ var App = {
     delete s.credentials;   // 凭证绝不随备份导出
     delete s.ai;            // AI 密钥同样不导出
     delete s.githubToken;   // v2.3.25：GitHub Token 同样不导出
-    /* v4.3.2 修复：webdavAccounts 里带着 passwordEnc、账号名和内网地址，
-     * 但导出时一直没剥掉，与设置页「凭证永不随备份导出」的承诺相反。
-     * 落库用的 SETTINGS_SKIP 早就排除了它，导出这条路径漏了。 */
-    delete s.webdavAccounts;
     return s;
   },
 
@@ -1144,6 +1145,14 @@ var App = {
        * 角色表 / 角色 id→显示名 / 标签名表 / 黑名单正则 / 工具名角色表 各只建一遍。
        * 作用域是本函数私有的临时对象、用完即弃，**不是跨调用缓存**（v2.5.7 的护栏见 App.newScope 注释）。 */
       var scope = App.newScope();
+      /* 带 scheme:// 的条目不是本地磁盘路径（以前登记过的网盘地址等）：原样保留。
+       * normalizeWinPath 会把 // 压成 \，等于把原始信息毁掉 —— 这类条目已经不能用来
+       * 打开或扫描，但至少留着原文，用户能自己改成真实路径。 */
+      var foreignPathCount = 0;
+      function normPath(p) {
+        var raw = String((p && typeof p === 'object' ? p.path : p) || '');
+        return isSchemePath(raw) ? raw : normalizeWinPath(raw);
+      }
       list.forEach(function (a) {
         // 清洗 1：标签剔除角色名（多语言别名）+ 黑名单
         var t = Smart.filterBlacklist(Smart.purgeAvatarTags(a.tags || [], scope), scope);
@@ -1165,10 +1174,9 @@ var App = {
         if (co !== a.originalTitle) { a.originalTitle = co; changed = true; }
         // 清洗 3：本地文件路径统一单反斜杠，并把字符串路径规范成 {path, note} 结构
         var cleanedPaths = concatUnique([], a.paths, function (p) {
-          return normalizeWinPath(typeof p === 'string' ? p : (p && p.path));
+          return normPath(p);
         }).map(function (p) {
-          var path = normalizeWinPath(typeof p === 'string' ? p : (p && p.path));
-          return { path: path, note: (p && typeof p === 'object' && p.note) || '' };
+          return { path: normPath(p), note: (p && typeof p === 'object' && p.note) || '' };
         });
         if (JSON.stringify(cleanedPaths) !== JSON.stringify(a.paths || [])) { a.paths = cleanedPaths; changed = true; }
         // 清洗 3.5：支持角色按显示名去重（修复内置角色与模型自定义角色同名时出现两个相同 chip）
@@ -1220,6 +1228,19 @@ var App = {
           App.saveSettings();
         }
       }
+      list.forEach(function (a) {
+        (a.paths || []).forEach(function (p) {
+          if (isSchemePath(p && typeof p === 'object' ? p.path : p)) foreignPathCount++;
+        });
+      });
+      if (foreignPathCount && !App._foreignPathWarned) {
+        App._foreignPathWarned = true;
+        try {
+          Toast.warn('有 ' + foreignPathCount + ' 条路径不是本地磁盘路径，已原样保留。'
+            + '这些素材打开、扫描都会失败，建议在详情页改成实际路径。', 8000);
+        } catch (eWarn) {}
+      }
+
       App.assets = list;
       // 老数据修复：把「下载存放位置（已创建文件夹）」等相对路径自动补全为完整路径（仅当路径真实存在）
       return FS.completeRelativePaths(list).then(function (rel) {
@@ -1514,8 +1535,7 @@ var App = {
   /** v2.3.5：在素材本地存储路径下按「商品ID」找封面图（.png 优先），命中返回 {path,name,ext,mime}，否则 '' */
   diskCoverFile: function (asset) {
     var itemId = String((asset && asset.itemId) || '').trim();
-    var all = ((asset && asset.paths) || []).map(function (p) { return p && p.path ? String(p.path).trim() : ''; }).filter(Boolean)
-      .filter(function (p) { return !App.isWebdavPath(p); });   // v2.3.11：webdav:// 不能拿去扫本地目录
+    var all = ((asset && asset.paths) || []).map(function (p) { return p && p.path ? String(p.path).trim() : ''; }).filter(Boolean);
     var dirs = uniq(all.filter(function (p) { return (asset.paths || []).some(function (x) { return x && x.path === p && x.note === '存储路径'; }); }).concat(all));
     if (!itemId || !dirs.length || !FS.host || !FS.host.scan) return Promise.resolve('');
     var re = new RegExp('^' + itemId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![0-9])', 'i');
@@ -2010,21 +2030,11 @@ var App = {
     return false;
   },
 
-  /* ---------------- 网盘（WebDAV）路径（v2.2.12） ----------------
-   * 素材的「本地文件路径」可以填 webdav://账号名/远端路径，由后端代为读写。
-   * 远端条目一律不参与本地路径收敛（否则会被当成 Windows 路径截断）。
-   */
-  isWebdavPath: function (p) { return /^webdav:\/\//i.test(String(p || '')); },
   /** v2.5.0（S2/S4）：磁盘对账——把存储目录里的真实文件与库里记录（downloadedFiles + 各版本 files）逐一比对。
    *  返回 Promise<{dir, error?, onDisk?, recorded?, missing?, extra?}>；error: no-path / no-host / offline / missing-dir */
   localFileAudit: function (a) {
     var dir = App.primaryLocalPath(a);
-    if (!dir) {
-      // v2.5.1（P6）：只有 webdav:// 远端路径的素材单列一类，不再混进「未关联本地路径」
-      var remote = (a.paths || []).map(function (p) { return (p && typeof p === 'object') ? String(p.path || '') : String(p || ''); })
-        .filter(function (p) { return p && App.isWebdavPath(p); });
-      return Promise.resolve({ dir: '', error: remote.length ? 'remote-only' : 'no-path', remote: remote });
-    }
+    if (!dir) return Promise.resolve({ dir: '', error: 'no-path' });
     if (!FS.host || typeof FS.host.scan !== 'function') return Promise.resolve({ dir: dir, error: 'no-host' });
     var recorded = uniq((a.downloadedFiles || []).map(String).concat(
       (a.versions || []).reduce(function (acc, v) {
@@ -2062,41 +2072,16 @@ var App = {
       });
     }).catch(function () { return { dir: dir, error: 'offline', recorded: recorded }; });
   },
-  /** v2.3.29：素材的主本地路径——优先 note=「存储路径」那条，其次第一条本地绝对路径；只有 webdav:// 时返回 ''（本地打不开） */
+  /** v2.3.29：素材的主本地路径——优先 note=「存储路径」那条，其次第一条本地绝对路径；没有则返回 '' */
   primaryLocalPath: function (a) {
     var local = (a.paths || []).map(function (p) {
       return { path: (p && typeof p === 'object') ? String(p.path || '') : String(p || ''), note: (p && typeof p === 'object' && p.note) || '' };
     }).filter(function (p) {
-      return p.path && !App.isWebdavPath(p.path) && isAbsoluteWinPath(p.path);
+      return p.path && isAbsoluteWinPath(p.path);
     });
     var hit = local.filter(function (p) { return p.note === '存储路径'; })[0] || local[0];
     return hit ? normalizeWinPath(hit.path) : '';
   },
-  /** 取某个 WebDAV 账号的实际凭据（密码出库时解密） */
-  davCredsFor: function (label) {
-    var acc = (App.settings.webdavAccounts || []).filter(function (x) { return x && x.label === label; })[0];
-    if (!acc) return Promise.resolve(null);
-    return Secure.decrypt(acc.passwordEnc || '').then(function (pw) {
-      var base = String(acc.url || '');
-      if (base && base.slice(-1) !== '/') base += '/';
-      return { label: acc.label, url: base, username: acc.username || '', password: pw || '' };
-    }).catch(function () {
-      var base = String(acc.url || '');
-      if (base && base.slice(-1) !== '/') base += '/';
-      return { label: acc.label, url: base, username: acc.username || '', password: '' };
-    });
-  },
-  webdavOf: function (p) {
-    var m = String(p || '').match(/^webdav:\/\/([^\/]+)\/?(.*)$/i);
-    if (!m) return null;
-    var label = decodeURIComponent(m[1]);
-    var acc = (App.settings.webdavAccounts || []).filter(function (x) { return x && x.label === label; })[0];
-    if (!acc) return { label: label, account: null, sub: m[2] || '' };
-    var base = String(acc.url || '');
-    if (base && base.slice(-1) !== '/') base += '/';
-    return { label: label, account: acc, sub: m[2] || '', url: base + (m[2] || '') };
-  },
-
   /* ---------------- 筛选 & 排序 ---------------- */
   filtered: function () {
     var f = App.filters;
@@ -2653,6 +2638,15 @@ var UI = {
     return Math.round(r.top + el.clientHeight / 2);
   },
   scrollTopInstant: function () { UI.scrollTo(0); },
+  /** v6.7（用户反馈）：卡片上的「只看这个」筛选做成开关 —— 当前正好只筛了这一个值，再点就取消；
+   *  否则切回「只看这一个」。分类 / 来源 / 角色都走这里，避免每处各写一套判断。
+   *  只动某一维筛选（key），不会顺手清掉其它条件。 */
+  filterOnly: function (key, value) {
+    var cur = Array.isArray(App.filters[key]) ? App.filters[key] : (App.filters[key] = []);
+    var isOnly = cur.length === 1 && cur[0] === value;
+    App.filters[key] = isOnly ? [] : [value];
+    return !isOnly;
+  },
   /** v2.5.9（用户要求）：**卡片内**发起的筛选（卡片上的分类/来源/角色/标签 chip、分类角标、价格丝带）
    *  —— 不回顶部：从当前位置出发把这张卡**定位到视口居中**；
    *  跨页时自动切到它所在页（页码跟着变，切页后先还原滚动位置再瞬间居中）；
@@ -2842,6 +2836,31 @@ var UI = {
     var now = state === 'in' ? '必须包含' : (state === 'out' ? '排除' : '不筛选');
     return '标签：' + t + '（当前：' + now + '）—— 点击：默认 → 必须包含 → 排除 → 取消';
   },
+  /** 卡片上的标签是两态（v6.7，用户反馈「再点一下要取消」）：
+   *  没筛 → 加入筛选；已筛 → 取消；已排除（从侧栏设的）→ 也取消。
+   *  三态循环只保留给侧栏列表与详情页，卡片上连点两下就是「开 → 关」。 */
+  cardTagTitle: function (t, state) {
+    var now = state === 'in' ? '已筛选' : (state === 'out' ? '已排除' : '未筛选');
+    return '标签：' + t + '（当前：' + now + '）—— 点击筛选，再点一次取消';
+  },
+  toggleTagFilter: function (t, opts) {
+    opts = opts || {};
+    if (typeof t !== 'string' || !t) return 'none';
+    if (!Array.isArray(App.filters.tags)) App.filters.tags = [];
+    if (!Array.isArray(App.filters.tagsNot)) App.filters.tagsNot = [];
+    var state = UI.tagFilterState(t);
+    if (state === 'in') {
+      var i = App.filters.tags.indexOf(t);
+      if (i >= 0) App.filters.tags.splice(i, 1);
+    } else if (state === 'out') {
+      var j = App.filters.tagsNot.indexOf(t);
+      if (j >= 0) App.filters.tagsNot.splice(j, 1);
+    } else {
+      App.filters.tags.push(t);
+    }
+    if (opts.render !== false) { App.page = 1; UI.renderAll(); }
+    return UI.tagFilterState(t);
+  },
   /** 推进三态；opts.render === false 时只改数据（交给调用方渲染——卡片内筛选走 filterFromCard 的定位逻辑） */
   cycleTagFilter: function (t, opts) {
     opts = opts || {};
@@ -2949,12 +2968,22 @@ var UI = {
     var sel = $('#sortSelect');
     if (sel && sel.value !== App.settings.sort) sel.value = App.settings.sort;
     var bar = $('#bulkBar');
+    var dock = document.getElementById('fabDock');
+    if (dock) dock.classList.toggle('show', App.selectMode);
     if (bar) {
       var ids = App.selectedIds();
       bar.classList.toggle('show', App.selectMode);
-      var fab = document.getElementById('fabGroup');
-      if (fab) fab.classList.toggle('show', App.selectMode);
-      var c = $('#bulkCount'); if (c) c.textContent = String(ids.length);
+      var c = $('#bulkCount');
+      if (c) {
+        var txt = String(ids.length);
+        /* 数字变了才播一下弹性动画：拖动连选时能看出「又多选了一个」 */
+        if (c.textContent !== txt) {
+          c.textContent = txt;
+          c.classList.remove('bump');
+          void c.offsetWidth;
+          c.classList.add('bump');
+        }
+      }
     }
     var g = $('#grid');
     if (g) {
@@ -3139,9 +3168,9 @@ var UI = {
     var badges = el('div', { class: 'card-badges' }, [
       /* v2.3.28：类型图标移到封面左上角，与其它角标同排（下方那个重复的分类气泡已去掉） */
       el('span', {
-        class: 'badge badge-dim cat-badge',
-        title: '分类：' + App.categoryLabel(a.category) + '（点击只看此分类）',
-        onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { App.filters.categories = [a.category]; }); }
+        class: 'badge badge-dim cat-badge' + (App.filters.categories.indexOf(a.category) >= 0 ? ' cat-badge-on' : ''),
+        title: '分类：' + App.categoryLabel(a.category) + (App.filters.categories.indexOf(a.category) >= 0 ? '（已筛选，再点取消）' : '（点击只看此分类）'),
+        onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { UI.filterOnly('categories', a.category); }); }
       }, [App.categoryIcon(a.category, { size: 18 })]),
       (a.extra && a.extra.r18) ? el('span', { class: 'badge badge-r18', title: '成人向（R-18）' }, 'R18') : null,
       a.delisted ? el('span', { class: 'badge badge-dim', title: '商品已下架 / 无法获取信息', text: '已下架' }) : null,
@@ -3178,8 +3207,9 @@ var UI = {
       }, '心愿单'));
     } else if (App.isGitHubSource(a)) {
       cover.appendChild(el('span', {
-        class: 'price-ribbon ribbon-oss', title: '开源素材（GitHub 仓库），点击只看 GitHub 来源',
-        onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { App.filters.sources = ['github']; }); }
+        class: 'price-ribbon ribbon-oss',
+        title: '开源素材（GitHub 仓库）' + (App.filters.sources.indexOf('github') >= 0 ? '，已只看 GitHub 来源，再点取消' : '，点击只看 GitHub 来源'),
+        onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { UI.filterOnly('sources', 'github'); }); }
       }, '开源'));
     }
 
@@ -3214,10 +3244,15 @@ var UI = {
     var primaryLabel = (primarySrc.source === 'other' && primarySrc.sourceCustom)
       ? primarySrc.sourceCustom
       : App.sourceLabel({ source: primarySrc.source, sourceCustom: primarySrc.sourceCustom });
+    /* v6.7：来源 chip 也做成开关。生效时不再用「来源色」描边，让 .chip-on 的主色描边显出来，
+     * 否则行内 border-color 会盖掉高亮。 */
+    var srcOn = App.filters.sources.indexOf(primarySrc.source) >= 0;
     var srcTag = el('span', {
-      class: 'chip chip-source chip-click', style: { borderColor: App.sourceColor(primarySrc.source) },
-      title: '来源：' + srcEntries.map(function (s) { return (s.source === 'other' && s.sourceCustom) ? s.sourceCustom : App.sourceLabel({ source: s.source, sourceCustom: s.sourceCustom }); }).join('、') + '（点击只看此来源）',
-      onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { App.filters.sources = [primarySrc.source]; }); }
+      class: 'chip chip-source chip-click' + (srcOn ? ' chip-on' : ''),
+      style: srcOn ? null : { borderColor: App.sourceColor(primarySrc.source) },
+      title: '来源：' + srcEntries.map(function (s) { return (s.source === 'other' && s.sourceCustom) ? s.sourceCustom : App.sourceLabel({ source: s.source, sourceCustom: s.sourceCustom }); }).join('、')
+        + (srcOn ? '（已筛选，再点取消）' : '（点击只看此来源）'),
+      onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { UI.filterOnly('sources', primarySrc.source); }); }
     }, [App.sourceIcon(primarySrc.source, { size: 13 }), document.createTextNode(primaryLabel + (srcEntries.length > 1 ? ' +' + (srcEntries.length - 1) : ''))]);
 
     var body = el('div', { class: 'card-body' }, [
@@ -3226,8 +3261,9 @@ var UI = {
         ? el('div', { class: 'card-subtitle', title: a.originalTitle }, a.originalTitle) : null,
       el('div', { class: 'card-chips' }, [
         el('span', {
-          class: 'chip chip-cat chip-click', title: '分类：' + App.categoryLabel(a.category) + '（点击只看此分类）',
-          onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { App.filters.categories = [a.category]; }); }
+          class: 'chip chip-cat chip-click' + (App.filters.categories.indexOf(a.category) >= 0 ? ' chip-on' : ''),
+          title: '分类：' + App.categoryLabel(a.category) + (App.filters.categories.indexOf(a.category) >= 0 ? '（已筛选，再点取消）' : '（点击只看此分类）'),
+          onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { UI.filterOnly('categories', a.category); }); }
         }, [App.categoryIcon(a.category, { size: 13 }), document.createTextNode(App.categoryLabel(a.category))]),
         srcTag,
       ]),
@@ -3235,8 +3271,9 @@ var UI = {
         App.normalizeAvatarIds(App.filterAvatars(a)).slice(0, 4).map(function (v) {
           var avLabel = App.avatarLabel(v);
           return el('span', {
-            class: 'chip chip-av chip-click' + (App.filters.avatars.indexOf(v) >= 0 ? ' chip-on' : ''), title: '角色：' + avLabel + '（点击只看此角色）',
-            onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { App.filters.avatars = [v]; }); }
+            class: 'chip chip-av chip-click' + (App.filters.avatars.indexOf(v) >= 0 ? ' chip-on' : ''),
+            title: '角色：' + avLabel + (App.filters.avatars.indexOf(v) >= 0 ? '（已筛选，再点取消）' : '（点击只看此角色）'),
+            onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { UI.filterOnly('avatars', v); }); }
           }, avLabel);
         })
           .concat(a.avatars.length > 4 ? [el('span', {
@@ -3258,8 +3295,8 @@ var UI = {
           var tstate = UI.tagFilterState(t);
           return el('span', {
             class: 'tag tag-click' + (Smart.isUntranslated(t) ? ' tag-untrans' : '') + UI.tagFilterClass(tstate),
-            title: UI.tagFilterTitle(t, tstate),
-            onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { UI.cycleTagFilter(t, { render: false }); }); }
+            title: UI.cardTagTitle(t, tstate),
+            onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { UI.toggleTagFilter(t, { render: false }); }); }
           }, t + (Smart.isUntranslated(t) ? '（待翻译）' : ''));
         });
         if (moreN > 0) nodes.push(el('span', {
@@ -3295,6 +3332,7 @@ var UI = {
       card.addEventListener('pointerdown', function () {
         pressTimer = setTimeout(function () {
           pressTimer = null;
+          if (App._paintActive) return;    // 正在拖动连选，别抢着重绘（会打断拖动）
           App._suppressClick = true;
           App.selectMode = true;
           App.selection[a.id] = true;

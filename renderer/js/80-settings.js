@@ -16,6 +16,7 @@ var Settings = {
       { id: 'icons',      label: ICONS.label('\u{1F3A8} 图标') },
       { id: 'ai',         label: ICONS.label('\u{1F916} AI 与模糊搜索') },
       { id: 'library',    label: ICONS.label('\u{1F4C1} 本地库与整理') },
+      { id: 'p2p',        label: ICONS.label('\u{1F517} 点对点传输') },
       { id: 'data',       label: ICONS.label('\u{1F4BE} 数据管理') },
       { id: 'about',      label: ICONS.label('\u2139 关于与帮助') }
     ];
@@ -42,6 +43,28 @@ var Settings = {
       footer: [el('button', { class: 'btn btn-primary', onclick: function () { Modal.close(h); UI.renderAll(); } }, '完成')]
     });
     select(tabId || 'appearance');
+  },
+
+  /* ---------------- 点对点传输 ---------------- */
+  tab_p2p: function () {
+    var box = el('div', { class: 'settings-pane' });
+    box.appendChild(el('h3', { text: '点对点传输' }));
+    box.appendChild(el('p', {
+      class: 'settings-desc',
+      text: '和同一个局域网里的好友直接连起来传文件，文件内容不经过任何服务器。'
+          + '只需要一个「信令服务」帮忙交换连接地址 —— 它只转发几百字节的握手信息，看不到也存不下文件内容。'
+    }));
+
+    if (typeof P2PUI !== 'undefined' && P2PUI.signalBox) box.appendChild(P2PUI.signalBox());
+
+    box.appendChild(el('h3', { text: '说明' }));
+    box.appendChild(el('ul', { class: 'settings-list' }, [
+      el('li', { text: '只支持同一个局域网（同一个路由器 / 同一个 WiFi）。跨网络传请用「导出素材包」。' }),
+      el('li', { text: '发起方点「传给好友」时会自动把服务开起来；接收方只要一个 6 位口令，地址是自动找的。' }),
+      el('li', { text: '信令服务连续 15 分钟没有传输会自动关闭，避免长期开着；关闭后需要重新分享，口令会换新的。' }),
+      el('li', { text: '传输中断后可以点「重连」接着传，已经传完的块不会重来。' })
+    ]));
+    return box;
   },
 
   /* ---------------- 外观 ---------------- */
@@ -300,7 +323,7 @@ var Settings = {
     function renderToken() {
       tkBox.innerHTML = '';
       var has = !!App.settings.githubToken;
-      var tkIn = el('input', {          // 刻意不用 type=password：Token 明文可见便于核对粘贴内容（例外：DeepSeek API Key 与 WebDAV 密码仍用 type=password）
+      var tkIn = el('input', {          // 刻意不用 type=password：Token 明文可见便于核对粘贴内容（例外：DeepSeek API Key 仍用 type=password）
         class: 'input mono', type: 'text', autocomplete: 'off', spellcheck: 'false',
         placeholder: has ? '已保存（不回显原文；重新粘贴保存会整条覆盖）' : '粘贴 GitHub Token（可选）'
       });
@@ -1518,70 +1541,6 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
       el('button', { class: 'btn btn-sm', onclick: function () { Tools.bulkOrderUpdate(); } }, ICONS.label('\u{1F504} 批量获取更新'))
     ]));
 
-    // ---- v2.2.12 网盘（WebDAV）----
-    box.appendChild(el('h3', { text: '网盘（WebDAV）' }));
-    box.appendChild(el('p', { class: 'field-hint', text: '这里只配置 WebDAV 地址与账号；能访问哪些网盘完全取决于你自己部署的 WebDAV 网关（Nextcloud / 群晖 / Alist 等），本程序不内置任何网盘 SDK。配置后，素材的「本地文件路径」可填 webdav://账号名/远端路径，详情页即可浏览远端目录、上传与下载。密码用本机加密（' + Secure.level().name + '）保存，永不随备份导出。' }));
-    var davLog = el('div', { class: 'field-hint' });
-    var davList = el('div', { class: 'link-list' });
-    function davCreds(acc) {
-      return Secure.decrypt(acc.passwordEnc || '').then(function (pw) {
-        return { url: acc.url, username: acc.username || '', password: pw || '' };
-      }).catch(function () { return { url: acc.url, username: acc.username || '', password: '' }; });
-    }
-    function davTest(acc) {
-      davLog.textContent = '正在测试 ' + acc.label + ' …';
-      davCreds(acc).then(function (c) {
-        return FS.davCall('/api/webdav/test', c);
-      }).then(function (r) {
-        ICONS.apply(davLog, r.ok ? ('\u2714 ' + acc.label + '：连接正常（支持 WebDAV）') : ('\u26A0 ' + acc.label + '：' + r.error));
-      }).catch(function (e) { ICONS.apply(davLog, '\u2716 ' + acc.label + '：' + (e && e.message)); });
-    }
-    function renderDav() {
-      davList.innerHTML = '';
-      var accs = App.settings.webdavAccounts || [];
-      if (!accs.length) { davList.appendChild(el('div', { class: 'field-hint', text: '还没有配置任何 WebDAV 账号。' })); return; }
-      accs.forEach(function (acc) {
-        davList.appendChild(el('div', { class: 'link-row' }, [
-          el('code', { class: 'path', title: acc.url }, acc.label + '  ·  ' + acc.url + (acc.username ? '  ·  ' + acc.username : '')),
-          // v2.3.15：像站点 Cookie 一样给出直观状态——密码是本机加密保存的，不回显原文
-          el('span', { class: acc.passwordEnc ? 'field-hint cred-saved' : 'field-hint' }, ICONS.label(acc.passwordEnc ? '\u{1F512} 已加密保存密码' : '未设密码（匿名访问）')),
-          el('button', { class: 'btn btn-xs', onclick: function () { davTest(acc); } }, '测试'),
-          el('button', { class: 'btn btn-xs btn-danger-ghost', onclick: function () {
-            App.settings.webdavAccounts = (App.settings.webdavAccounts || []).filter(function (x) { return x.id !== acc.id; });
-            App.saveSettings(); renderDav(); Toast.ok('已删除 WebDAV 账号：' + acc.label);
-          } }, '删除')
-        ]));
-      });
-    }
-    var davLabel = el('input', { class: 'input', placeholder: '账号名，例如 坚果云（用于 webdav://坚果云/素材）' });
-    var davUrl = el('input', { class: 'input mono', placeholder: 'https://dav.jianguoyun.com/dav/' });
-    var davUser = el('input', { class: 'input', placeholder: '用户名（可留空）' });
-    var davPass = el('input', { class: 'input', type: 'password', placeholder: '密码 / 应用密码', autocomplete: 'new-password' });
-    box.appendChild(Field.row('账号名', davLabel, '填进 webdav:// 里的名字，需唯一'));
-    box.appendChild(Field.row('WebDAV 地址', davUrl, '必须 http:// 或 https:// 开头，指向 WebDAV 根或子目录'));
-    box.appendChild(Field.row('用户名', davUser));
-    box.appendChild(Field.row('密码', davPass, '本机加密保存；建议用网关生成的「应用密码」而非主密码'));
-    box.appendChild(el('div', { class: 'btn-row' }, [
-      el('button', { class: 'btn btn-sm btn-primary', onclick: function () {
-        var label = davLabel.value.trim(), url = davUrl.value.trim();
-        if (!label) { Toast.warn('请先填账号名'); return; }
-        if (!/^https?:\/\//i.test(url)) { Toast.warn('WebDAV 地址必须以 http:// 或 https:// 开头'); return; }
-        if ((App.settings.webdavAccounts || []).some(function (x) { return x.label === label; })) { Toast.warn('账号名已存在：' + label); return; }
-        Secure.encrypt(davPass.value).then(function (enc) {
-          App.settings.webdavAccounts = (App.settings.webdavAccounts || []).concat([{
-            id: 'dav_' + Date.now().toString(36), label: label, url: url,
-            username: davUser.value.trim(), passwordEnc: enc
-          }]);
-          App.saveSettings();
-          davLabel.value = davUrl.value = davUser.value = davPass.value = '';
-          renderDav(); Toast.ok('已保存 WebDAV 账号：' + label);
-        });
-      } }, ICONS.label('\u2795 添加账号'))
-    ]));
-    box.appendChild(davList);
-    box.appendChild(davLog);
-    renderDav();
-
     // v2.3.3：扫描补路径（只补不删，不动已有路径）
     var scanLog = el('div', { class: 'fetch-log', style: { display: 'none' } });
     function scanLogLine(m) { scanLog.style.display = ''; scanLog.appendChild(el('div', { class: 'log-line', text: m })); scanLog.scrollTop = scanLog.scrollHeight; }
@@ -1707,21 +1666,13 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
     box.appendChild(el('h3', { text: APP.name + ' v' + APP.version }));
     box.appendChild(el('p', { class: 'field-hint', text: '离线桌面工具：数据本体存在与程序同目录的 vrclib-data\\ 文件夹（library.db 为主库，浏览器 IndexedDB 只是缓存副本），不依赖任何服务器，也不会上传你的任何数据。' }));
 
-    /* ---------------- v4.3.2：程序更新（手动检查） ---------------- */
+    /* ---------------- v4.3.2：程序更新（手动检查） ----------------
+     * v6.7：更新源固定绑定项目仓库，不再让用户填 owner/repo（填错只会白查 404）。 */
     var updStatus = el('div', { class: 'field-hint', text: '' });
     function refreshUpdStatus() {
-      var s = Updater.source();
       updStatus.textContent = '当前版本 v' + Updater.currentVersion()
-        + ' · 更新源：' + (s.configured ? (s.owner + '/' + s.repo) : '未配置');
+        + ' · 更新源：' + Updater.describe();
     }
-    var upOwner = el('input', {
-      class: 'input mono', placeholder: 'owner（GitHub 用户名 / 组织名）',
-      value: ((App.settings.updateSource || {}).owner) || ''
-    });
-    var upRepo = el('input', {
-      class: 'input mono', placeholder: 'repo（仓库名）',
-      value: ((App.settings.updateSource || {}).repo) || ''
-    });
     var upBtnCheck = el('button', {
       class: 'btn btn-sm btn-primary',
       onclick: function () { Updater.check(); }
@@ -1730,18 +1681,9 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
       class: 'btn btn-sm',
       onclick: function () {
         var s = Updater.source();
-        if (!s.configured) { Toast.warn('先填好下面的 owner / repo 再打开仓库', 5000); return; }
         Updater.openUrl(Updater.repoUrl(s.owner, s.repo));
       }
     }, ICONS.label('\u{1F517} 打开仓库'));
-    var upBtnSave = el('button', {
-      class: 'btn btn-sm',
-      onclick: function () {
-        App.settings.updateSource = { owner: upOwner.value.trim(), repo: upRepo.value.trim() };
-        App.saveSettings(); refreshUpdStatus();
-        Toast.ok('更新源已保存');
-      }
-    }, '保存更新源');
 
     box.appendChild(el('h3', { text: '程序更新' }));
     box.appendChild(el('div', { class: 'notice' }, [
@@ -1751,9 +1693,7 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
     ]));
     box.appendChild(updStatus);
     box.appendChild(el('div', { class: 'btn-row' }, [upBtnCheck, upBtnRepo]));
-    box.appendChild(Field.row('更新源 owner', upOwner));
-    box.appendChild(Field.row('更新源 repo', upRepo));
-    box.appendChild(el('div', { class: 'btn-row' }, [upBtnSave]));
+    box.appendChild(el('p', { class: 'field-hint', text: '更新源固定为 ' + Updater.describe() + '，不需要也不能在界面里改。' }));
     refreshUpdStatus();
 
     box.appendChild(el('h3', { text: '信息获取方式' }));
@@ -1783,7 +1723,7 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
     box.appendChild(el('h3', { text: '运行形态：单进程桌面程序（Tauri 2）' }));
     box.appendChild(el('p', { class: 'field-hint', text: '程序以原生窗口运行，文件与网络操作由同进程里的 Rust 后端直接完成——不监听任何端口，也没有需要单独启动的外部程序。' }));
     box.appendChild(el('ul', { class: 'help-list' }, [
-      el('li', { text: '后端提供的能力：读写任意路径、按路径建目录、移动/复制、读取目录、打开资源管理器、发起 HTTP 请求、下载与断点续传、WebDAV 客户端、AI 流式转发、SQLite 主库、缩略图生成。' }),
+      el('li', { text: '后端提供的能力：读写任意路径、按路径建目录、移动/复制、读取目录、打开资源管理器、发起 HTTP 请求、下载与断点续传、AI 流式转发、SQLite 主库、缩略图生成。' }),
       el('li', { text: '素材主库为 vrclib-data\\library.db（SQLite），只写改动的行；二进制（封面 / 图集）以原始字节读写，不经过 base64。' }),
       el('li', { text: 'v6.0 迁移到 Tauri 2：安装体积从数百 MB 降到约 7.4 MB，常驻内存约 33 MB；v6.1 起 Electron 载体与旧的本地 HTTP 后端（端口 / 令牌 / 断线重连）已整体移除。' })
     ]));

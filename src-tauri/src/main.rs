@@ -183,6 +183,14 @@ fn mime_of(path: &str) -> &'static str {
         .map(|x| x.to_string_lossy().to_lowercase())
         .unwrap_or_default();
     match ext.as_str() {
+        /* 前端产物：开发模式的 vrclibdev 协议要按真正的类型返回，
+           否则 WebView2 会把 html/js 当二进制，页面直接黑屏。 */
+        "html" | "htm" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "woff2" => "font/woff2",
+        "ico" => "image/x-icon",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",
@@ -246,10 +254,15 @@ fn main() {
                 .decode_utf8_lossy()
                 .to_string();
             let root_path = std::path::Path::new(&root);
-            let target = root_path.join(&decoded);
+            /* 两边都要 canonicalize：Windows 上它返回 \\?\G:\... 前缀，
+               拿没处理过的 root 去 starts_with 比对永远失败（原来就栽在这，页面 404）。 */
+            let Ok(root_canon) = root_path.canonicalize() else {
+                return Response::builder().status(404).body(Vec::new()).unwrap();
+            };
+            let target = root_canon.join(&decoded);
             let ok = target
                 .canonicalize()
-                .map(|p| p.starts_with(root_path))
+                .map(|p| p.starts_with(&root_canon))
                 .unwrap_or(false);
             if !ok {
                 return Response::builder().status(404).body(Vec::new()).unwrap();
@@ -277,6 +290,8 @@ fn main() {
             host::host_stream,
             host::host_read_bytes,
             host::host_write_bytes,
+            host::host_p2p_read,
+            host::host_p2p_write,
             host::thumb_ensure,
             host::thumb_batch,
             host::app_paths,
@@ -316,16 +331,34 @@ fn main() {
 
             let wv_dir = ensure_webview_data_dir(app);
             let mut attempt = 0;
-            /* 开发模式：设置 VRCLIB_DEV_URL 时页面直接从本地静态服务加载，
+            /* 开发模式：设了 VRCLIB_DEV_DIR（renderer 目录）就从这个目录实时读文件，
                改前端（JS/CSS/HTML）后按 Ctrl+R 即可，不必重新编译 exe。
-               该源已在 capabilities/default.json 的 remote.urls 里登记，IPC 不会被拒。 */
-            let webview_url = match std::env::var("VRCLIB_DEV_URL") {
-                Ok(u) if !u.trim().is_empty() => match u.trim().parse::<tauri::Url>() {
-                    Ok(url) => WebviewUrl::External(url),
-                    Err(_) => WebviewUrl::App("index.html".into()),
-                },
-                _ => WebviewUrl::App("index.html".into()),
-            };            let win = loop {
+
+               为什么走自定义协议而不是本地 HTTP（v6.6 修）：
+               http://127.0.0.1:8765 会被 Tauri 判成**外部来源**，外部来源下应用自己的命令
+               （host_call 等）默认不放行，于是所有文件读写都返回
+               「host_call not found. Plugin not found」，启动就报「数据文件读取失败」。
+               自定义协议在 Windows 上映射成 http://vrclibdev.localhost，与内置资源同属「自家源」，
+               IPC 正常，也就没有端口、没有被别的网页冒用的可能。 */
+            let webview_url = {
+                #[cfg(debug_assertions)]
+                {
+                    let dev_dir = std::env::var("VRCLIB_DEV_DIR").unwrap_or_default();
+                    if !dev_dir.trim().is_empty() {
+                        match "vrclibdev://localhost/index.html".parse::<tauri::Url>() {
+                            Ok(url) => WebviewUrl::CustomProtocol(url),
+                            Err(_) => WebviewUrl::App("index.html".into()),
+                        }
+                    } else {
+                        WebviewUrl::App("index.html".into())
+                    }
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    WebviewUrl::App("index.html".into())
+                }
+            };
+            let win = loop {
                 attempt += 1;
                 let mut builder = WebviewWindowBuilder::new(app, "main", webview_url.clone())
                     .title(TITLE)
@@ -401,6 +434,10 @@ fn main() {
                    busy 是「租约」而不是布尔值（见 workbench_api::import_busy_now），
                    页面崩了或事件没绑上，租约过期后照样能关，不会把窗口锁死。 */
                 WindowEvent::CloseRequested { api, .. } => {
+                    /* 传文件到一半被关窗：位图必须落盘，否则下次接不上。 */
+                    if let Some(st) = w.try_state::<host::AppState>() {
+                        host::p2p_api::flush_all(&st.p2p);
+                    }
                     if host::workbench_api::import_busy_now() {
                         api.prevent_close();
                         let _ = w.emit("wb-busy-close", ());

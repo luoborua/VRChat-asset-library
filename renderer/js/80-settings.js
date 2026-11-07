@@ -1,10 +1,12 @@
-/* ============ 80-settings.js ============ */
-/* ============ 80-settings.js ============ */
-/* =====================================================================
- * 80-settings.js  —  设置中心 / 批量操作 / 整理辅助
- * ===================================================================== */
+/*
+ * 80-settings.js —— 设置中心：外观、抓取、站点凭据、标签词典、本地库、数据目录、关于
+ *   选择写进 App.settings，再由 Store.local / FS.host 落到磁盘；界面全部现搭在弹窗里。
+ *   只负责把选择记下来、把代价讲清楚；抓取、解析、文件搬运本身由 Net / Fetchers / FS 做。
+ *   不实现素材编辑表单，也不直接操作素材记录。
+ */
 
 var Settings = {
+  /** 打开设置中心，默认停在首个页签 */
   open: function (tabId) {
     var tabs = [
       { id: 'appearance', label: ICONS.label('\u{1F3A8} 外观') },
@@ -25,14 +27,14 @@ var Settings = {
       return el('button', {
         class: 'settings-tab', dataset: { tab: t.id },
         onclick: function () { select(t.id); }
-      }, t.label);   // v2.3.27：tabs 里的 label 已是 ICONS.label(...) 生成的节点数组，el() 会自动展平
+      }, t.label);   // label 已是 ICONS.label 生成的节点数组，el() 会自己展平
     }));
     function select(id) {
       $$('.settings-tab', nav).forEach(function (b) { b.classList.toggle('active', b.dataset.tab === id); });
       content.innerHTML = '';
       content.appendChild(Settings['tab_' + id]());
-      /* v6.2：设置窗改为固定尺寸后，滚动容器从 .modal-body 变成 .settings-content
-       * （左侧导航不再跟着滚），切标签时也要把这个容器滚回顶部。 */
+      /* 设置窗是固定尺寸，滚动容器在 .settings-content 而不是 .modal-body
+       * （左侧导航不跟着滚），切页签时这两处都要滚回顶部。 */
       content.scrollTop = 0;
       var body = nav.closest ? nav.closest('.modal-body') : null;
       if (body) body.scrollTop = 0;
@@ -79,7 +81,7 @@ var Settings = {
     }));
     box.appendChild(Field.row('主题', themeSel, '樱粉马卡龙偏少女向（粉 + 杏黄），天际蓝是淡蓝配白'));
 
-    /* v4.5：毛玻璃是独立开关，叠在任意主题上 */
+    /* 毛玻璃独立于主题：任意主题都能叠一层半透明模糊 */
     var glassCb = el('input', { type: 'checkbox', checked: App.settings.glass !== false, onchange: function () {
       App.settings.glass = glassCb.checked; App.applyTheme(); App.saveSettings();
     } });
@@ -96,7 +98,18 @@ var Settings = {
     ]);
     box.appendChild(Field.row('卡片尺寸', sizeSel));
 
-    /* v5.0：每页数量不再让用户选 —— 按卡片大小自动换算，保持一页占的面积差不多 */
+    /* 滚轮手感是性能取舍，不是审美：「顺滑」带缓动，窗口线程跟不上时会短暂无响应，
+     * 三档的代价写在下面的提示里。 */
+    var wheelSel = el('select', { class: 'input', onchange: function () {
+      App.settings.wheelMode = wheelSel.value; App.saveSettings();
+    } }, [
+      el('option', { value: 'fine', selected: (App.settings.wheelMode || 'fine') === 'fine' }, '细密（推荐：无缓动但步子小，最不卡）'),
+      el('option', { value: 'system', selected: App.settings.wheelMode === 'system' }, '跟系统（一格 120px，硬跳）'),
+      el('option', { value: 'smooth', selected: App.settings.wheelMode === 'smooth' }, '顺滑（有缓动，可能短暂卡住）')
+    ]);
+    box.appendChild(Field.row('滚轮手感', wheelSel, '细密/跟系统 都只花 1 帧；顺滑每格要十几帧，窗口线程跟不上时会短暂无响应'));
+
+    /* 每页数量不给选项：按卡片大小换算，才能让一页占的面积差不多大 */
     box.appendChild(Field.row('每页数量', el('span', { class: 'field-hint', text: '跟随卡片大小自动决定：小 34 / 中 24 / 大 15，翻页条数量也随卡片大小变化' })));
 
     [['autoTranslateTags', '获取信息后自动翻译标签为中文'],
@@ -135,7 +148,8 @@ var Settings = {
     var box = el('div', { class: 'settings-pane' });
     box.appendChild(el('div', { class: 'notice' }, [
       el('b', { text: '联网抓取的两种方式' }),
-      el('p', { text: '抓取商品信息的路径只有两条：默认「手动粘贴源码」（完全离线、零请求）；需要自动抓取时，全部请求由程序自身的后端直接发出——不经过端口、外部进程或 CORS 代理。' })
+      el('p', { text: '抓取商品信息的路径只有两条：默认「手动粘贴源码」（不抓取商品信息、零请求）；需要自动抓取时，全部请求由程序自身的后端直接发出——不经过端口、外部进程或 CORS 代理。'
+        + '默认下唯一会联网的是下面「粘贴链接自动取标题」：粘贴商品链接时只请求一次、只取标题，可以关掉。' })
     ]));
 
     box.appendChild(el('h3', { text: '抓取方式' }));
@@ -169,9 +183,13 @@ var Settings = {
     } });
     box.appendChild(el('label', { class: 'check check-row' }, [autoCk, el('span', { text: '编辑素材时，如已保存 Cookie 且该素材还没有版本/下载链接，自动获取已购版本（需要联网）' })]));
 
-    /* v6.1：这里原先有一块「内置后端」状态区（在线/离线 + 重新检测按钮）。
-     * 后端与页面同进程后恒为就绪，那块只会永远显示同一个绿标，已移除。
-     * 现在页面只在真正需要时（启动装配、写盘失败）判断能力是否可用。 */
+    /* 标题：这是「手动粘贴源码」下唯一允许联网的动作，所以单独一个开关，关了就一次都不发。 */
+    var titleCk = el('input', { type: 'checkbox', checked: App.settings.autoTitleFetch !== false, onchange: function () {
+      App.settings.autoTitleFetch = titleCk.checked; App.saveSettings();
+    } });
+    box.appendChild(el('label', { class: 'check check-row' }, [titleCk, el('span', {
+      text: '粘贴商品链接时自动获取标题（只发一次请求、只取标题，填到「原标题」；关掉后连这一次也不发）'
+    })]));
 
     box.appendChild(el('h3', { text: '解析结果缓存' }));
     box.appendChild(el('div', { class: 'field-hint', text: '同一个商品链接的解析结果会缓存到本机 IndexedDB，重复添加时直接命中缓存，不再重复请求或重复解析。' }));
@@ -228,7 +246,7 @@ var Settings = {
           class: 'input textarea mono', rows: 3,
           placeholder: '粘贴该站点的 Cookie 整行，例如：_plaza_session_nktz7u=xxxx; other=yyyy'
         });
-        // v2.3.15：Cookie 不回显原文，但给出「已保存什么」的直观摘要（项名 / 条数 / 字符数 / 更新时间 / 掩码）
+        // Cookie 不回显原文，只给摘要：整串凭据不该长期留在屏幕上
         var statusTip = el('span', { class: 'field-hint' });
         (function paintStatus() {
           if (!c.cookie) {
@@ -318,12 +336,12 @@ var Settings = {
       }, ICONS.label('\u{1F5D1} 清空全部 Cookie'))
     ]));
 
-    /* ---- v2.3.25：可选 GitHub Token（不填=匿名 60 次/小时；填了=5000 次/小时） ---- */
+    /* ---- GitHub Token：不填走匿名额度，填了额度高得多 ---- */
     var tkBox = el('div', { class: 'cred-item' });
     function renderToken() {
       tkBox.innerHTML = '';
       var has = !!App.settings.githubToken;
-      var tkIn = el('input', {          // 刻意不用 type=password：Token 明文可见便于核对粘贴内容（例外：DeepSeek API Key 仍用 type=password）
+      var tkIn = el('input', {          // 故意用 text：粘贴后要能肉眼核对；DeepSeek 的 Key 才用 password
         class: 'input mono', type: 'text', autocomplete: 'off', spellcheck: 'false',
         placeholder: has ? '已保存（不回显原文；重新粘贴保存会整条覆盖）' : '粘贴 GitHub Token（可选）'
       });
@@ -590,10 +608,11 @@ var Settings = {
     box.appendChild(Settings.collapse('标签修改 / 删除（点击展开）', tagListBlock, false));
     return box;
   },
+  /** 用最新词典重算全部素材的标签显示，并把结果写回主库 */
   applyDictToAssets: function () {
     var changed = 0;
     var list = App.assets.map(function (a) {
-      // 原文标签 + 当前标签并集一起过词典：确保“看起来像中文、实际是日文”的词条加进个人词典后也会被强制替换
+      // 原文与当前标签取并集再过词典：否则「看着像中文、其实是日文」的词条改了词典也不会被替换
       var src = uniq((a.rawTags || []).concat(a.tags || []));
       var t = Smart.translateTags(src);
       if (t.join('|') !== (a.tags || []).join('|')) { a.tags = t; changed++; }
@@ -689,6 +708,7 @@ var Settings = {
       }).catch(function (e) { Toast.err('应用失败：' + (e.message || e)); });
     }
   },
+  /** 批量补全素材信息：只填从未自动获取、用户也没手改过的空字段 */
   completeAllAssetsInfo: function () {
     var logBox = el('div', { class: 'fetch-log', style: { display: 'block' } });
     function log(m) { logBox.appendChild(el('div', { class: 'log-line', text: m })); logBox.scrollTop = logBox.scrollHeight; }
@@ -746,7 +766,7 @@ var Settings = {
             a.autoFilled = a.autoFilled || {};
             function fill(key, val) {
               if (val == null || val === '' || (Array.isArray(val) && !val.length)) return;
-              if (a.autoFilled[key]) return;   // 已自动获取过：正常批量补全不再覆盖
+              if (a.autoFilled[key]) return;   // 自动获取过的字段不再覆盖，批量补全只填空
               if (key === 'title') { if (!a.title && val) { a.title = String(val).slice(0, 80); changed = true; a.autoFilled.title = true; } return; }
               if (!a[key] || (Array.isArray(a[key]) && !a[key].length)) { a[key] = val; changed = true; a.autoFilled[key] = true; }
             }
@@ -755,7 +775,7 @@ var Settings = {
             fill('shop', info.shop || info.author);
             fill('shopUrl', info.shopUrl);
             fill('description', info.description ? Smart.pickChinese(info.description) : '');
-            // 商品价只读：BOOTH 用变体计算价（批量不解析变体时不写入），其他来源才存抓取到的商店价
+            // BOOTH 的价要靠变体算出来，这一批不解析变体，写进去只会是错的价
             if (info.price && a.source !== 'booth') fill('shopPrice', info.price);
             var guess = Smart.guessCategory(info);
             if ((!a.category || a.category === 'other') && guess && guess !== 'other' && !a.autoFilled.category) { a.category = guess; a.autoFilled.category = true; changed = true; }
@@ -790,8 +810,7 @@ var Settings = {
     }
   },
 
-  /* ---------------- 分类与角色 ---------------- */
-    /* ---------------- 分类 / 来源 / 角色 ---------------- */
+  /* ---------------- 分类 / 来源 / 角色 ---------------- */
   tab_dict: function () {
     var box = el('div', { class: 'settings-pane' });
 
@@ -799,7 +818,7 @@ var Settings = {
       App.settings.avatarOrder = list.map(function (x) { return x.id; });
       return App.saveSettings();
     }
-    // 分类/来源：取消手动重排，顺序与左侧栏一致（来源按数量降序；分类按数量降序、「其他」最后）
+    // 顺序跟左侧栏一致，用户不用记两套排法：「其他」压在分类最后
     function sidebarOrdered(kind) {
       var st = App.stats();
       var list = (kind === 'cat' ? App.allCategories() : App.allSources()).slice();
@@ -814,7 +833,7 @@ var Settings = {
       });
     }
 
-    /* 分类 / 来源：左侧栏式 chips（仅图标 + 名称；自定义项带删除按钮；新增弹窗带图标设置） */
+    /* 分类 / 来源：左侧栏样式的 chips，自定义项可删、可加自定义图标 */
     function chipsEditor(title, kind) {
       var wrap = el('div', { class: 'dict-block' });
       wrap.appendChild(el('h3', { text: title }));
@@ -891,7 +910,7 @@ var Settings = {
       return wrap;
     }
 
-    /* 支持角色：搜索框 + 每条一行（序号 名称 {三语名} ↑↓ 编辑 删除） */
+    /* 支持角色：可搜索、可排序、可改中 / 日 / 英三套名字 */
     function listEditor() {
       var wrap = el('div', { class: 'dict-block' });
       var LANG_PRIORITIES = [['label', '显示名（默认）'], ['zh', '中文'], ['ja', '日文'], ['en', '英文']];
@@ -1309,8 +1328,8 @@ var Settings = {
     box.appendChild(Field.row('API Key', keyIn, '输入框只回显前 8 位与后 4 位；保存后本页不再显示完整 Key（本机加密存储）'));
     box.appendChild(el('div', { class: 'btn-row' }, [
       el('button', { class: 'btn btn-sm btn-primary', onclick: function () {
-        /* v4.3.2：输入框里显示的是「前 8 位…后 4 位」的掩码。用户不点输入框直接按保存，
-         * 存进去的就是这串掩码 —— 界面提示"已加密保存"，之后所有翻译 401，原 Key 还找不回来。 */
+        /* 框里显示的是「前 8 位…后 4 位」的掩码。不点输入框直接按保存，
+         * 存进去的就是这串掩码 —— 之后所有翻译 401，原 Key 也找不回来。 */
         if (keyIn.dataset.saved === '1') {
           Toast.info('API Key 未修改。要换新的，请先点一下输入框再粘贴（现在框里显示的是掩码）。', 6000);
           return;
@@ -1324,8 +1343,7 @@ var Settings = {
       } }, ICONS.label('\u{1F5D1} 清除 Key'))
     ]));
     box.appendChild(Field.row('模型', modelSel));
-    /* v2.5.15（借鉴 kiss-translator 的可配置 httpTimeout）：AI 请求超时做成设置项。
-     * 秒为单位（>600 视为历史毫秒写法，自动归一化）；限幅 10~600 秒。 */
+    /* 超时按秒存；读到大于 600 的值当作毫秒写法归一化，限幅 10~600 秒 */
     var tmoIn = el('input', {
       class: 'input', type: 'number', min: '10', max: '600', step: '10',
       value: String(Math.round((AI.httpTimeoutMs ? AI.httpTimeoutMs() : 120000) / 1000))
@@ -1345,8 +1363,6 @@ var Settings = {
       App.settings.aiAutoTags = autoTagsCb.checked; App.saveSettings();
     } });
     box.appendChild(el('label', { class: 'check check-row' }, [autoTagsCb, el('span', { text: '导入 / 解析素材时自动用 AI 翻译未命中的标签（会消耗 API 额度）' })]));
-
-    /* v6.1：原先这里还有一个「内置后端已就绪」的状态行，同进程后恒为真，已移除。 */
 
     box.appendChild(el('h3', { text: '模糊搜索词表（近义词 / 俗称 / 常见错拼）' }));
     box.appendChild(el('p', { class: 'field-hint', text: '把当前的标签词典、支持角色（三语名与别名）、分类名、来源名发给 DeepSeek，生成一张用于扩展搜索的词表；搜索框右侧的「模糊搜索」开关打开后生效。词表只存在本机设置里，搜索过程本身不联网。' }));
@@ -1449,33 +1465,30 @@ var Settings = {
       el('p', { text: '桌面版由程序直接读写磁盘：选择文件夹、创建分类目录、整项移动/复制都是原生操作，不需要额外授权。下面的「生成目录结构与批处理脚本」仍可给外部工具用。' })
     ]));
 
-    // v6.1：原先这里有一行「浏览器是否支持文件系统访问 API」的检测——桌面载体下必然为否，
-    // 会误导成「环境不满足」。同进程后端接管文件操作后，这项检查与「重新检测后端」按钮一并移除。
-
-    // v2.5.1（L4）：原来写「尚未选择素材库根目录」，而下面的输入框里显示着默认路径——看着自相矛盾
+    // 文案不能写「尚未选择」：下面输入框里就显示着生效的默认路径，看着自相矛盾
 var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '已选择目录：' + App.settings.libraryRootName : '未手动设置 · 当前使用默认路径（下方输入框里显示的就是它）' });
     box.appendChild(Field.row('素材库根目录', el('div', {}, [
       rootInfo,
       el('div', { class: 'btn-row' }, [
         el('button', { class: 'btn btn-sm btn-primary', onclick: function () {
-          /* v3.0.5：后端原生对话框 → 直接得到绝对路径（不再需要手动粘贴） */
+          /* 原生对话框直接给绝对路径，用户不必再手抄一遍 */
           FS.pickDirectoryPath('vrc-library-root').then(function (r) {
             if (!r) return;
             if (!r.path) { Toast.warn('未能获取该文件夹的完整路径，请在下方输入框手动填写'); return; }
             rootPathIn.value = r.path;
             App.settings.libraryRootPath = r.path;
             App.settings.libraryRootName = r.name;
-            // 与手动填写保持一致：路径一旦改变就清掉旧句柄，避免句柄/路径指向不同目录
+            // 路径一变就清掉旧的目录句柄，否则句柄和路径会指向两个不同的目录
             Store.kvSet('libraryRoot', null).catch(function () {});
             App.saveSettings();
             rootInfo.textContent = '已选择目录：' + r.name + '（' + r.path + '）';
             Toast.ok('已填入素材库完整路径：' + r.path);
-            /* v6.8：选定根目录后立即扫描——里面已有整理好的素材就直接登记进主库 */
+            /* 选定根目录就扫一遍：里面已经整理好的素材可以直接登记进主库 */
             Settings.scanLibraryRoot();
           });
         } }, ICONS.label('\u{1F4C2} 选择文件夹（自动填路径）')),
         el('button', { class: 'btn btn-sm', onclick: function () {
-          /* v6.8：桌面版直接扫配置的根目录（原生 /api/scan），不再依赖浏览器目录句柄 */
+          /* 直接扫配置里的根目录，不依赖浏览器目录句柄 */
           Settings.scanLibraryRoot();
         } }, ICONS.label('\u{1F50D} 扫描目录')),
         el('button', { class: 'btn btn-sm', onclick: function () {
@@ -1487,11 +1500,11 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
     ])));
 
     var rootPathIn = el('input', {
-      class: 'input mono', value: App.libraryRoot(),   // v2.3.15：没手动设置过就显示生效的默认路径，而不是空白
-      placeholder: '例如 D:\\素材库\\本地素材库',   // v3.0.4：中性示例，不暴露作者机器的路径
+      class: 'input mono', value: App.libraryRoot(),   // 没手动设过也要显示生效的默认路径，不能留空
+      placeholder: '例如 D:\\素材库\\本地素材库',   // 示例用中性路径，不暴露任何人的真实目录
       onchange: function () {
         App.settings.libraryRootPath = rootPathIn.value.trim();
-        // 路径字符串一旦手动修改，就清掉旧库根句柄，避免句柄/路径不一致生成假路径
+        // 手改路径后必须清掉库根句柄，否则句柄和路径不一致会生成假路径
         Store.kvSet('libraryRoot', null).catch(function () {});
         App.saveSettings();
       }
@@ -1500,8 +1513,8 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
       '点上面的「选择文件夹」会直接填入完整路径（v3.0.5），也可手动填写。填写后，导入 / 整理生成的路径都会是可以直接粘贴进资源管理器的完整路径。'
       + (App.settings.libraryRootPath ? '' : '当前显示的是「未设置时的默认值」，改动后即以你填写的为准。')));
 
-    /* v6.2：数据存放位置 —— 与「素材文件放哪」是两件事：
-     * 这里放的是主库 / 封面 / 缩略图 / 下载队列；素材文件本体在上一节的库根目录。 */
+    /* 数据目录和素材库根目录是两件事：这里放主库 / 封面 / 缩略图 / 下载队列，
+     * 素材文件本体在上一节的库根目录里。 */
     box.appendChild(el('h3', { text: '数据存放位置（主库 / 封面 / 缩略图）' }));
     var dataPath = el('div', { class: 'field-hint mono', text: Settings.dataRoot() || '(未知)' });
     box.appendChild(Field.row('当前数据目录', el('div', {}, [
@@ -1538,10 +1551,11 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
       el('button', { class: 'btn btn-sm', onclick: function () { Tools.structurePlan(); } }, ICONS.label('\u{1F5C2} 生成建议目录结构')),
       el('button', { class: 'btn btn-sm', onclick: function () { FS.downloadCSV(App.filtered()); } }, ICONS.label('\u2B07 导出当前列表为 CSV')),
       el('button', { class: 'btn btn-sm', onclick: function () { Tools.pathAudit(); } }, ICONS.label('\u{1F50E} 素材库体检')),
+      el('button', { class: 'btn btn-sm', onclick: function () { Tools.categoryCleanup(); } }, ICONS.label('\u{1F5C2} 按分类整理素材目录')),
       el('button', { class: 'btn btn-sm', onclick: function () { Tools.bulkOrderUpdate(); } }, ICONS.label('\u{1F504} 批量获取更新'))
     ]));
 
-    // v2.3.3：扫描补路径（只补不删，不动已有路径）
+    // 只补不删，不动已有路径
     var scanLog = el('div', { class: 'fetch-log', style: { display: 'none' } });
     function scanLogLine(m) { scanLog.style.display = ''; scanLog.appendChild(el('div', { class: 'log-line', text: m })); scanLog.scrollTop = scanLog.scrollHeight; }
     var scanBtn = el('button', { class: 'btn btn-sm' }, ICONS.label('\u{1F50E} 扫描素材库补全缺失路径'));
@@ -1560,8 +1574,6 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
 
     return box;
   },
-
-  /* ---------------- 数据管理 ---------------- */
 
   /* ---------------- 数据管理 ---------------- */
   tab_data: function () {
@@ -1620,18 +1632,23 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
 
     box.appendChild(el('h3', { text: '危险操作' }));
     box.appendChild(el('button', { class: 'btn btn-sm btn-danger', onclick: function () {
-      Modal.confirm('将清空素材库中的全部数据（素材、封面）。设置与词典会保留。建议先导出备份！', { okText: '我确认清空' })
+      Modal.confirm('将清空素材库中的全部数据（素材、封面）。设置与词典会保留。建议先导出备份！\n\n清掉的记录会进回收站，48 小时内可以找回。', { okText: '我确认清空' })
         .then(function (ok) {
           if (!ok) return;
-          // v2.3.18：清空后必须把空的 assets.json 写回 vrclib-data，否则重启会以文件为准把素材「复活」
-          Store.clearAll()
-            .then(function () { return Store.local.saveAssets([], App.settings); })
-            .then(function () {
-              // v2.5.3：整表换新对象前先逐个回收 blob URL（否则清库后内存停在峰值不降）
-              try { Object.keys(App.coverCache || {}).forEach(function (k) { App.dropCover(k); }); } catch (e) {}
-              App.assets = []; App.coverCache = Object.create(null);
-              UI.renderAll(); Toast.ok('素材库已清空（含 vrclib-data\assets.json）');
-            });
+          var all = App.assets.slice();
+          /* 只打标记，不删记录：整批写一次库，比逐条删快，也留下可撤回的现场 */
+          Store.trashMarkMany(all).then(function (marked) {
+            App.assets = [];
+            App.trashed = marked.concat(App.trashed);
+            // 换新对象前先逐个回收 blob URL，否则清库后内存停在峰值不降
+            try { Object.keys(App.coverCache || {}).forEach(function (k) { App.dropCover(k); }); } catch (e) {}
+            App.coverCache = Object.create(null);
+            App.persistNow();
+            UI.renderAll();
+            App.deletedToast(all);
+          }).catch(function (e) {
+            Toast.err('清空失败：' + ((e && e.message) || e), 7000);
+          });
         });
     } }, ICONS.label('\u{1F5D1} 清空素材库')));
     return box;
@@ -1666,8 +1683,8 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
     box.appendChild(el('h3', { text: APP.name + ' v' + APP.version }));
     box.appendChild(el('p', { class: 'field-hint', text: '离线桌面工具：数据本体存在与程序同目录的 vrclib-data\\ 文件夹（library.db 为主库，浏览器 IndexedDB 只是缓存副本），不依赖任何服务器，也不会上传你的任何数据。' }));
 
-    /* ---------------- v4.3.2：程序更新（手动检查） ----------------
-     * v6.7：更新源固定绑定项目仓库，不再让用户填 owner/repo（填错只会白查 404）。 */
+    /* ---------------- 程序更新（只在点按钮时联网一次） ----------------
+     * 更新源固定在仓库里：让用户自己填 owner/repo 只会白查 404。 */
     var updStatus = el('div', { class: 'field-hint', text: '' });
     function refreshUpdStatus() {
       updStatus.textContent = '当前版本 v' + Updater.currentVersion()
@@ -1688,8 +1705,9 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
     box.appendChild(el('h3', { text: '程序更新' }));
     box.appendChild(el('div', { class: 'notice' }, [
       el('p', { text: '「检查更新」只在点按钮时联网一次（读 GitHub Releases 的最新版本号），平时不发任何请求。'
-        + '程序不会自动替换自己：发现有新版会打开下载页，你把压缩包解压覆盖到当前目录即可，'
-        + 'vrclib-data 与素材库不受影响。' })
+        + '发现有新版可以直接点「立即更新并重启」：程序自己下载、覆盖安装目录、再启动，不用手动解压。'
+        + '只覆盖程序文件，vrclib-data、本地素材库与 runtime 里的数据都不动；'
+        + '若程序装在不可写的目录（如 Program Files），会提示你换到桌面或 D 盘。' })
     ]));
     box.appendChild(updStatus);
     box.appendChild(el('div', { class: 'btn-row' }, [upBtnCheck, upBtnRepo]));
@@ -1720,12 +1738,13 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
       el('li', { text: '明确排除：Unity 编辑器插件（依赖 Editor 环境）与浏览器扩展（依赖扩展权限），与纯网页技术栈不匹配，未作为实现参考。' })
     ]));
 
-    box.appendChild(el('h3', { text: '运行形态：单进程桌面程序（Tauri 2）' }));
-    box.appendChild(el('p', { class: 'field-hint', text: '程序以原生窗口运行，文件与网络操作由同进程里的 Rust 后端直接完成——不监听任何端口，也没有需要单独启动的外部程序。' }));
+    box.appendChild(el('h3', { text: '运行形态：Electron 主进程 + 渲染层' }));
+    box.appendChild(el('p', { class: 'field-hint', text: '程序以原生窗口运行。文件与网络操作由主进程完成，页面通过预加载脚本提供的接口调用，没有需要单独启动的外部程序。' }));
     box.appendChild(el('ul', { class: 'help-list' }, [
-      el('li', { text: '后端提供的能力：读写任意路径、按路径建目录、移动/复制、读取目录、打开资源管理器、发起 HTTP 请求、下载与断点续传、AI 流式转发、SQLite 主库、缩略图生成。' }),
+      el('li', { text: '主进程提供的能力：读写任意路径、按路径建目录、移动/复制、读取目录、打开资源管理器、发起 HTTP 请求、下载与断点续传、SQLite 主库、缩略图生成。' }),
+      el('li', { text: '改模工作台的磁盘重活由随程序附带的边车进程处理，走标准输入输出通信；边车只在打开工作台时拉起，用完即退。' }),
       el('li', { text: '素材主库为 vrclib-data\\library.db（SQLite），只写改动的行；二进制（封面 / 图集）以原始字节读写，不经过 base64。' }),
-      el('li', { text: 'v6.0 迁移到 Tauri 2：安装体积从数百 MB 降到约 7.4 MB，常驻内存约 33 MB；v6.1 起 Electron 载体与旧的本地 HTTP 后端（端口 / 令牌 / 断线重连）已整体移除。' })
+      el('li', { text: '「传给好友」会在本机临时监听 TCP 8787（信令）与 UDP 8786-8790（局域网发现），传输结束或关掉窗口即关闭；其余时间不监听任何端口。' })
     ]));
 
     box.appendChild(el('h3', { text: '数据安全' }));
@@ -1738,11 +1757,9 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
     return box;
   },
 
-  /* ================= 扫描库根并登记已有素材（v6.8） =================
-   * 桌面版原生实现：直接扫「设置里的根目录」(/api/scan)，识别 分类\素材 两层结构，
-   * 每个素材文件夹登记为一条主库记录（只登记路径，绝不移动/复制/删除文件）。
-   * 取代旧的浏览器目录句柄扫描（桌面载体下 getLibraryRoot() 恒为 null，必然报
-   * 「尚未选择根目录」）。 */
+  /* ================= 扫描库根并登记已有素材 =================
+   * 识别「分类 / 素材」两层结构，每个素材文件夹登记一条主库记录。
+   * 只登记路径，绝不移动、复制或删除文件。 */
   scanLibraryRoot: function () {
     var root = App.libraryRoot();
     if (!root) { Toast.warn('尚未选择根目录'); return Promise.resolve(); }
@@ -1916,8 +1933,8 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
     }).catch(function (e) { Toast.err('扫描失败：' + ((e && e.message) || e)); });
   },
 
-  /* ================= 数据目录（v6.2） =================
-   * 设计：settings.json 固定留在程序目录（它存着「数据放哪」这个指针），
+  /* ================= 数据目录 =================
+   * settings.json 固定留在程序目录（它存着「数据放哪」这个指针），
    * 只有主库 / 封面 / 缩略图 / 下载队列跟着用户选的位置走。 */
   dataRoot: function () { return Store.local.dataDir(App.settings) || ''; },
 
@@ -1927,8 +1944,8 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
   },
 
   /** 首次运行问一次：数据放程序目录，还是另选一个盘。
-   *  只认「问过没有」这个标记——不能拿「库里有没有数据」判断，因为 Rust 启动时就会
-   *  建好一个空的 library.db，按数据判断会把全新安装误判成老用户。 */
+   *  只认「问过没有」这个标记——启动时就会先建出空的 library.db，
+   *  按「库里有没有数据」判断会把全新安装误判成用了很久的人。 */
   askDataDirIfNeeded: function () {
     var s = App.settings || {};
     if (s.localDataDir || s.dataDirAsked) return;
@@ -1955,8 +1972,13 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
     });
   },
 
-  /** 更改数据位置：扫描 → 确认 → 迁移 → 切库 → 清旧 → 刷新 */
+  /* 搬迁进行中：挡住第二次「更改位置并搬迁」 */
+  _migrating: false,
+
+  /** 更改数据位置：确认 → 整体搬迁 → 切库 → 清理原目录 → 刷新 */
   changeDataDir: function (targetPath) {
+    if (Settings._migrating) { Toast.info('正在迁移数据，请等这次迁移结束'); return Promise.resolve(false); }
+    Settings._migrating = true;
     var pick = targetPath
       ? Promise.resolve({ path: targetPath })
       : FS.pickDirectoryPath('vrclib-data');
@@ -1980,29 +2002,31 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
         return Settings._migrateRun(from, to);
       });
     }).catch(function (e) {
-      Toast.err('迁移失败：' + ((e && e.message) || e), 8000);
+      Toast.err('迁移失败：' + ((e && e.message) || e) + (e && e.cleaned ? '（已清理半成品，可重试）' : ''), 8000);
       return false;
-    });
+    }).then(function (v) { Settings._migrating = false; return v; });
   },
 
-  /** 真正执行迁移（带进度窗）。失败时把数据库按当前设置重新打开，避免停在「库已关闭」状态 */
+  /** 执行搬迁（带进度窗）。失败时按当前设置重新打开数据库，别停在「库已关闭」的状态 */
   _migrateRun: function (from, to) {
     var txt = el('div', { class: 'field-hint', text: '准备中 …' });
-    var h = Modal.open({ title: '正在迁移数据', size: 'sm', body: [txt], closeOnBackdrop: false });
+    /* 不能取消也不能关窗：否则数据搬了一半、库还关着，没有人知道 */
+    var h = Modal.open({ title: '正在迁移数据', size: 'sm', body: [txt], closeOnBackdrop: false, closable: false });
+    var copyStarted = false, copyDone = false;   // 失败时据此判断目标目录里是不是半成品
     function say(t) { txt.textContent = t; }
     return FS.host.dataMigrate(from, to, function (ev) {
       if (!ev) return;
-      if (ev.phase === 'start') say('共 ' + ev.total + ' 个文件，开始复制 …');
+      if (ev.phase === 'start') { copyStarted = true; say('共 ' + ev.total + ' 个文件，开始复制 …'); }
       else if (ev.phase === 'copy') say('正在复制 ' + ev.done + ' / ' + ev.total + (ev.name ? '：' + ev.name : ''));
       else if (ev.phase === 'verify') say('复制完成，正在校验 …');
       else if (ev.phase === 'done') say('完成');
     }).then(function (r) {
       if (!r || r.ok === false) throw new Error((r && r.error) || '迁移失败');
+      copyDone = true;
       App.settings.localDataDir = to;
       App.settings.dataDirAsked = true;
-      /* 这里必须**立刻落盘**再切库：App.saveSettings 走的是 1.2 秒防抖，
-       * 而 data_apply_root 是去读 settings.json 决定新根在哪的——写晚了就会读到旧值，
-       * 结果数据搬了、库还开在旧目录（实测踩过）。 */
+      /* 必须立刻落盘再切库：saveSettings 有 1.2 秒防抖，而切库要去读 settings.json
+       * 决定新根在哪，写晚了就会读到旧值——数据搬了、库还开在原处。 */
       return Promise.resolve(Store.local.saveSettings(App.settings))
         .then(function () { return FS.host.dataApplyRoot(); })
         .then(function (ap) {
@@ -2018,7 +2042,14 @@ var rootInfo = el('div', { class: 'kv-v', text: App.settings.libraryRootName ? '
         });
     }).catch(function (e) {
       Modal.close(h);
-      return FS.host.dataApplyRoot().catch(function () {}).then(function () { throw e; });
+      /* 复制已经开始却没走完：目标目录里是半份库，不回收的话下次会被 hasData 挡在门外 */
+      var half = copyStarted && !copyDone;
+      return FS.host.dataApplyRoot().catch(function () {})
+        .then(function () { if (half) return FS.host.dataCleanup(to).catch(function () {}); })
+        .then(function () {
+          if (half && e && typeof e === 'object') e.cleaned = true;
+          throw e;
+        });
     });
   }
 };

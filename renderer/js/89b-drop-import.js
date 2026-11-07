@@ -1,18 +1,11 @@
-/* ============ 89b-drop-import.js ============ */
-/* =====================================================================
+/*
  * 89b-drop-import.js  —  拖进窗口就导入（zip / unitypackage / 任意素材文件 / 文件夹）
  *
- * 为什么单独一个模块：
- *   89-pack.js 的拖拽入口原来只认 .vrcpack / .zip 素材包，丢一个 unitypackage
- *   或普通 zip 进去只会得到「这不是素材包（缺少 vrcpack.json）」。
- *   这里补上「通用文件导入」：预览 → 改标题 / 选分类 → 复制或移动进素材库。
- *
- * 边界（和「从文件夹导入」保持同一套语义，不越界）：
- *   · 只搬拖进来的那一层：单个文件原样复制/移动；整个文件夹整块搬，不展开、不改内部结构。
- *   · 不自动解压：压缩包原样进库 —— 解一半、留一半才是素材库最难收拾的状态。
- *   · 默认复制，不动你的源文件；只有切到「移动」才真的搬走。
- *   · 目标目录固定为「素材库根 / 分类 / 标题」，与设置里的库根保持一致。
- * ===================================================================== */
+ * 负责：把拖入项整理成素材候选、预览里改标题与分类、复制或移动进素材库。
+ * 与谁交互：拖放事件与选文件来自 89-pack.js / 95-shell-bridge.js；
+ *           目录扫描与落盘走 FS.host，记录写入走 Store / App.save。
+ * 边界：只搬拖进来的那一层；压缩包原样入库不自动解压；默认复制，不动源文件。
+ */
 
 var DropImport = (function () {
 
@@ -39,7 +32,7 @@ var DropImport = (function () {
   }
   function isImage(name) { return IMAGE_EXT.indexOf(extOf(name)) >= 0; }
 
-  /** 从文件名推断版本号：衣装_v1.2.zip / outfit ver2 / 【v3】… */
+  /** 从文件名推断版本号：_v…、ver…、【v…】这几种写法都认 */
   function guessVersion(name) {
     var s = String(name || '');
     var m = s.match(/(?:^|[\s_\-\[【(])[vV](\d+(?:[._-]\d+){0,3})(?![\d])/) ||
@@ -97,10 +90,7 @@ var DropImport = (function () {
 
   /**
    * items: [{ path, name, size, isDir, file }]
-   * 规则：
-   *   · 非图片文件 → 各成一个候选；主名（去掉版本号）相同的归到同一个候选，作为多个版本。
-   *   · 图片 → 只作封面：只有一个候选时直接给它；多个候选时按文件名前缀认领。
-   *   · 文件夹 → 整块作为一个候选（版本号同样参与归组）。
+   * 非图片文件各成候选（主名相同则归为多个版本），图片只作封面，文件夹整块算一个候选。
    */
   function groupItems(items) {
     var groups = [];
@@ -175,7 +165,6 @@ var DropImport = (function () {
   /**
    * 打开导入预览。
    * items: [{ path, name, size, isDir, file }]
-   * opts.skipExistCheck: 跳过「目标已存在」预检（默认也只在真正导入时逐个查）
    */
   function open(items, opts) {
     opts = opts || {};
@@ -193,8 +182,8 @@ var DropImport = (function () {
     }
 
     var root = App.libraryRoot();
-    /* 库根必须是绝对路径：空值 / 相对名（历史配置或未配置）会让文件**相对后端进程的工作目录**
-     * 落盘 —— 实测会写进程序自己的目录里，事后很难找。这里直接拦住并提示去设置里选。 */
+    /* 库根必须是绝对路径：空值或相对名会让文件相对后端进程的工作目录落盘，
+     * 结果写进程序自己的目录里，事后很难找。这里直接拦住并提示去设置里选。 */
     function isAbsPath(p) {
       return /^[a-zA-Z]:[\\/]/.test(String(p || '')) || /^\\\\[^\\]/.test(String(p || ''));
     }
@@ -409,8 +398,8 @@ var DropImport = (function () {
     }
 
     /* ---- 真正导入 ---- */
-    /* FS.host.exists 返回的是 'file' / 'dir' / 'missing'（字符串），
-     * 直接当布尔用会把 'missing' 也算成「已存在」—— 以前在这上面踩过一次。 */
+    /* FS.host.exists 返回 'file' / 'dir' / 'missing' 字符串，
+     * 直接当布尔用会把 'missing' 也算成「已存在」。 */
     function kindTaken(kind) { return kind === 'file' || kind === 'dir'; }
 
     function uniqueTarget(dst, name) {
@@ -432,9 +421,7 @@ var DropImport = (function () {
       }).catch(function () { return name; });
     }
 
-    /** 把一个文件夹的【顶层子项】搬进 dst。
-     *  不展开内部结构（textures/ 这类子目录整块过去），也不多套一层同名目录 ——
-     *  和「从文件夹导入」的 importTopLevelEntries 同一语义。 */
+    /** 把一个文件夹的顶层子项搬进 dst：不展开内部结构，也不多套一层同名目录 */
     function importDirChildren(f, dst, moved, failed) {
       return FS.host.scan(f.path, 1).then(function (entries) {
         var tops = (entries || []).filter(function (e) {
@@ -485,8 +472,8 @@ var DropImport = (function () {
       }).catch(function () { return null; });
     }
 
-    /* 目标目录撞名时自动换成 _2、_3…并提示一句 ——
-       原来的 mkdir 会直接复用已有目录，同名文件被静默覆盖，两条素材还指向同一个 path。 */
+    /* 目标目录撞名时自动换成 _2、_3…并提示一句：直接 mkdir 会复用已有目录，
+       同名文件被静默覆盖，两条素材还指向同一个 path。 */
     function importOne(g) {
       var wanted = safeName(g.title || '未命名', '未命名');
       return App.pickFreeFolderName(wanted, App.categoryLabel(g.category)).then(function (pick) {

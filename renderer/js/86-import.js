@@ -1,10 +1,9 @@
-/* ============ 86-import.js ============ */
-/* =====================================================================
- * 86-import.js  —  导入中心
- *   ① 文件夹导入：扫描本地已下载素材（多版本 / 封面 / .url 链接），可复制进素材库
- *   ② 用户脚本导入：接收 vrc-library-bridge 用户脚本导出的 JSON（含已购列表与下载直链）
- *   ③ 已购库同步：程序后端在线 + 保存了 Cookie 时，直接同步 BOOTH 购买记录
- * ===================================================================== */
+/*
+ * 86-import.js —— 导入中心：把外部素材变成库里的记录与文件位置
+ *   ① 文件夹导入：扫本地已下载素材，归并版本、挑封面、识别 .url 里的商店链接
+ *   ② 用户脚本 JSON / 订单页 / 已购库 / 心愿单：把页面数据转成素材记录
+ *   与 App / Store / FS.host / Net / Fetchers 协作；联网与下载交给 Net，编辑界面在 70-forms。
+ */
 
 var Importer = (function () {
 
@@ -18,11 +17,8 @@ var Importer = (function () {
   }
   function baseName(name) { return String(name).replace(/\.[^.]+$/, ''); }
   /**
-   * 顶层项原生移动（绝不递归、绝不复制、绝不删源）：
-   * - 先补源句柄读写权限，再原生 move；
-   * - 目标已有同名项时**直接失败**，由调用方按「跳过」处理并提示。
-   *   v4.3.2：原实现在同名冲突时会先 removeEntry 删掉目标里的文件再重试，
-   *   等于静默删除用户库里已有的那一份 —— 没有任何确认，也不可撤销。
+   * 顶层项原生移动：不递归、不复制、不删源；目标有同名项就直接失败，交给调用方按「跳过」处理。
+   * 冲突时若先删目标再重试，等于静默删掉用户库里已有的那一份，且不可撤销。
    */
   async function tryMoveEntry(entry, dir) {
     if (!App.settings.importMoveInsteadOfCopy || !entry || typeof entry.move !== 'function') return false;
@@ -63,10 +59,8 @@ var Importer = (function () {
   }
 
   /**
-   * 统一导入入口：把 sourceDir 的【顶层子项】整体搬到 dst，绝不向下递归。
-   * 纯浏览器行为，不弹任何路径输入框、不做任何绝对路径猜测：
-   * - 移动模式：每个顶层项（文件或文件夹）整项 tryMoveEntry；失败即跳过并提示（不复制）。
-   * - 复制模式：顶层文件直接复制；顶层文件夹复制时才进入该文件夹内部（目录复制无法避免）。
+   * 统一入口：把 sourceDir 的顶层子项搬到 dst，不再往下递归。
+   * 移动模式下某项失败即跳过并提示，绝不偷偷改成复制。
    */
   async function importTopLevelEntries(sourceDir, dst, onLog) {
     onLog = onLog || function () {};
@@ -75,8 +69,7 @@ var Importer = (function () {
     var counter = { copied: 0, moved: 0, failed: 0 };
     var moveMode = !!App.settings.importMoveInsteadOfCopy;
     if (moveMode) {
-      // 拖拽得到的目录通常只有读权限：给源目录补一次读写权限，
-      // 其顶层子项的 move 才可能成功（选择器目录本就已授权，这里直接 granted）。
+      // 拖拽来的目录通常只有读权限：先给源目录补一次读写权限，子项的 move 才可能成功
       if (typeof sourceDir.queryPermission === 'function' && typeof sourceDir.requestPermission === 'function') {
         try {
           var rootPerm = await sourceDir.queryPermission({ mode: 'readwrite' });
@@ -107,7 +100,7 @@ var Importer = (function () {
     return counter;
   }
 
-  /** 从文件名推断版本号，例如 「衣装_v1.2.zip」「outfit ver2」「【v3】…」 */
+  /** 从文件名里推断版本号，例如「<名称>_v<数字>.zip」「<名称> ver<数字>」 */
   function guessVersion(name) {
     var s = String(name);
     var m = s.match(/(?:^|[\s_\-\[【(])[vV](\d+(?:[._-]\d+){0,3})(?![\d])/) ||
@@ -122,9 +115,7 @@ var Importer = (function () {
     return m ? m[1].trim() : '';
   }
 
-  /* ------------------------------------------------------------------
-   * 扫描一个目录，产出「候选素材」列表
-   * ------------------------------------------------------------------ */
+  /** 扫描一个目录，产出候选素材列表：每个子文件夹一个候选，散落压缩包按主名聚合 */
   function scanForImport(rootHandle, onProgress) {
     onProgress = onProgress || function () {};
     var candidates = [];
@@ -151,7 +142,7 @@ var Importer = (function () {
       })();
     }
 
-    // 顶层：每个子文件夹 = 一个候选素材；散落的压缩包各自成为一个候选
+    // 顶层每个子文件夹算一个候选；散落的压缩包先攒起来，等扫完再按主名聚合
     var topIt = rootHandle.values();
     var chain = Promise.resolve();
     function walkTop() {
@@ -233,7 +224,7 @@ var Importer = (function () {
       files: files, archives: archives, images: images, linkFiles: links,
       versions: versions, totalSize: total,
       coverFile: images[0] || null,
-      storeURL: '',            // 解析 .url 文件后填充
+      storeURL: '',
       category: '', avatars: []
     };
   }
@@ -257,10 +248,7 @@ var Importer = (function () {
     return chain.then(function () { return cands; });
   }
 
-  /* ------------------------------------------------------------------
-   * 把候选素材搬进素材库： <库根>/<分类>/<素材名>/…
-   * 按「默认移动/复制」开关执行；移动模式下失败即跳过（不复制）。
-   * ------------------------------------------------------------------ */
+  /** 把候选素材搬进 <库根>/<分类>/<素材名>/；移动模式下失败即跳过，不改走复制 */
   function copyIntoLibrary(cand, categoryLabel, onProgress, moveOpts) {
     moveOpts = moveOpts || {};
     return FS.getLibraryRoot().then(function (root) {
@@ -269,8 +257,8 @@ var Importer = (function () {
         if (!ok) return null;
         var safe = String(cand.name).replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || '未命名';
         return root.getDirectoryHandle(categoryLabel, { create: true }).then(function (catDir) {
-          /* 同名目录不能直接复用：create:true 会拿回已有的那个目录，
-             同名文件被静默覆盖，两条素材还会指向同一个 path。撞名就换 _2、_3。 */
+          /* 同名目录不能直接复用：create:true 会拿回已有的那个目录，同名文件被静默
+             覆盖，两条素材还会指向同一个 path。撞名就换 _2、_3。 */
           return App.pickFreeFolderName(safe, categoryLabel, {
             exists: function (n) {
               return catDir.getDirectoryHandle(n).then(function () { return true; }, function (err) {
@@ -283,8 +271,7 @@ var Importer = (function () {
             return catDir.getDirectoryHandle(pick.name, { create: true }).then(async function (dstDir) {
               var rootPath = App.libraryRoot();
               var dstAbs = joinWinPath(rootPath, [categoryLabel, pick.name]);
-              // 单个文件夹：只枚举其顶层子项并整体搬运；多个文件/文件夹：同样只处理顶层项。
-              // 统一走 importTopLevelEntries，不再把子目录递归拍平成逐文件移动。
+              // 文件夹只搬顶层子项，不把子目录拍平成逐文件移动
               var counter;
               if (cand.dirHandle && cand.dirHandle.values) {
                 counter = await importTopLevelEntries(cand.dirHandle, dstDir, onProgress, { dstAbs: dstAbs, srcRootAbs: moveOpts.srcRootAbs || '' });
@@ -316,8 +303,8 @@ var Importer = (function () {
   }
 
   /**
-   * v4.3.2：登记「存储路径」时**只替换同名的这一条**，其它路径（原始位置）原样保留。
-   * 原来的写法是 `asset.paths = [{…}]`，一次建档就把用户登记的网盘位置和原始位置全清掉了。
+   * 登记「存储路径」时只替换同名那一条，其它条目（原始位置、网盘位置）原样保留 ——
+   * 整条覆盖会把用户登记过的其它位置一起清掉。
    */
   function setPathEntry(asset, path, note) {
     note = note || '存储路径';
@@ -333,8 +320,8 @@ var Importer = (function () {
   }
 
   /**
-   * 为导入的素材在素材库中创建「分类/素材名」文件夹（用于存放之后下载的文件），
-   * 并把该路径登记为素材的下载存放位置。
+   * 为素材在素材库里建「分类/素材名」文件夹（之后下载的文件放这里），
+   * 并把这个位置登记为它的下载存放路径。
    */
   function ensureDownloadFolder(asset, onLog) {
     onLog = onLog || function () {};
@@ -377,8 +364,8 @@ var Importer = (function () {
   }
 
   /**
-   * 静默创建「分类/素材名」存储路径（不打开资源管理器、不弹路径框），
-   * 成功写回 asset.paths 并保存；已有路径直接复用。用于“无路径时点击下载/保存封面→先建路径再下载”。
+   * 静默建出「分类/素材名」存储路径（不弹路径框、不开资源管理器），成功写回并保存；
+   * 已有路径直接复用。用于「没有路径时先建目录再下载」。
    */
   function ensureStoragePathQuiet(asset) {
     if (!asset) return Promise.resolve(null);
@@ -391,7 +378,7 @@ var Importer = (function () {
     function setPath() {
       setPathEntry(asset, folderPath, '存储路径');
       return App.save(asset).then(function (saved) {
-        /* v4.3.2：setPathEntry 会保留其它路径条目，存储路径不一定还在第 0 位 */
+        /* setPathEntry 会保留其它条目，存储路径不一定还在第 0 位 */
         var hit = ((saved && saved.paths) || []).filter(function (p) { return p && p.note === '存储路径'; })[0];
         return (hit && hit.path) || folderPath;
       }).catch(function () { return folderPath; });
@@ -425,9 +412,8 @@ var Importer = (function () {
     }
     var state = { cands: [], root: null, rootName: '' };
     var importing = false;
-    /* v4.3.2：关窗 = 取消。以前 onClose 只回收缩略图，导入链照跑不误 ——
-     * 用户以为取消了，后台还在逐项复制；「移动模式」下源目录的文件会被继续搬走，
-     * 而且界面已关，没有任何进度或结果提示（不可撤销）。 */
+    /* 关窗 = 取消。否则用户以为停了，后台还在逐项搬运（移动模式下源文件照搬不误），
+     * 而界面已经关掉，既没有进度也没有结果可看，且不可撤销。 */
     var aborted = false;
     var importBtn = null;
 
@@ -437,7 +423,7 @@ var Importer = (function () {
     var listBox = el('div', { class: 'import-list' });
     var summary = el('div', { class: 'field-hint', text: '尚未选择文件夹' });
 
-    var basePathInput = el('input', { class: 'input mono', placeholder: '（可选）该文件夹在磁盘上的完整路径，例如 D:\\素材库\\下载' });   // v3.0.4：中性示例
+    var basePathInput = el('input', { class: 'input mono', placeholder: '（可选）该文件夹在磁盘上的完整路径，例如 D:\\素材库\\下载' });
     var catSelect = el('select', { class: 'input' },
       [el('option', { value: '' }, '（自动推断）')].concat(App.allCategories().map(function (c) {
         return el('option', { value: c.id }, c.label);
@@ -446,8 +432,8 @@ var Importer = (function () {
     var copyCheck = el('input', { type: 'checkbox', checked: !!App.settings.importCopyFiles });
     var coverCheck = el('input', { type: 'checkbox', checked: true });
 
-    /* v2.5.3：候选封面预览的 blob URL 必须回收——原实现每扫描/重绘一次就新建 N 个 objectURL 且从不 revoke
-     * （单张是磁盘原图，几十个候选一次可残留数十 MB）。重绘与关弹窗时统一释放，并用世代号挡住迟到的异步回调。 */
+    /* 候选封面预览的 blob URL 必须回收：每重绘一次就新建 N 个，几十个候选能残留
+     * 数十 MB；用世代号挡住迟到的异步回调。 */
     var thumbURLs = [];
     var listGen = 0;
     function releaseThumbs() {
@@ -466,7 +452,7 @@ var Importer = (function () {
         var thumb = el('div', { class: 'import-thumb' }, [App.categoryIcon(c.category || 'other', { size: 22 })]);
         if (c.coverFile) {
           c.coverFile.handle.getFile().then(function (f) {
-            if (myGen !== listGen) return;   // v2.5.3：已重绘/已关窗 → 不要再建 blob URL
+            if (myGen !== listGen) return;   // 已重绘 / 已关窗：迟到的回调不要再建 blob URL
             var u = URL.createObjectURL(f);
             thumbURLs.push(u);
             thumb.innerHTML = ''; thumb.appendChild(el('img', { src: u, alt: '' }));
@@ -502,10 +488,13 @@ var Importer = (function () {
         FS.pickDirectory('vrc-import-src').then(function (r) {
           if (!r) return;
           state.root = r.handle; state.rootName = r.name;
+          state.cands = [];          // 换目录先丢掉旧候选：扫描失败也不许再导入上一个目录
+          if (importBtn) importBtn.disabled = true;
           if (!basePathInput.value.trim()) basePathInput.placeholder = '（可选）该文件夹的完整路径，末级目录名应为：' + r.name;
           log('开始扫描「' + r.name + '」…');
           listBox.innerHTML = '';
           listBox.appendChild(el('div', { class: 'multi-empty', text: '正在扫描 …' }));
+          updateSummary();
           return scanForImport(r.handle, log).then(function (cands) {
             log('扫描完成，发现 ' + cands.length + ' 个候选素材，正在读取链接文件 …');
             return resolveLinks(cands, log);
@@ -516,6 +505,7 @@ var Importer = (function () {
             });
             state.cands = cands;
             renderList();
+            if (importBtn && !importing) importBtn.disabled = false;   // 扫描成功才放开导入
             log('\u2714 就绪，可勾选后导入');
           });
         }).catch(function (e) { log('\u2716 扫描失败：' + (e.message || e)); });
@@ -558,7 +548,6 @@ var Importer = (function () {
 
           var step = Promise.resolve();
 
-          // 封面
           if (coverCheck.checked && c.coverFile) {
             step = step.then(function () {
               return c.coverFile.handle.getFile().then(function (f) {
@@ -570,14 +559,13 @@ var Importer = (function () {
             });
           }
 
-          // 导入到素材库（按「默认移动/复制」开关执行）
           step = step.then(function () {
             if (!doCopy) return null;
             log('\u{1F4E6} 导入「' + c.name + '」到素材库（' + (App.settings.importMoveInsteadOfCopy ? '移动' : '复制') + '模式）…');
             return copyIntoLibrary(c, catLabel, log, { srcRootAbs: basePath ? normalizeWinPath(basePath) : '' });
           }).then(function (res) {
             if (res) {
-              var full = App.libraryRoot();   // v3.0.4：推导自应用目录，不再硬编码个人路径
+              var full = App.libraryRoot();   // 路径推导自应用目录，不写死任何人的目录
               var rel = res.dir.replace(/\//g, '\\');
               asset.paths = [{ path: joinWinPath(full, [rel]), note: '素材库（已导入 ' + res.total + ' 个文件）' }];
               log('\u2714 已导入 ' + res.total + ' 个文件' +
@@ -591,8 +579,8 @@ var Importer = (function () {
             return App.save(asset);
           });
 
-          /* v4.3.2：单项失败不再中断整批。以前某一项抛错（权限 / 文件被占用 / 磁盘满）
-           * 会让它后面的全部项静默不导入，而失败项已经复制进库的文件又没有任何素材记录。 */
+          /* 单项失败不中断整批：某一项抛错（权限 / 文件被占用 / 磁盘满）不该让它
+           * 后面的项静默不导入。 */
           return step.then(function () { done++; UI.renderAll(); })
             .catch(function (e) {
               failed++;
@@ -627,7 +615,7 @@ var Importer = (function () {
           aborted = true;
           log('\u26A0 窗口已关闭，正在停止后续项（已复制/移动完成的不会回滚）');
         }
-      },   // v2.5.3：关窗回收候选封面 blob；v4.3.2：同时中止后续导入
+      },   // 关窗：回收候选封面的 blob，同时中止后续导入
       body: [
         el('div', { class: 'notice' }, [
           el('p', { text: '选择一个存放已下载素材的文件夹：每个子文件夹会被识别为一个素材，其中的压缩包按版本号归并为「版本」，图片自动作为封面，.url / .txt 里的链接自动识别为商店链接。' }),
@@ -655,6 +643,7 @@ var Importer = (function () {
   /* ------------------------------------------------------------------
    * 用户脚本 / 已购库 JSON 导入
    * ------------------------------------------------------------------ */
+  /** 把用户脚本导出的一条记录整理成解析器统一的商品结构 */
   function normalizeBridgeItem(it, site) {
     var srcId = site === 'gumroad' ? 'gumroad' : (site === 'booth' ? 'booth' : 'other');
     var info = Fetchers.finalize({
@@ -681,6 +670,7 @@ var Importer = (function () {
     return info;
   }
 
+  /** 导入用户脚本 / 已购库数据：按商品 ID 与链接判重，能合并的合并，不新建重复条目 */
   function importBridgeJSON(payload, opts) {
     opts = opts || {};
     var log = opts.onLog || function () {};
@@ -709,7 +699,7 @@ var Importer = (function () {
         var fresh = Store.normalizeAsset({ source: info.sourceId || 'other', importedFrom: 'userscript' });
         fresh.originalTitle = info.originalTitle;
         fresh.title = (info.originalTitle || '').slice(0, 80);
-        fresh.itemId = info.itemId || fresh.itemId;   // v2.5.2：不允许把已有商品 ID 覆盖成空（重新获取一次信息就丢失的根因）
+        fresh.itemId = info.itemId || fresh.itemId;   // 不能把已有商品 ID 覆盖成空：丢了就再也对不上这条素材
         fresh.description = info.description;
         fresh.author = info.author;
         fresh.shop = info.shop;
@@ -918,9 +908,8 @@ var Importer = (function () {
   }
 
   /**
-   * 解析 BOOTH 订单页（accounts.booth.pm/orders/<id>）：
-   * 一个商品一个条目；该订单里的所有 /downloadables/ 链接归入该商品的
-   * 「订单下载文件」版本（一个版本含多个文件），而不是每文件一个版本。
+   * 解析 BOOTH 订单页：一个商品一个条目；该订单里的所有 /downloadables/ 链接归入该商品的
+   * 「订单下载文件」版本（一个版本含多个文件），不按每文件拆版本。
    */
   function parseBoothOrder(html) {
     var doc;
@@ -1043,12 +1032,11 @@ var Importer = (function () {
       it.downloads.push(dl);
       var vkey = variation || 'default';
       it.orderVersions[vkey] = it.orderVersions[vkey] || { variationId: variation, files: [] };
-      /* v2.5.2（用户明确）：**购买价以订单为准，且多变体要各自的价格，不做除法**。
-       * 订单页每个变体行自带价格 → 记在分组上；后面写购买价时优先用它，取不到才退回整单均分。 */
+      /* 购买价以订单为准，多变体各算各的、不做除法：变体行自带价格就先记在分组上，
+       * 取不到才退回整单均分。 */
       if (it.orderVersions[vkey].rowPriceValue == null) {
-        /* 真实订单页（实测 2026-10-01，订单 39773460）：价格**不在下载行内**，而在同一商品的 sheet 块里——
-         * 块内同时有 <a href=".../items/<商品id>">、标题与「100 JPY」「BOOST 0 JPY」。
-         * 所以先向上找到「含该商品链接」的容器再取第一个价格；找不到才退回老结构（价格就在行内）。 */
+        /* 价格不在下载行里，而在同一商品的 sheet 块里（块内同时有商品链接、标题与价格），
+         * 所以先向上找「含该商品链接」的容器再取第一个价格；找不到才退回行内。 */
         var rowP = '';
         (function () {
           var node = btn, hops = 0;
@@ -1093,11 +1081,8 @@ var Importer = (function () {
   }
 
   /**
-   * 解析 BOOTH 商品页（带 Cookie 的已登录视图）：
-   * 每个 li.variation-item = 一个版本/变体；已购的 variation 其购买按钮会变成
-   * 指向 accounts.booth.pm/orders/<id> 的链接 → 返回 {name, price, orderUrl, variationId, special, files}。
-   * special=true：变体免费（含许可证/readme 等）→ 保留在版本列表，但作为免费公开下载链接，
-   * 商品页里的 /downloadables/ 直链就是免费文件，不参与已购变体价格统计。
+   * 解析 BOOTH 商品页（已登录视图）：每个变体一条，已购变体的购买按钮会指向订单页。
+   * 免费变体（许可证 / readme 等）标 special：留在版本列表当公开下载，不参与购买价统计。
    */
   function parseBoothItemOrderLinks(html) {
     var doc;
@@ -1141,7 +1126,7 @@ var Importer = (function () {
    * Gumroad 解析：商品页（options=版本/变体，登录后带 purchase.content_url）
    * 与订单/下载页（props.content.content_items=全部文件）
    * ------------------------------------------------------------------ */
-  /** Gumroad SPA 数据（div#app[data-page]；兼容旧订单页 script[data-component-name]） */
+  /** Gumroad 页面数据：主要在 div#app[data-page]，另一种形态是 script[data-component-name] */
   function gumroadDataPage(doc) {
     if (!doc) return null;
     var node = doc.querySelector('div#app[data-page]');
@@ -1171,12 +1156,8 @@ var Importer = (function () {
   }
 
   /**
-   * 解析 Gumroad 商品页的版本/变体：
-   * - options = 变体（价格 = 基础价 + 变体差价）；
-   * - 登录后 props.purchase.content_url = 该商品的下载页链接（等价 BOOTH 订单链接）；
-   * - 实付价 total_price_including_tax_and_shipping 与唯一变体价一致 → 自动视为已购买该变体，
-   *   把下载页链接挂到对应版本；对不上时留给用户手动填写订单链接。
-   * - 免费变体 / 公开文件（public_files）标 special，只作免费下载链接。
+   * 解析 Gumroad 商品页的变体：实付价能用唯一变体对上，就把下载页链接挂到那个变体；
+   * 对不上就留空，交给用户手填订单链接。免费变体 / 公开文件标 special，只作下载用。
    */
   function parseGumroadItemOrderLinks(html) {
     var doc;
@@ -1247,10 +1228,8 @@ var Importer = (function () {
   }
 
   /**
-   * 解析 Gumroad 订单/下载页（gumroad.com/d/<token>）：
-   * props.content.content_items = 该订单可下载的全部文件（下载链接为 /r/<token>/product_files?…）。
-   * 返回结构兼容 BOOTH 订单解析（downloads + orderVersions.default.files），
-   * 这样「获取更新」与订单导入能共用同一套文件回填逻辑。
+   * 解析 Gumroad 订单 / 下载页：content_items 就是该订单可下载的全部文件。
+   * 返回结构与 BOOTH 订单解析对齐，好让「获取更新」与订单导入共用同一套回填逻辑。
    */
   function parseGumroadOrder(html) {
     var doc;
@@ -1259,7 +1238,7 @@ var Importer = (function () {
     var props = (d && d.props) || {};
     var content = props.content || {};
     var files = gumroadContentFiles(content);
-    // DOM 兜底：老页面/无 data-page 时收集 /r/ 下载链接与 data-resource-id 按钮
+    // 兜底：页面没有 data-page 时，从 /r/ 链接与 data-resource-id 按钮里收集
     if (!files.length && doc) {
       var seen = {};
       Array.prototype.forEach.call(doc.querySelectorAll('a[href*="/r/"], a.button[data-resource-id], button[data-resource-id]'), function (a) {
@@ -1404,6 +1383,10 @@ var Importer = (function () {
     });
   }
 
+  /* 已购库同步：模块级锁 + 序号——关掉对话框后循环要尽快停，收尾也只清自己那把锁 */
+  var syncRunning = false;
+  var syncSeq = 0;
+
   function syncLibraryDialog() {
     var logBox = el('div', { class: 'fetch-log', style: { display: 'block' } });
     function log(m) { logBox.appendChild(el('div', { class: 'log-line', text: m })); logBox.scrollTop = logBox.scrollHeight; }
@@ -1416,8 +1399,9 @@ var Importer = (function () {
       return /booth/.test(h) && App.settings.credentials[h].cookie;
     });
 
-    var runningSync = false;
-    var startBtn = el('button', { class: 'btn btn-primary', onclick: function () { run(); } }, ICONS.label('\u{1F504} 开始同步'));    var h = Modal.open({
+    var closed = false;
+    var startBtn = el('button', { class: 'btn btn-primary', onclick: function () { run(); } }, ICONS.label('\u{1F504} 开始同步'));
+    var h = Modal.open({
       title: '同步「我的已购素材」（BOOTH）', size: 'md',
       body: [
         el('div', { class: 'notice notice-warn' }, [
@@ -1430,6 +1414,7 @@ var Importer = (function () {
         Field.row('抓取页数', pagesIn),
         logBox
       ],
+      onClose: function () { closed = true; syncRunning = false; },
       footer: [
         el('button', { class: 'btn', onclick: function () { Modal.close(h); } }, '关闭'),
         startBtn
@@ -1437,38 +1422,47 @@ var Importer = (function () {
     });
 
     function run() {
-      if (runningSync) { log('\u26A0 同步正在进行中，请勿重复点击'); return; }
+      if (syncRunning) { log('\u26A0 同步正在进行中，请勿重复点击'); return; }
       if (!Net.networkAllowed()) { log('\u2716 当前为「手动粘贴源码」（不联网）。请先在「设置 → 联网与抓取」中选择「内置联网」。'); return; }
-      runningSync = true;
+      var myRun = ++syncSeq;
+      syncRunning = true;
       startBtn.disabled = true; ICONS.apply(startBtn, ('\u{23F3} 同步中 …'));
       var isGiftsPage = /\/gifts/.test(urlIn.value.trim());   // 获赠页 → 自动标记「获赠」
       var pages = Math.max(1, Math.min(50, +pagesIn.value || 5));
+      var seenIds = {};
       var all = [];
-      var chain = Promise.resolve();
-      for (var i = 1; i <= pages; i++) {
-        (function (page) {
-          chain = chain.then(function () {
-            var u = urlIn.value.trim() + (urlIn.value.indexOf('?') >= 0 ? '&' : '?') + 'page=' + page;
-            log('\u23F3 抓取第 ' + page + ' 页 …');
-            return Net.fetchText(u, { onLog: log }).then(function (r) {
-              if (!r.ok) { log('\u2716 第 ' + page + ' 页失败'); return; }
-              var items = parseBoothLibrary(r.text);
-              log('\u2714 第 ' + page + ' 页解析到 ' + items.length + ' 项');
-              all = all.concat(items);
-            });
-          });
-        })(i);
+      var page = 0;
+
+      /* 逐页抓：空页或整页 itemId 都已抓过就停，别白翻到 50 页 */
+      function nextPage() {
+        if (closed || page >= pages) return Promise.resolve();
+        page += 1;
+        var base = urlIn.value.trim();
+        var u = base + (base.indexOf('?') >= 0 ? '&' : '?') + 'page=' + page;
+        log('\u23F3 抓取第 ' + page + ' 页 …');
+        return Net.fetchText(u, { onLog: log }).then(function (r) {
+          if (closed) return;
+          if (!r.ok) { log('\u2716 第 ' + page + ' 页失败'); return nextPage(); }
+          var items = parseBoothLibrary(r.text);
+          log('\u2714 第 ' + page + ' 页解析到 ' + items.length + ' 项');
+          if (!items.length) return;                       // 空页 = 已经翻到底
+          var fresh = items.filter(function (x) { return x.itemId && !seenIds[x.itemId]; });
+          items.forEach(function (x) { if (x.itemId) seenIds[x.itemId] = 1; });
+          if (!fresh.length) { log('\u26A0 第 ' + page + ' 页全是抓过的条目，停止翻页'); return; }
+          all = all.concat(fresh);
+          return nextPage();
+        });
       }
-      chain.then(function () {
+
+      nextPage().then(function () {
+        if (closed) return;
         if (!all.length) { log('\u2716 未解析到任何商品。请确认 Cookie 有效、程序后端已启动。'); return; }
-        var seen = {}, uniqItems = [];
-        all.forEach(function (x) { if (!seen[x.itemId]) { seen[x.itemId] = 1; uniqItems.push(x); } });
-        log('去重后共 ' + uniqItems.length + ' 项。开始逐个补全商品详情（版本 / 价格 / 全部下载链接）…');
+        log('共 ' + all.length + ' 项。开始逐个补全商品详情（版本 / 价格 / 全部下载链接）…');
         var enriched = [];
         var i = 0;
         function nextDetail() {
-          if (i >= uniqItems.length) return Promise.resolve();
-          var it = uniqItems[i++];
+          if (closed || i >= all.length) return Promise.resolve();
+          var it = all[i++];
           if (!it.itemId) { enriched.push(it); return nextDetail(); }
           var jsonURL = 'https://booth.pm/ja/items/' + it.itemId + '.json';
           return Net.fetchText(jsonURL, { onLog: function () {} }).then(function (r) {
@@ -1508,12 +1502,13 @@ var Importer = (function () {
                 merged.downloads.push({ name: v.fileName || v.name || '', url: v.url, size: v.size || 0 });
               }
             });
-            if (i % 5 === 0 || i === uniqItems.length) log('已补全 ' + i + ' / ' + uniqItems.length);
+            if (i % 5 === 0 || i === all.length) log('已补全 ' + i + ' / ' + all.length);
             enriched.push(merged);
             return nextDetail();
           }).catch(function () { enriched.push(it); return nextDetail(); });
         }
         return nextDetail().then(function () {
+          if (closed) return;
           var withDL = enriched.filter(function (x) { return (x.downloads || []).length; }).length;
           log('\u2714 详情补全完成：' + enriched.length + ' 项，其中 ' + withDL + ' 项带下载直链');
           return importBridgeJSON({ site: 'booth', items: enriched }, { onLog: log }).then(function (r) {
@@ -1522,7 +1517,7 @@ var Importer = (function () {
         });
       }).catch(function (e) { log('\u2716 同步失败：' + (e.message || e)); })
         .then(function () {
-          runningSync = false;
+          if (syncSeq === myRun) syncRunning = false;   // 关了对话框又重开时，别把新那把锁清掉
           startBtn.disabled = false; ICONS.apply(startBtn, ('\u{1F504} 开始同步'));
         });
     }
@@ -1552,7 +1547,7 @@ var Importer = (function () {
     prepare();
     var cat = App.categoryLabel(asset.category || 'other');
     var rel = cat + '\\' + App.folderName(asset);
-    var folderPath = joinWinPath(App.libraryRoot(), [rel]);   // v3.0.4：推导自应用目录
+    var folderPath = joinWinPath(App.libraryRoot(), [rel]);   // 推导自应用目录，不写死路径
     return FS.mkdirPath(folderPath).then(function (hostCreated) {
       if (hostCreated) return finish(folderPath);
       return FS.getLibraryRoot().then(function (root) {
@@ -1592,7 +1587,7 @@ var Importer = (function () {
     }
 
     function rootAbs(rel) {
-      return joinWinPath(App.libraryRoot(), [rel]);   // v3.0.4：推导自应用目录
+      return joinWinPath(App.libraryRoot(), [rel]);   // 推导自应用目录，不写死路径
     }
     function ensureAssetDir(rootHandle, catLabel, title) {
       var safe = App.folderName(asset);
@@ -1740,7 +1735,7 @@ var Importer = (function () {
         })();
       });
     }
-    // 旧 webkitGetAsEntry 降级收集（仅用于不支持 getAsFileSystemHandle 的浏览器）
+    // webkitGetAsEntry 这条降级路径只在不支持 getAsFileSystemHandle 的环境才会走到
     async function collectLegacyDir(entry, rel) {
       var reader = entry.createReader();
       var list = await readAll(reader);
@@ -1756,8 +1751,8 @@ var Importer = (function () {
       return files;
     }
     /**
-     * 解析一个 DataTransferItem：modern getAsFileSystemHandle → 旧 webkitGetAsEntry → getAsFile()。
-     * webkitGetAsEntry 必须同步调用（drop 事件后异步调用会返回 null），所以先取好。
+     * 解析一个 DataTransferItem：先试 getAsFileSystemHandle，再退 webkitGetAsEntry 和 getAsFile。
+     * webkitGetAsEntry 必须同步调用，drop 事件之后异步调会返回 null，所以先取好。
      */
     async function itemToData(item) {
       var entry = null;
@@ -1835,22 +1830,21 @@ var Importer = (function () {
       var added = [], okFiles = 0, failFiles = 0;
       var folderPath = absPath([cat, safeTitle]);
       function absPath(parts) {
-        return joinWinPath(App.libraryRoot(), parts);   // v3.0.4：推导自应用目录
+        return joinWinPath(App.libraryRoot(), parts);   // 推导自应用目录，不写死路径
       }
       async function writeFile(f, dir) {
         var fh = await dir.getFileHandle(f.name, { create: true });
         var w = await fh.createWritable();
         await w.write(await f.arrayBuffer()); await w.close();
       }
-      // 情形判定（用户约定）：
-      // ① 只拖入一个文件夹 → 不移动它本身，只搬运它的【顶层子项】（子文件夹也是整项，绝不递归）；
-      // ② 多选（≥2 项）或拖入文件 → 每个选项按原样整项搬运（文件夹也是整项直接搬，绝不进入内部）。
+      // 拖入的内容按整项搬，绝不递归：
+      // 单个文件夹 → 只搬它的顶层子项；多选或直接拖文件 → 每项原样整项搬。
       var singleFolderOnly = valid.length === 1 && valid[0].isDir && valid[0].handle && typeof valid[0].handle.values === 'function';
       for (var it of valid) {
         try {
           if (singleFolderOnly) {
             var counter = await importTopLevelEntries(it.handle, dst, function (m) {
-              if (String(m).indexOf('目录整项移动') >= 0) return;   // 文件夹移动已作为不支持能力移除：不再提示
+              if (String(m).indexOf('目录整项移动') >= 0) return;   // 目录整项移动浏览器做不到，这类提示直接吞掉
               console.warn('拖拽导入：' + m);
             });
             okFiles += counter.moved + counter.copied;
@@ -1863,7 +1857,7 @@ var Importer = (function () {
             else if (!App.settings.importMoveInsteadOfCopy) { await writeFile(it.file, dst); okFiles++; }
             else { failFiles++; console.warn('拖拽导入：移动失败，已跳过（不复制）', it.rel); }
           } else if (it.handle) {
-            // 情形②：文件夹作为整体直接搬。文件夹移动能力已移除：移动模式直接跳过（不提示）；复制模式整项复制。
+            // 文件夹作为整体搬：移动模式下做不到就跳过，复制模式整项复制
             if (App.settings.importMoveInsteadOfCopy) {
               var movedDir = await tryMoveEntry(it.handle, dst);
               if (movedDir) { okFiles++; }
@@ -1878,11 +1872,11 @@ var Importer = (function () {
               } catch (eCopy) { failFiles++; console.warn('拖拽导入：复制文件夹失败', eCopy); }
             }
           } else if (App.settings.importMoveInsteadOfCopy) {
-            // 旧接口拿到的目录没有句柄，无法整项移动：跳过（不复制）
+            // 这条路径上的目录没有句柄，整项移动做不到，只能跳过
             failFiles += (it.files && it.files.length) || 1;
             console.warn('拖拽导入：文件夹句柄不可用，移动模式已跳过（不复制）', it.rel);
           } else {
-            // 旧接口目录：没有句柄，只能按已收集的文件复制
+            // 没有句柄的目录：只能按已收集到的文件逐个复制
             var copiedLegacy = 0;
             for (var f of it.files) {
               var parts = f.rel.split('/');
@@ -1913,15 +1907,14 @@ var Importer = (function () {
   }
 
   /**
-   * BOOTH 源缺少“有效变体”（没有任何带订单链接的版本）时，自动补一次：
-   * 商品页 JSON → 商品页 HTML（识别已购/未购变体与许可证/readme 特殊变体）→ 已购订单页下载文件。
-   * 成功则标记 autoFilled.versions 并保存，避免每次打开重复抓取；404/410 标记已下架。
+   * BOOTH 素材没有任何带订单链接的版本时补一次：商品页 → 商品 HTML（认已购 / 未购变体）
+   * → 已购订单页的下载文件。成功后打 autoFilled.versions 避免每次打开都重抓；404/410 记已下架。
    */
   var autoEnrichBusy = false;
   function autoEnrichBoothAsset(a) {
     if (!a || a.source !== 'booth' || a.delisted) return Promise.resolve(a);
-    // 免费素材没有“已购变体”概念：不自动联网补全（公开下载链接仍可由商品页解析）
-    // v2.3.12：「未购买」不算免费——它的商品价 0 只是「没有已购变体」，否则永远补不上变体/价格
+    // 免费素材没有「已购变体」可补；「未购买」不算免费 —— 它的 0 只是没有已购变体，
+    // 否则这类素材永远补不上变体与价格
     if (App.purchaseState(a) !== 'unpurchased' && (a.isFree === true || ((App.effectivePrice(a) || {}).value === 0))) return Promise.resolve(a);
     if (a.autoFilled && a.autoFilled.versions) return Promise.resolve(a);
     var hasOrderVersion = (a.versions || []).some(function (v) { return v.orderUrl && v.orderUrl.trim() && !v.special; });
@@ -1938,8 +1931,8 @@ var Importer = (function () {
         if (gone) { a.delisted = true; return App.save(a); }
         return a;
       }
-      /* v2.5.2：拿到的必须是**这条素材自己**的商品页——否则宁可放弃本次补全，
-       * 也不能把别的商品的数据（标题 / 封面 / 店铺 / 标签）写进这条素材（会表现成「详情页变成另一个商品」）。 */
+      /* 必须是这条素材自己的商品页：拿到别的商品的数据，标题 / 封面 / 店铺就会写串，
+       * 表现成「详情页变成另一个商品」，所以对不上就放弃本次补全。 */
       var gotId = String(info.itemId || '').trim();
       var myId = String(a.itemId || '').trim();
       if (gotId && myId && gotId !== myId) {
@@ -1972,7 +1965,7 @@ var Importer = (function () {
             if (!candidates.length) candidates = purchased.length ? [purchased[0]] : [];
             var matched = candidates.filter(function (o) { return (it.orderVersions || {})[o.variationId]; });
             var targets = matched.length ? matched : (candidates.length ? [candidates[0]] : []);
-            // v2.5.2：整单均分只作为**兜底**；只要订单页给了该变体行自己的价格，就用它（购买价以订单为准）
+            // 整单均分只是兜底：订单页给了该变体行自己的价格就用它
             var share = null;
             if (targets.length && it.orderPriceValue != null) {
               share = Math.round((it.orderPriceValue / targets.length) * 100) / 100;
@@ -2082,13 +2075,12 @@ var Importer = (function () {
   }
 
   /**
-   * Gumroad 源缺少有效版本（没有任何带订单链接的版本）时自动补一次：
-   * 商品页（识别变体 + 登录后的下载页链接）→ 下载页（解析全部文件）。
-   * 成功则标记 autoFilled.versions；404/410 标记已下架。
+   * Gumroad 素材没有带订单链接的版本时补一次：商品页认变体 → 下载页取全部文件。
+   * 成功后打 autoFilled.versions，避免每次打开都重抓；404/410 记已下架。
    */
   function autoEnrichGumroadAsset(a) {
     if (!a || a.source !== 'gumroad' || a.delisted) return Promise.resolve(a);
-    // 免费素材不需要获取已购变体/订单页：不自动联网补全（v2.3.12：「未购买」不算免费）
+    // 免费素材没有已购变体可补；「未购买」不算免费，否则永远补不上
     if (App.purchaseState(a) !== 'unpurchased' && (a.isFree === true || ((App.effectivePrice(a) || {}).value === 0))) return Promise.resolve(a);
     if (a.autoFilled && a.autoFilled.versions) return Promise.resolve(a);
     var hasOrderVersion = (a.versions || []).some(function (v) { return v.orderUrl && v.orderUrl.trim() && !v.special; });
@@ -2240,7 +2232,7 @@ var Importer = (function () {
       fresh.originalTitle = title;
       fresh.title = String(title).slice(0, 80);
       if (info) {
-        fresh.itemId = info.itemId || (wishItem && String(wishItem.id)) || fresh.itemId || '';   // v2.5.2：保留旧值，别清空
+        fresh.itemId = info.itemId || (wishItem && String(wishItem.id)) || fresh.itemId || '';   // 保留原值，别清空
         fresh.description = info.description || '';
         fresh.author = info.author || info.shop || (wishItem && wishItem.shop && wishItem.shop.name) || '';
         fresh.shop = info.shop || fresh.author;
@@ -2260,7 +2252,7 @@ var Importer = (function () {
         if (info.r18 === true) fresh.extra.r18 = true;
         if (App.settings.autoDetectAvatar && fresh.category !== 'avatar') fresh.avatars = Smart.detectAvatars(info);
       } else if (wishItem) {
-        fresh.itemId = String(wishItem.id || '') || fresh.itemId;   // v2.5.2：保留旧值
+        fresh.itemId = String(wishItem.id || '') || fresh.itemId;   // 保留原值，别清空
         fresh.author = fresh.shop = (wishItem.shop && wishItem.shop.name) || '';
         fresh.shopUrl = (wishItem.shop && wishItem.shop.url) || '';
         var catName = (wishItem.category && wishItem.category.name && (wishItem.category.name['zh-cn'] || wishItem.category.name.en || wishItem.category.name.ja)) || '';
@@ -2357,9 +2349,8 @@ var Importer = (function () {
     });
   }
 
-  /** v2.5.1（F5）：用**商品页**解析到的变体刷新「未购买」变体的当前价，并把库里还没有的变体补进来。
-   *  用户规则（2026-09-30 明确）：已购买以购买价（purchasePrice）为准、绝不被覆盖；未购买以当前商店价为准。
-   *  返回 { priced, added } 便于汇报。 */
+  /** 用商品页的变体刷新「未购买」变体的当前价，并补上库里还没有的变体。
+   *  已购变体以购买价为准，绝不被当前商店价覆盖。 */
   function mergeShopVariants(a, info) {
     var out = { priced: 0, added: 0 };
     if (!a || !info || !Array.isArray(info.versions) || !info.versions.length) return out;
@@ -2382,11 +2373,8 @@ var Importer = (function () {
     });
     return out;
   }
-  /** v2.5.1：把**商品页**解析到的信息并回素材——只动「未购买 / 免费」变体：
-   *  · 变体文件（免费变体的 downloadable）按商品页刷新；已购变体（有订单链接）的文件以订单页为准，一概不碰；
-   *  · 未购变体的当前价按商品页刷新（已购变体的购买价不动，用户 2026-09-30 规则）；
-   *  · 商品页的公开下载链接并进 downloadLinks（按 URL 去重）。
-   *  返回 { priced, added, files, links } 供汇报。 */
+  /** 把商品页解析到的信息并回素材，只动「未购买 / 免费」变体：已购变体的文件与价格
+   *  一律以订单页为准，不碰；公开下载链接按 URL 去重后并入。 */
   function mergeItemInfo(a, info) {
     var out = { priced: 0, added: 0, files: 0, links: 0 };
     if (!a || !info) return out;
@@ -2434,12 +2422,11 @@ var Importer = (function () {
     });
     return out;
   }
-  /** v2.5.0：把订单页解析出的商品对象写进某个版本的 files（名称 / 链接 / 大小），返回文件数。
+  /** 把订单页解析出的文件写进某个版本，返回文件数。
    *  详情页「获取更新」与设置页「批量获取更新」共用这一份逻辑，避免两处漂移。 */
   function applyOrderFilesToVersion(it, v) {
     var g = (it && it.orderVersions && it.orderVersions[v.variationId || 'default']) || (it && it.orderVersions && it.orderVersions.default);
-    /* v2.5.2：订单页给了该变体行自己的价格 → 写进购买价（购买价以订单为准）；
-     * 已有值的（手填或上次订单解析所得）不覆盖。 */
+    /* 订单页给了该变体行自己的价格就写进购买价；已有值的（手填或上次解析所得）不覆盖 */
     if (g && g.rowPriceValue != null && (v.purchasePrice == null || v.purchasePrice === '')) {
       v.purchasePrice = Number(g.rowPriceValue);
       v.purchaseCurrency = g.rowPriceCurrency || v.purchaseCurrency || '';

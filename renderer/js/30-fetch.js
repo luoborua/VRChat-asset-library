@@ -1,15 +1,10 @@
-/* ============ 30-fetch.js ============ */
-/* =====================================================================
- * 30-fetch.js  —  信息获取与解析（可插拔）
- *
- *  抓取方式（用户可在设置中切换，默认手动粘贴）：
- *    手动粘贴源码：不发起任何外部请求，纯本地离线解析（默认）
- *    程序后端联网：全部外部请求由 Rust 后端直接发起，不再使用任何 CORS 代理
- *
- *  解析产物结构参考 BoothPM-SDK 的商品数据模型：
- *    { itemId, originalTitle(name), description, price/priceValue/currency/isFree,
- *      images[], coverURL, tags[], author, shop, shopUrl, sourceId }
- * ===================================================================== */
+/*
+ * 30-fetch.js  —  素材信息抓取与解析，兼标签 / 分类 / 角色推断规则
+ *   联网抓取一律由程序后端发起（手动粘贴模式下不发任何请求），各站点按链接注册成解析策略；
+ *   产物统一成一份商品结构，再由 finalize 补齐价格、去重图集、清洗标签。
+ *   交互：FS.host 取页面、Store 做缓存、App/Secure 给设置与凭据、Smart 给标签规则。
+ *   边界：只产出信息，不下载文件、不写素材库。
+ */
 
 var Net = (function () {
 
@@ -20,7 +15,7 @@ var Net = (function () {
     return Promise.resolve({ ok: false, tried: tried, reason: 'host-offline' });
   }
 
-  /** 取得该域名下用户手动录入的 Cookie（异步解密；账号密码不再存储） */
+  /** 按域名取用户录入的 Cookie（解密后返回；只存 Cookie，不存账号密码） */
   function credFor(url) {
     var host = hostOf(url);
     var creds = (App.settings.credentials) || {};
@@ -38,7 +33,7 @@ var Net = (function () {
   /** 当前是否允许联网抓取（host 模式才允许；Cookie 按钮可用 forceNetwork 临时放行） */
   function networkAllowed() { return (App.settings.fetchMode || 'paste') !== 'paste'; }
 
-  /** 兼容旧调用（代理通道已移除，联网统一由程序后端负责） */
+  /** 保留空链给仍按链式调用的地方：代理通道已移除，联网只走程序后端 */
   function buildChain() { return []; }
 
   /**
@@ -60,7 +55,7 @@ var Net = (function () {
       return FS.hostEnsure().then(function (hostOk) {
         if (!hostOk) return hostOffline(log, tried);
         log('\u{1F5A5} 程序后端通道：由 Rust 后端直接发起请求（不经过任何代理）');
-        var hdrs = opts.headers ? Object.assign({}, opts.headers) : {};   // v2.3.22：允许调用方带自定义头（如 GitHub API 的 Accept）
+        var hdrs = opts.headers ? Object.assign({}, opts.headers) : {};   // 允许调用方带自定义头（如 GitHub API 的 Accept）
         if (cred && cred.cookie) hdrs.Cookie = cred.cookie;
         return FS.host.fetchURL(url, hdrs).then(function (j) {
           if (!j || !j.okFlag) throw new Error('HTTP ' + ((j && j.status) || 0));
@@ -102,10 +97,10 @@ var Net = (function () {
 })();
 
 
-/* =====================================================================
+/*
  * 站点解析策略（可插拔）
  *   Fetchers.register({ id, name, sourceId, match(url), fetch(url,ctx), parse(text,url) })
- * ===================================================================== */
+ */
 var Fetchers = (function () {
   var list = [];
 
@@ -166,16 +161,14 @@ var Fetchers = (function () {
     return info;
   }
 
-  /**
-   * 标签清洗：剔除平台名 / 站点导航词 / 角色名 / 与素材属性无关的噪声。
-   * 例如 BOOTH 页面 meta keywords 里的 booth、ブース、pixiv 都会被过滤掉。
-   */
+  /** 标签清洗：剔除平台名、站点导航词、角色名等噪声，BOOTH 的 meta keywords 里这类词尤其多 */
   function cleanTags(tags, ctx) {
     ctx = ctx || {};
     if (!App.settings.tagFilterEnabled) {
       return uniq((tags || []).map(function (t) { return String(t).trim().replace(/^#/, ''); }).filter(Boolean));
     }
-    var stop = (typeof Smart !== 'undefined' && Smart.blacklistSet) ? Smart.blacklistSet() : Object.create(null);
+    // 复制一份，避免把本次素材的店铺/域名写进全局黑名单缓存
+    var stop = Object.assign(Object.create(null), (typeof Smart !== 'undefined' && Smart.blacklistSet) ? Smart.blacklistSet() : {});
     // 店铺名 / 作者名本身不是素材属性
     [ctx.shop, ctx.author].forEach(function (n) { if (n) { stop[String(n).toLowerCase().trim()] = 1; if (Smart.normalizeTagToken) stop[Smart.normalizeTagToken(n)] = 1; } });
     // 支持角色名称（含日/英/中别名）应从标签里剔除——角色归属走「支持角色」字段
@@ -217,8 +210,7 @@ var Fetchers = (function () {
     if (info.priceValue == null) info.priceValue = p.value;
     if (!info.currency) info.currency = p.currency;
     if (info.isFree == null) info.isFree = p.isFree;
-    // R-18 识别：BOOTH 官方 is_adult 优先；否则只看标题/分类/标签，不再看简介——
-    // 简介里出现“可用于 R-18 作品/利用规约”这类表述不代表商品本身是成人向（曾误标 3390957）。
+    // R-18 只看标题 / 分类 / 标签，不看简介：简介里「可用于 R-18 作品」这类表述不代表商品本身是成人向
     if (info.r18 !== true) {
       var r18Hay = [info.originalTitle, info.category].concat(info.tags || []).join(' ');
       info.r18 = /(?:^|[^a-z0-9])(?:r-?18|18禁|成人向け|adult(?:[- ]only)?)(?:[^a-z0-9]|$)/i.test(r18Hay);
@@ -232,8 +224,8 @@ var Fetchers = (function () {
       if (/(^|[\/_.-])thumbnail([\/_.-]|$)/i.test(s)) return false;
       return true;
     }));
-    /* v2.5.2：BOOTH 同一张图常给两个 URL——/c/620x620/<shop>/i/<item>/<file> 与 /<shop>/i/<item>/<file>，
-     * 以前只按字符串去重 → 图集里同一张图出现两次（实测 1 条素材命中）。这里按「店铺/商品/文件名」归一，优先保留原图。 */
+    /* BOOTH 同一张图常给带尺寸前缀和不带前缀两个 URL，按字符串去重会重复；
+     * 这里按「店铺 / 商品 / 文件名」归一，并优先保留原图。 */
     (function () {
       function key(u) {
         var s = String(u || '').split('#')[0].split('?')[0].replace(/\/c\/\d+x\d+\//, '/');
@@ -261,8 +253,8 @@ var Fetchers = (function () {
   function extractVariations(d, currencyCode) {
     var versions = [], links = [];
     if (!d || !Array.isArray(d.variations)) return { versions: versions, links: links };
-    /* v2.5.14：variations[].price 是**裸数字**，String() 之后没有币种。调用方（BOOTH 商品页）传入店铺币种补上，
-     * 否则写回变体后详情页只能按空币种兜底 —— 旧实现默认 CNY，于是 1680 日元的变体显示成「CNY 1,680」。 */
+    /* variations[].price 是裸数字，String() 之后没有币种，必须由调用方补店铺币种，
+     * 否则 1680 日元的变体会按空币种兜底，显示成别的货币。 */
     var shopCur = String(currencyCode || '');
     d.variations.forEach(function (v) {
       if (!v || typeof v !== 'object') return;
@@ -296,6 +288,20 @@ var Fetchers = (function () {
   }
 
   /* ---------- 通用 HTML 解析（og / twitter / ld+json / meta） ---------- */
+  /** 页面标题常带「- 店名 - BOOTH」这类后缀，商品名要去掉。
+   *  自动取标题（fetchTitle）与整页解析（parseGeneric）共用这一处，避免两套正则漂移。
+   *  顺序不能反：先剥「- 店名 - BOOTH」两段，再剥「- BOOTH」单段 ——
+   *  先剥单段的话末尾 BOOTH 已经没了，店名就永远留在标题里。
+   *  店名段用 [^-–—|] 限定，免得把标题正文里的短横线一起吃进去。 */
+  function cleanPageTitle(s) {
+    return String(s || '')
+      .replace(/&amp;/g, '&')
+      .replace(/\s*[-–—|]\s*[^\-–—|]{1,40}\s*[-–—|]\s*BOOTH\s*$/i, '')
+      .replace(/\s*[-–—|]\s*(BOOTH|Gumroad|pixiv)\s*$/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
   function parseGeneric(text, url) {
     var info = emptyInfo();
     info.sourceURL = url || '';
@@ -310,13 +316,7 @@ var Fetchers = (function () {
     info.coverURL = meta('meta[property="og:image"]') || meta('meta[property="og:image:secure_url"]') ||
       meta('meta[name="twitter:image"]') || '';
     info.description = htmlToText(meta('meta[property="og:description"]') || meta('meta[name="description"]') || '');
-    // 页面标题常带「- 店名 - BOOTH」后缀，商品名应去掉站点后缀
-    if (info.originalTitle) {
-      info.originalTitle = info.originalTitle
-        .replace(/\s*[-–—|]\s*(BOOTH|Gumroad|pixiv)\s*$/i, '')
-        .replace(/\s*[-–—|]\s*[^|]{2,40}\s*[-–—|]\s*BOOTH\s*$/i, '')
-        .trim();
-    }
+    if (info.originalTitle) info.originalTitle = cleanPageTitle(info.originalTitle);
     var kw = meta('meta[name="keywords"]');
     if (kw) info.tags = kw.split(/[,\uFF0C]/).map(function (s) { return s.trim(); }).filter(Boolean).slice(0, 24);
 
@@ -408,7 +408,7 @@ var Fetchers = (function () {
         info.tags.push(d.category.name);
       }
       if (d.price != null) info.price = String(d.price);
-      // v2.5.14：BOOTH 内嵌 JSON 的 price 是裸数字 —— 不补币种的话，落库后会被当成「未知币种」
+      // 内嵌 JSON 的 price 是裸数字，不补币种的话，落库后会被当成「未知币种」
       if (info.price && !/[¥￥$€]|JPY|USD|EUR|CNY|RMB|円|元/i.test(info.price)) info.price += ' JPY';
       if (d.published_at) info.publishedAt = String(d.published_at);
       if (d.updated_at) info.shopUpdatedAt = String(d.updated_at);
@@ -425,7 +425,7 @@ var Fetchers = (function () {
       info.versions = ex.versions;
       info.downloadLinks = info.downloadLinks.concat(ex.links);
       if (!info.price && ex.versions.length && ex.versions[0].price) info.price = ex.versions[0].price;
-      // 版本信息也常写在简介末尾（更新履历 / v1.2 等），一并解析
+      // 版本信息也常写在简介末尾的更新履历里，一并解析
       if (!info.versions.length && info.description && typeof Smart !== 'undefined' && Smart.extractVersionsFromText) {
         var vFromDesc = Smart.extractVersionsFromText(info.description);
         if (vFromDesc.length) info.versions = vFromDesc;
@@ -472,7 +472,7 @@ var Fetchers = (function () {
   });
 
   /* ---------- Gumroad ---------- */
-  /** Gumroad SPA 数据：商品页 / 订单页统一放在 div#app[data-page]；旧订单页在 script[data-component-name] */
+  /** Gumroad SPA 数据：商品页 / 订单页统一放在 div#app[data-page]，另一种订单页在 script[data-component-name] */
   function gumroadPageData(doc) {
     if (!doc) return null;
     var node = doc.querySelector('div#app[data-page]');
@@ -610,9 +610,9 @@ var Fetchers = (function () {
     }
   });
 
-  /* ---------- GitHub（v2.3.22）：仓库链接 → api.github.com ----------
-   * 用户口径：向普通素材靠拢兼容——license 放进「下载链接」，star 放到「价格」的位置，
-   * Release 等同于其他素材的「变体（版本）」，每个 Release 的资产就是可下载文件。
+  /* ---------- GitHub：仓库链接 → api.github.com ----------
+   * 为和其它素材统一：license 放进「下载链接」，star 占「价格」，
+   * Release 当作变体，每个 Release 的资产就是可下载文件。
    */
   var GH_API = 'https://api.github.com';
   var GH_RESERVED = { topics: 1, collections: 1, sponsors: 1, marketplace: 1, orgs: 1, users: 1, settings: 1,
@@ -630,13 +630,12 @@ var Fetchers = (function () {
     return '★ ' + n;
   }
   function ghIso(s) { return s ? String(s) : ''; }
-  /** 用仓库 JSON（+ 可选 Release JSON 数组）拼出 Fetchers 标准 info */
-  /** README 里的图片：徽章（shields/coverage/捐赠…）与 .svg 过滤，相对路径转成可下载直链 */
+  /** README 里的图片：徽章（shields / coverage / 捐赠…）与 .svg 过滤，相对路径转成可下载直链 */
   var GH_BADGE_HOSTS = /^(www\.)?(img\.shields\.io|shields\.io|badgen\.net|badge\.fury\.io|codecov\.io|coveralls\.io|travis-ci\.(org|com)|appveyor\.com|circleci\.com|api\.codacy\.com|sonarcloud\.io|paypalobjects\.com|opencollective\.com|ko-fi\.com|patreon\.com|discord\.(gg|com))$/i;
   function ghReadmeImages(html, repo) {
     var out = [], seen = {}, full = (repo && repo.full_name) || '', branch = (repo && repo.default_branch) || 'main';
     var src = String(html || ''), m;
-    // v2.3.25：README 现在优先取 raw Markdown，所以 <img src> 与 ![alt](url) 两种写法都要抽，且保持出现顺序（首图=封面）
+    // README 取的是 raw Markdown，<img src> 与 ![alt](url) 两种都要抽，并保持出现顺序（首图作封面）
     var cands = [];
     var re = /<img[^>]+src=["']([^"']+)["']/gi;
     while ((m = re.exec(src))) cands.push({ at: m.index, u: m[1] });
@@ -660,6 +659,7 @@ var Fetchers = (function () {
     return out;
   }
 
+  /** 用仓库 JSON（+ 可选 Release 数组）拼出标准 info，供联网抓取与手动粘贴共用 */
   function ghInfoFromJson(repo, releases, url, readme) {
     var info = emptyInfo();
     if (!repo || !repo.full_name) return null;
@@ -673,7 +673,7 @@ var Fetchers = (function () {
     info.author = owner;
     info.shop = owner;
     info.shopUrl = repo.html_url || '';
-    info.images = ghReadmeImages(readme, repo);                 // v2.3.23：封面与图集取自 README 里的图片
+    info.images = ghReadmeImages(readme, repo);                 // 封面与图集取自 README 里的图片
     info.coverURL = info.images[0] || (repo.owner && repo.owner.avatar_url) || '';   // README 无图时退回仓库头像
     info.isFree = true;                                 // 开源素材天然免费
     info.shopPrice = ghStars(repo.stargazers_count);    // star 占「价格」的位置
@@ -733,7 +733,7 @@ var Fetchers = (function () {
     }
     return info;
   }
-  /* ---------- v2.3.25：可选 Token（5000 次/小时）与 README 省配额取法 ---------- */
+  /* ---------- 可选 Token 与省配额的 README 取法 ---------- */
   function ghTokenSet() { return !!(App.settings && App.settings.githubToken); }
   /** 拼 GitHub 请求头：配了 Token 就带 Authorization（匿名 60 次/小时 → 带 Token 5000 次/小时） */
   function ghAuthHeaders(base) {
@@ -746,7 +746,7 @@ var Fetchers = (function () {
       return h;
     }).catch(function () { return h; });
   }
-  /** README 优先取 raw.githubusercontent.com（CDN，不占 API 配额；实测 Markdown 里的图与渲染 HTML 抽出来一致） */
+  /** README 优先走 raw.githubusercontent.com：CDN 取文件，不占 API 配额 */
   var GH_README_NAMES = ['README.md', 'readme.md', 'README.markdown'];
   function ghFetchReadme(full, ctx, hdrs, log) {
     var i = 0;
@@ -835,15 +835,13 @@ var Fetchers = (function () {
     });
   }
 
-  /**
-   * 统一入口：先查本地缓存（借鉴 booth-library-manager 的缓存策略），
-   * 未命中再按当前方案抓取；成功后写入缓存。
-   */
+  /** 统一入口：先查本地缓存，未命中再按当前方案抓取，成功后写回缓存 */
   function fetchInfo(url, ctx) {
     ctx = ctx || {};
     var log = ctx.onLog || function () {};
     return Store.cacheGet(url).then(function (cached) {
-      if (cached && !ctx.noCache) {
+      // forceNetwork 表示调用方明确要求联网刷新，必须绕过缓存
+      if (cached && !ctx.noCache && !ctx.forceNetwork) {
         log('\u{1F4BE} 命中本地缓存，未发起任何网络请求（可在设置中清空缓存）');
         cached.__fromCache = true;
         return cached;
@@ -861,8 +859,7 @@ var Fetchers = (function () {
   function parsePasted(text, url) {
     var trimmed = String(text || '').trim();
     if (!trimmed) return null;
-    // v2.3.25：粘 JSON 时按「内容特征」挑会解析 JSON 的那一个（以前一律走通用分支，GitHub 字段会全丢）。
-    // 注意不能按链接盲派：BOOTH 的 parse 是 HTML 解析器，把 JSON 喂给它只会解析出空壳。
+    // 粘 JSON 时按内容特征挑解析器，不能按链接盲派：BOOTH 的 parse 是 HTML 解析器，喂 JSON 只会得到空壳
     var byUrl = url ? detect(url) : null;
     var byUrlGeneric = !byUrl || byUrl.id === 'generic';
     if (trimmed[0] === '{' || trimmed[0] === '[') {
@@ -895,7 +892,7 @@ var Fetchers = (function () {
     var looksGumroad = /gumroad\.com|data-page/i.test(trimmed) && /price_cents|content_items|gumroad/i.test(trimmed);
     var f = (!byUrlGeneric ? byUrl : null) || (looksGumroad ? gumroadFetcher : null);
     var out = f ? f.parse(trimmed, url || '') : null;
-    // v2.3.25：来源解析器认不出（例如粘的是 GitHub 仓库页面源码）就回落通用解析，至少抽出 og: 标题/简介/图
+    // 来源解析器认不出（例如粘的是仓库页面源码）就回落通用解析，至少能抽出 og: 标题 / 简介 / 图
     if (!out || out.__failed) out = parseGeneric(trimmed, url || '');
     if (url && out && !out.sourceId && f && f.sourceId) out.sourceId = f.sourceId;
     return cacheAndReturn(out, url);
@@ -907,19 +904,66 @@ var Fetchers = (function () {
     return info;
   }
 
+  /* ---------- 只取标题（粘贴商品链接后自动填「原标题」用） ----------
+   * 不走 fetchInfo：那条路会抓图集、变体、订单页，几十个请求换一个标题不值当。
+   * BOOTH 直接读 items/<id>.json 的 name —— 比整页 HTML 小，也不会被语言跳转 / 年龄确认页挡。
+   * 失败一律 resolve 成 { ok:false }：自动填充是锦上添花，不该打断录入。 */
+  function fetchTitle(url, opts) {
+    opts = opts || {};
+    if (!url || !/^https?:\/\//i.test(url)) return Promise.resolve({ ok: false, title: '', reason: 'bad-url' });
+    var f = detect(url);
+    var boothJson = (f && f.id === 'booth' && typeof f.jsonURL === 'function') ? (f.jsonURL(url) || '') : '';
+    var target = boothJson || url;
+    return Net.fetchText(target, { forceNetwork: !!opts.forceNetwork, headers: opts.headers }).then(function (r) {
+      if (!r || !r.ok || !r.text) return { ok: false, title: '', reason: (r && r.reason) || 'fetch-failed' };
+      var title = '';
+      if (boothJson) {
+        var j = safeJSON(r.text, null);
+        if (j && !j.error) title = String(j.name || j.title || '');
+      }
+      if (!title) {
+        try {
+          var doc = new DOMParser().parseFromString(r.text, 'text/html');
+          var m = doc.querySelector('meta[property="og:title"]') || doc.querySelector('meta[name="twitter:title"]');
+          title = (m && m.getAttribute('content')) || (doc.querySelector('title') ? doc.querySelector('title').textContent : '');
+        } catch (e) {}
+        title = cleanPageTitle(title);
+      }
+      title = String(title || '').replace(/\s+/g, ' ').trim();
+      return title
+        ? { ok: true, title: title, via: r.via || '', sourceURL: target }
+        : { ok: false, title: '', reason: 'no-title' };
+    }).catch(function (e) {
+      return { ok: false, title: '', reason: String((e && e.message) || e) };
+    });
+  }
+
+  /** 抓取失败是否等于「商品没了」：404/410 才算下架，网络问题、后端离线一律不算。
+   *  编辑页与批量更新共用这一处，免得两边判据漂移（判错会把可用的素材标成已下架）。 */
+  function looksDelisted(info) {
+    if (!info) return false;
+    if (info.status === 404 || info.status === 410) return true;
+    var tried = info.tried || [];
+    for (var i = 0; i < tried.length; i++) {
+      if (tried[i] && /HTTP (404|410)\b/.test(String(tried[i].error || ''))) return true;
+    }
+    return false;
+  }
+
   return {
-    register: register, detect: detect, fetchInfo: fetchInfo,
+    register: register, detect: detect, fetchInfo: fetchInfo, fetchTitle: fetchTitle,
     parsePasted: parsePasted, parseGeneric: parseGeneric, emptyInfo: emptyInfo,
-    ghParseRepo: ghParseRepo, ghFromJSON: ghFromJSON,   // v2.3.22：GitHub 来源（供详情/冒烟使用）
+    ghParseRepo: ghParseRepo, ghFromJSON: ghFromJSON,   // GitHub 来源（供详情页与冒烟使用）
     cleanTags: cleanTags, finalize: finalize, extractVariations: extractVariations,
+    cleanPageTitle: cleanPageTitle, looksDelisted: looksDelisted,
     get list() { return list; }
   };
 })();
 
 
-/* =====================================================================
+/*
  * 智能推断：标签翻译 / 分类猜测 / 角色识别
- * ===================================================================== */
+ */
 var Smart = (function () {
 
   /** 归一化标签 token：小写 + 去掉空格/连字符/下划线/点/全角括号，用于同义与黑名单匹配 */
@@ -1035,17 +1079,14 @@ var Smart = (function () {
     return 'other';
   }
 
-  /* v4.3.2：以前这里是隐式全局（`_roleTagGuard = …` 没有声明），
-   * 而 detectAvatars 内部又 `var _roleTagGuard = Object.create(null)` 重新建了一个空表，
-   * 把外层刚按标签填好的内容整个遮蔽掉 —— 「标签里出现过的词不当角色名」这条规则从未生效过。
-   * 现在提到模块级声明一次，两处共用。 */
+  /* 模块级共享：detectAvatars 内若用 var 重新声明，会遮蔽这里按标签填好的内容，规则就不生效 */
   var _roleTagGuard = Object.create(null);
 
   function detectAvatars(info) {
     var title = info.originalTitle || info.title || '';
     var desc = String(info.description || '');
     var tags = info.tags || [];
-    // v2.3.19：标签参与排除错误的角色名（完全相等才排除）
+    // 标签参与排除错误的角色名（只按完全相等排除）
     _roleTagGuard = Object.create(null);
     tags.concat(info.rawTags || []).forEach(function (t) {
       var k = String(t || '').trim().toLowerCase();
@@ -1119,9 +1160,8 @@ var Smart = (function () {
       return found;
     }
 
-    /* ---- 支持角色区块里出现「尚未收录」的名字：自动注册为新角色 ----
-     * 同一行里英文名与日文/中文名成对出现时合并为一个角色（英文优先作为显示名），
-     * 单独出现时用解析到的该名称直接创建（英文 > 日文 > 中文）。
+    /* ---- 支持角色区块里出现尚未收录的名字：暂存为新角色，等用户在设置里批准 ----
+     * 同一行的英文名与日 / 中文名合并为一个角色，英文优先作显示名。
      */
     var SUPPORT_STOP = {};
     [
@@ -1150,7 +1190,7 @@ var Smart = (function () {
       // 韩文正文高频词
       '대응', '모델', '전용', '상품설명', '제품을', '임포트하기', '전에', '도입해', '주세요', '완료하였습니다', '귀를', '움직이는',
       '애니메이션', '기능을', '추가하여', '다음과', '같은', '캐릭터를', '지원합니다', '아바타', '셰이프',
-      // 用户实测误添加清单（全部排除；已收录角色的韩文别名不在此列，仍走正常匹配）
+      // 实践中被误当成角色名添加过的词，一律排除（已收录角色的韩文别名不在此列，仍走正常匹配）
       '購入いただいた方は', 'アバターが追加されると金額が変更されます', 'セール11', '11まで', 'MANUKAのsmall',
       'breast対応FBXを新たに作りました', 'PBのみ対応しています', 'ヘアだけ販売します', 'VRCでの作動のみを保障します',
       '以外の動作は保証しません', 'lilToonを導入してください', 'Unity専用Modular', 'Avatar対応完了しました',
@@ -1179,7 +1219,7 @@ var Smart = (function () {
       'VRCfurry', 'other', 'animation', 'controll', 'FX', 'using', 'please', 'ensure', 'this', 'control', 'has', 'hight',
       'prior', '如果用了其他的动画插件', '所以请放心拉高优先级', 'unityは2022のみ対応です'
     ].forEach(function (w) { SUPPORT_STOP[w.toLowerCase()] = 1; });
-    // v2.3.17：并入「工具 / 软件 / 技术名词」表——lilToon、Modular Avatar、VRCSDK 这类词常出现在「対応」列表里，但不是角色名
+    // 并入工具 / 技术名词表：lilToon、Modular Avatar 这类词常出现在「対応」列表里，但不是角色名
     (typeof TOOL_STOPWORDS !== 'undefined' ? TOOL_STOPWORDS : []).forEach(function (w) { SUPPORT_STOP[String(w).toLowerCase()] = 1; });
     var PROSE_HINTS = /(います|ました|します|ません|です|でした|する|した|して|ください|のみ|だけ|から|まで|として|により|ため|ので|という|これ|この|その|あの|私|さん|様|ちゃん|君|くん)/;
     var PARTICLE_END = /(は|が|を|に|で|と|も|へ|の|や|か|ね|よ|わ)$/;
@@ -1197,10 +1237,7 @@ var Smart = (function () {
       });
       return hit;
     }
-    // v2.3.19：当前素材的标签（用户规则：标签可以「一定程度」参与排除错误的角色名）。
-    // 只做**完全相等**的排除——标签里出现过的词不再当角色名，但不做「包含」匹配，
-    // 免得把「マヌカ対応」这类标签里的真实角色名一起吃掉。
-    // v4.3.2：这里曾用 `var` 重建了一个空表，把上面按标签填好的内容遮蔽掉，已删除。
+    // 标签只做完全相等的排除，不做包含匹配，免得把「マヌカ対応」这类标签里的真实角色名一起吃掉
     function isLikelyRoleToken(s) {
       var core = stripTagDecorations(s);
       if (!core || core.length < 2 || core.length > 24) return false;
@@ -1306,10 +1343,8 @@ var Smart = (function () {
     if (!found.length) {
       found = scan((tags || []).join(' '));
     }
-    /* v2.5.8（用户要求）：**变体名 / 文件名始终参与识别**，不再只当最后回退。
-     * 理由：BOOTH 的一个变体就是「这一版给哪个角色用」（如「桔梗用 -Kikyo」），
-     * 文件名同理（如 NM06_Chiffon.zip）——比正文里顺带提到的角色名更准。
-     * 只**匹配已知角色**（scan 不注册新角色），与上面的结果取并集，不会引入脏角色。 */
+    /* 变体名与文件名始终参与识别：变体本身就是「这一版给哪个角色用」（如「桔梗用 -Kikyo」），
+     * 比正文里顺带提到的角色名更准；只匹配已知角色，与上面的结果取并集，不会引入脏角色。 */
     var variantText = (info.orderVersions || []).concat(info.versions || []).map(function (v) {
       return [v && v.name, v && v.fileName].filter(Boolean).join(' ');
     }).join(' ');
@@ -1324,9 +1359,7 @@ var Smart = (function () {
     return out;
   }
 
-  /**
-   * 从简介里解析版本信息（通常出现在商品简介末尾的「更新履歴 / 変更履歴」或 ver/v 标记处）
-   */
+  /** 从简介里解析版本信息（多在末尾的「更新履歴 / 変更履歴」或 ver / v 标记处） */
   function extractVersionsFromText(text) {
     var s = String(text || '');
     if (!s) return [];
@@ -1348,7 +1381,7 @@ var Smart = (function () {
         push('v' + m[1], ctx);
       }
     });
-    // 更新历史标题后的行（例：更新履歴 / 2024-12-01 v1.2 〇〇修正）
+    // 更新历史标题之后的若干行，通常才是具体改动
     var lines = s.split(/\n+/);
     for (var i = 0; i < lines.length && out.length < 12; i++) {
       var ln = lines[i].trim();
@@ -1368,10 +1401,7 @@ var Smart = (function () {
     return out.slice(0, 12);
   }
 
-  /**
-   * 从商品简介中提取「注意事项 / 使用条件 / 许可」等内容。
-   * 常见于 BOOTH 描述的「注意」「免責」「禁止」「ライセンス」「利用規約」「クレジット」章节。
-   */
+  /** 从简介里提取注意事项 / 使用条件 / 许可段落（常见于「注意」「免責」「利用規約」等章节） */
   function extractNotes(text) {
     var s = String(text || '');
     if (!s) return '';
@@ -1482,9 +1512,7 @@ var Smart = (function () {
 
   /** 单个标签是否可视为某角色名的等价变体（如 萌対応 / 萌ちゃん対応 / 桔梗3D / 桔梗酱対応） */
   var AVATAR_SUFFIX_TOKENS = '対応済み|対応|适配|对应|向け|用|用衣装|対応衣装|改変|衣装|髪型|发型|アクセサリー|アクセ|配饰|モデル|模型|版|ちゃん|酱|chan|等|など|専用|专用|3d|3d模型|3dモデル|dlc|差分|様';
-  /* v2.5.7（性能，实测驱动）：这三个正则由**常量**拼出，原先却写在函数体内**每次调用现场编译**。
-   * 实测：reload() 里 purgeAvatarTags 占 3715ms（86%），根因就是 isAvatarEquivalent 对每个标签
-   * 遍历全部角色×别名（约 700 次 avatarNameMatch），每次又编译 2~3 个正则 = 每标签上千次编译。 */
+  /* 由常量预编译成正则：写在函数体里会每次调用现场编译，一次批量清洗能编译上千次 */
   var AV_SUFFIX_RE_END = new RegExp('(' + AVATAR_SUFFIX_TOKENS + ')$');
   var AV_SUFFIX_RE_ALL = new RegExp('^(?:' + AVATAR_SUFFIX_TOKENS + ')+$');
   var AV_DECOR_HEAD = /^[#＃【\[（(]+/;
@@ -1508,7 +1536,7 @@ var Smart = (function () {
     // 单个 CJK 字（如“萌”）可以参与匹配；单个拉丁字母不行
     if (a.length < 2 && /^[a-z0-9]$/i.test(a)) return false;
     if (s === a) return true;
-    // 兼容“角色名 + 剩余后缀”（旧逻辑：剩余部分必须是已知后缀组合）
+    // 兼容「角色名 + 已知后缀」的组合
     var idx = s.indexOf(a);
     if (idx < 0) return false;
     var left = s.slice(0, idx);
@@ -1518,10 +1546,8 @@ var Smart = (function () {
     return AV_SUFFIX_RE_ALL.test(right);
   }
 
-  /* v2.5.7（性能）：「单次调用内批量化」，**不做跨调用缓存**——
-   * 原实现 purgeAvatarTags 对**每个标签**都重建一遍角色名表（上百个别名逐个 strip），
-   * 一次清洗 425 条素材要做几十万次重复 strip。现在一次 purgeAvatarTags 只建一遍名表。
-   * 不跨调用缓存 = 设置改了立刻生效，不会出现"改了不生效"的隐性 bug。 */
+  /* 名表在一次调用内只建一遍，但不跨调用缓存：改了角色设置要立刻生效，
+   * 不能出现「改了不生效」的隐性 bug。 */
   function avatarStrippedNames(list) {
     var out = [];
     (list || App.allAvatars()).forEach(function (av) {
@@ -1553,12 +1579,8 @@ var Smart = (function () {
     return !!s && strippedMatchesAny(s, avatarStrippedNames());
   }
 
-  /* v2.5.13（性能复查第 2 轮）：把 v2.5.7 的「单次调用内批量化」再推一层到「**单次批量作用域内**批量化」。
-   * reload() 一轮要清洗 425 条素材 × 2 份标签 = 850 次，每次都重建一遍角色名表（≈275ms，实测）。
-   * 作用域由调用方创建（App.newScope()）、用完即弃 —— **不是跨调用缓存**；
-   * 且 App.scopeToken() 盯着三张角色设置表的**引用**，任一被换掉就整体作废重建，
-   * 因此与「每次现算」逐条等价（含循环中途清理工具名角色那一次）。
-   * v2.5.7 立的护栏不变：**不传 scope 的调用照旧每次现算**（冒烟里有专门断言）。 */
+  /* 批量作用域让整轮清洗共用一张名表，用完即弃，不是跨调用缓存；
+   * scopeToken 盯着角色设置表的引用，任一被换掉就整体重建，因此与每次现算等价。 */
   function newBatchScope() { return { blKey: '' }; }
   function scopeNames(scope) {
     if (!scope) return avatarStrippedNames();

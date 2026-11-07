@@ -1,22 +1,18 @@
-/* ============ 40-fs.js ============ */
-/* =====================================================================
- * 40-fs.js  —  本地文件系统 / 导入导出 / 整理辅助
- *   浏览器端使用 File System Access API（Chrome / Edge 支持）
- *   本机文件操作统一走 Tauri 的进程内命令（见下方 Host）；v2.3.12 起已移除旧的 window.vrcBridge 预留桥接
- * ===================================================================== */
+/*
+ * 40-fs.js —— 渲染层访问本机文件的唯一入口：选择、读写、移动复制、后端调用
+ *   （hostCall → preload 垫片 → IPC），以及导入导出与目录结构整理。
+ * 交互：20-store.js 的落盘、改名、导出都经这里；浏览器侧另有 File System Access 兜底。
+ * 边界：不做数据建模，也不决定业务语义——只把路径与字节送到该去的地方。
+ */
 
 var FS = (function () {
 
   function supported() { return typeof window.showDirectoryPicker === 'function'; }
   function saveSupported() { return typeof window.showSaveFilePicker === 'function'; }
-  /* ---------------- 进程内后端（Tauri 命令） ----------------
-   * v6.0：后端不再是 127.0.0.1:8788~8792 的 HTTP 服务，而是同一进程里的 Rust 命令。
-   * 端口探测、访问令牌、健康检查、断线横幅都随 HTTP 层一并删除：
-   *   没有端口，就没有「别的本地服务冒充后端」的可能；没有跨进程调用，也就不会「断开」。 */
-
-  /* v6.0（Tauri 载体）：后端不再是 HTTP 服务，而是进程内的 Rust 命令。
-   * 只换传输，不换契约 —— 下面 hostCall 的 api 名与 payload 与 HTTP 版完全一致，
-   * 于是 25 处 FS.host.* 调用与全部业务逻辑都不用改。 */
+  /* ---------------- 进程内后端 ----------------
+   * 后端是同进程的命令调用，不是本地 HTTP 服务：没有端口，就没有被别的本地服务冒充的余地，
+   * 也没有跨进程调用会「断开」。
+   * api 名与 payload 形状保持不变，业务侧的调用点因此不必改动。 */
   var TAURI_INVOKE = (function () {
     try {
       if (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === 'function') {
@@ -29,20 +25,17 @@ var FS = (function () {
     try { return (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.Channel) || null; } catch (e) { return null; }
   })();
 
-  /* v2.5.3 的「后端身份 + 最低版本」校验、v2.5.2 的「断开横幅 / 恢复补写」都只对 HTTP 后端有意义，
-   * Tauri 没有端口可探、没有身份可冒充，一并移除。 */
-
-  /** 后端就绪判定：进程内命令，只要 __TAURI__ 在就永远在线，没有「探测」这一步。
-   *  保留这个函数是为了不动机场一样的调用点（hostEnsure / hostEnsureRetry）。 */
+  /** 后端就绪判定：进程内命令，载体在就永远在线，没有探测这一步；
+   *  保留函数只为不扰动既有调用点。 */
   function hostProbe() {
     return Promise.resolve(!!TAURI_INVOKE);
   }
-  /** 带重试的后端探测——Tauri 下无需重试，签名保留（50-app.js 启动时会调用） */
+  /** 带重试签名的就绪判定：进程内后端无需重试，保留给启动链调用 */
   function hostEnsureRetry() {
     return Promise.resolve(!!TAURI_INVOKE);
   }
   function hostCall(api, payload) {
-    /* 直接进进程内命令；返回值语义与旧 HTTP 版逐字段一致（ok=false 抛错、cancelled 原样返回） */
+    /* ok=false 抛错，cancelled 原样返回给调用方自己判断 */
     if (!TAURI_INVOKE) {
       return Promise.reject(new Error('当前载体不支持文件操作：请从桌面程序运行，不要直接用浏览器打开页面'));
     }
@@ -56,8 +49,7 @@ var FS = (function () {
   }
   var Host = {
     available: function () { return !!TAURI_INVOKE; },
-    /** 当前是否跑在原生桌面壳里（Electron / Tauri）。
-     *  页面据此切换文案与布局：网页版讲「启动后端」，桌面版讲「程序后端」。 */
+    /** 是否跑在原生桌面壳里：页面据此切换文案与布局，区分网页版与桌面版 */
     desk: function () {
       var s = window.vrcElectron && window.vrcElectron.shell;
       return s === 'electron' || s === 'tauri';
@@ -68,16 +60,18 @@ var FS = (function () {
     base: function () { return ''; },
     pickDir: function () { return hostCall('/api/pickDir').then(function (j) { return j.path || ''; }); },
     pickFiles: function () { return hostCall('/api/pickFiles').then(function (j) { return j.paths || []; }); },
-    /* v4.2.0 素材包：另存为 / 选单个文件 / 打包相关调用。
-     * 返回的是后端原始对象（含 ok / cancelled），调用方自己判断用户是否取消。 */
+    /* 素材包：另存为 / 选单个文件 / 打包。返回后端原始对象（含 ok / cancelled），
+     * 由调用方判断用户是否取消。 */
     saveFile: function (p) { return hostCall('/api/saveFile', p || {}); },
     pickOneFile: function (p) { return hostCall('/api/pickOneFile', p || {}); },
     pack: function (api, payload) { return hostCall('/api/pack/' + api, payload || {}); },
-    /** v6.8：导入与工程 —— probe / hash / plan / execute / listDir / findUnity / launchUnity / logTail / receipt / installBridge */
+    /** 导入与工程：probe / hash / plan / execute / listDir / findUnity / launchUnity / logTail / receipt / installBridge */
     wb: function (op, payload) { return hostCall('/api/wb/' + op, payload || {}); },
-    /** v6.0：素材主库（SQLite）—— load / save / info */
+    /** 素材主库（SQLite）：load / save / info */
     db: function (op, payload) { return hostCall('/api/db/' + op, payload || {}); },
-    /** v6.1：原始字节通道。读回 Uint8Array，写入直接给 Uint8Array —— 全程不碰 base64。 */
+    /** 自动更新：info / apply / progress / cancel（桌面版才通，网页载体直接报不支持） */
+    update: function (op, payload) { return hostCall('/api/update/' + op, payload || {}); },
+    /** 原始字节通道：读回与写入都是 Uint8Array，全程不碰 base64 */
     bytesSupported: function () { return !!TAURI_INVOKE; },
     readBytes: function (p) {
       if (!TAURI_INVOKE) return Promise.reject(new Error('当前载体不支持原始字节读取'));
@@ -112,7 +106,7 @@ var FS = (function () {
         return r;
       });
     },
-    /** v6.2：缩略图（Rust 侧 image crate 生成 400px JPEG） */
+    /** 缩略图：由后端生成 400px JPEG */
     thumb: function (src, dst, max) {
       if (!TAURI_INVOKE) return Promise.reject(new Error('当前载体不支持缩略图'));
       return TAURI_INVOKE('thumb_ensure', { src: src, dst: dst, max: max || 400 });
@@ -121,7 +115,7 @@ var FS = (function () {
       if (!TAURI_INVOKE) return Promise.reject(new Error('当前载体不支持缩略图'));
       return TAURI_INVOKE('thumb_batch', { items: items || [], max: max || 400 });
     },
-    /* ---- v6.2：数据目录（选择 / 迁移） ---- */
+    /* ---- 数据目录（选择 / 搬迁） ---- */
     dataScan: function (dir) {
       if (!TAURI_INVOKE) return Promise.resolve({ ok: false, error: '当前载体不支持' });
       return TAURI_INVOKE('data_scan', { dir: String(dir || '') });
@@ -156,7 +150,7 @@ var FS = (function () {
       var payload = { url: url, path: p, headers: headers || {}, jobId: jobId || '', overwrite: !!overwrite };
       return hostCall('/api/download', payload);
     },
-    /** v2.5.1（F3）：删除本地文件/目录（后端带安全阀：拒绝盘符根与短路径） */
+    /** 删除本地文件 / 目录；后端带安全阀，拒绝盘符根与短路径 */
     remove: function (p) { return hostCall('/api/delete', { path: p }); },
     /** 下载进度：后端统一返回 {ok, job:{received,total,speed,…}}，这里摊平成一层供 88-download.js 直接读。 */
     downloadProgress: function (jobId) {
@@ -165,30 +159,36 @@ var FS = (function () {
         return r;
       });
     },
-    /** v4.3.2：取消下载（页面点「移除」时用，真正断掉后端侧的上游请求） */
+    /** 取消下载：真正断掉后端侧的上游请求，不只是从列表里移除 */
     downloadCancel: function (jobId) { return hostCall('/api/downloadCancel', { jobId: jobId }); },
     open: function (p) { return hostCall('/api/open', { path: p }); },
+    openUrl: function (u) { return hostCall('/api/openUrl', { url: u }); },
+    /* 用默认浏览器打开外链；失败时把链接复制到剪贴板并提示 */
+    openExternal: function (u) {
+      var url = String(u || '').trim();
+      if (!/^https?:\/\//i.test(url)) { Toast.warn('链接无效'); return Promise.resolve(); }
+      return this.openUrl(url).catch(function () {
+        try { copyText(url); } catch (e) {}
+        Toast.err('打不开浏览器，链接已复制：' + url, 6200);
+      });
+    },
     exists: function (p) { return hostCall('/api/exists', { path: p }).then(function (j) { return j.kind || null; }); },
-    /** v4.4：带大小的 stat（exists 只回 kind，导入素材时要拿 fileSize） */
+    /** 带大小的 stat：exists 只回 kind，导入素材时还要 fileSize */
     stat: function (p) { return hostCall('/api/exists', { path: p }); },
     readText: function (p) { return hostCall('/api/readText', { path: p }).then(function (j) { return j.text || ''; }); },
-    /** v2.5.14：第 5 个参数 = 可选超时（毫秒）。后端 2.3.17 起支持（限幅 5~300 秒）；
-     *  旧后端会忽略这个字段、仍按 30 秒处理 —— 向后兼容。 */
+    /** 第 5 个参数是可选超时（毫秒），后端会限幅；不传则用后端默认值 */
     fetchURL: function (url, headers, method, body, timeoutMs) {
       var payload = { url: url, headers: headers || {}, method: method || 'GET', body: body };
       if (timeoutMs) payload.timeoutMs = timeoutMs;
       return hostCall('/api/fetch', payload);
     },
-    /** v2.5.15：**流式请求**（后端 2.3.18 的 /api/stream，SSE 转发）。给 AI 翻译这类长响应用：
-     *  只要上游持续吐字节就不会中断（后端侧是空闲超时）。
-     *  opts: { timeoutMs, onChunk(text, acc) }
-     *  返回 { status, ok, text, error }；后端没有这个接口（旧 exe）→ 抛「后端流式接口不可用」。 */
+    /** 流式请求：给 AI 翻译这类长响应用，只要上游持续吐字节就不会被空闲超时掐断。
+     *  opts: { timeoutMs, onChunk(text, acc) }；返回 { status, ok, text, error }。 */
     streamFetch: function (url, headers, method, body, opts) {
       opts = opts || {};
       var payload = { url: url, headers: headers || {}, method: method || 'GET', body: body };
       if (opts.timeoutMs) payload.timeoutMs = opts.timeoutMs;
-      /* Tauri：SSE 改成 Tauri Channel 传帧。帧结构 {type:'head'|'chunk'|'error'} 与原后端一致，
-       * 调用方（87-ai.js）拿到的 {status, ok, text, error} 语义不变。 */
+      /* 流式帧经 Channel 传回：{type:'head'|'chunk'|'error'}，调用方拿到的结果形状不变 */
       if (TAURI_INVOKE && TAURI_CHANNEL) {
         return Promise.resolve().then(function () {
           var ch = new TAURI_CHANNEL();
@@ -210,8 +210,8 @@ var FS = (function () {
           });
         });
       }
-      /* 没有 Tauri Channel 就没有流式通道。这里宁可明确报错，也不退回「缓冲式」请求：
-       * 那种退让会让 AI 翻译在长响应下被截断，看起来像「模型答到一半停了」。 */
+      /* 没有流式通道就明确报错，不退回缓冲式请求：
+       * 那种退让会让长响应被截断，看起来像「模型答到一半停了」。 */
       return Promise.reject(new Error('当前载体不支持流式请求，请从桌面程序运行'));
     }
   };
@@ -254,9 +254,8 @@ var FS = (function () {
   }
 
   /**
-   * 选择文件夹并**直接拿到真实绝对路径**（v3.0.5）。
-   * 程序后端可用时走原生对话框，返回 {path, name, handle:null}，
-   * 不再受「浏览器不返回磁盘路径」限制；后端离线才退回浏览器句柄 + 库根反查。
+   * 选择文件夹并直接拿到真实绝对路径：后端可用时走原生对话框，返回 {path, name, handle:null}；
+   * 后端离线才退回浏览器句柄 + 库根反查。
    */
   function pickDirectoryPath(idHint) {
     return Host.ensure().then(function (ok) {
@@ -296,19 +295,18 @@ var FS = (function () {
   function getLibraryRoot() { return Store.kvGet('libraryRoot', null); }
 
   /**
-   * 尝试把 FileSystemDirectoryHandle 还原成绝对路径。
-   * 浏览器出于安全限制不返回磁盘路径；但素材库根句柄在本地存着，
-   * 因此可以用 isSameEntry 在库根下做有界搜索，还原「根\分类\素材文件夹」。
-   * 找不到（例如选的是库外的文件夹）返回 null，调用方提示用户手动粘贴完整路径。
+   * 把 FileSystemDirectoryHandle 还原成绝对路径。
+   * 浏览器不返回磁盘路径，只能拿库根句柄做有界搜索，还原「根\分类\素材文件夹」。
+   * isSameEntry 返回 Promise，必须 await——直接当布尔用会恒为真，把任意目录当成库根。
+   * 找不到（例如选的是库外文件夹）返回 null，调用方提示用户手动粘贴完整路径。
    */
   function resolveDirectoryPath(handle) {
     if (!handle || typeof handle.isSameEntry !== 'function') return Promise.resolve(null);
     return getLibraryRoot().then(async function (root) {
       if (!root || typeof root.isSameEntry !== 'function') return null;
       var rootPath = App.libraryRoot();
-      // 关键一致性校验：库根【句柄】必须与库根【路径字符串】是同一个目录。
-      // 用户曾分别用两种方式选过库根，句柄指向 Perula 源文件夹、路径字符串却是 本地素材库，
-      // 导致 BFS 把“源文件夹的 rel”拼到错误根路径上，生成 G:\...\本地素材库\<源文件夹名> 的假路径。
+      // 库根句柄与库根路径必须是同一个目录：两者分别选过不同位置时，
+      // 搜索会把相对路径拼到错误根上，生成一个并不存在的假路径。
       var rootLast = String(rootPath.replace(/[\\/]+$/, '').split('\\').pop() || '').toLowerCase();
       var handleName = String(root.name || '').toLowerCase();
       if (rootLast && handleName && rootLast !== handleName) {
@@ -318,7 +316,7 @@ var FS = (function () {
       var ok = await ensurePermission(root, 'read');
       if (!ok) return null;
       try {
-        if (handle.isSameEntry(root)) return rootPath;
+        if (await handle.isSameEntry(root)) return rootPath;
         var queue = [{ dir: root, rel: '', depth: 0 }];
         var visited = 0;
         while (queue.length && visited < 2500) {
@@ -329,7 +327,7 @@ var FS = (function () {
             for await (var entry of cur.dir.values()) {
               if (entry.kind !== 'directory' && entry.kind !== 'file') continue;
               var rel = cur.rel ? cur.rel + '\\' + entry.name : entry.name;
-              if (typeof entry.isSameEntry === 'function' && entry.isSameEntry(handle)) {
+              if (typeof entry.isSameEntry === 'function' && entry.name === handle.name && await entry.isSameEntry(handle)) {
                 return joinWinPath(rootPath, [rel]);
               }
               if (entry.kind === 'directory' && cur.depth < 5) queue.push({ dir: entry, rel: rel, depth: cur.depth + 1 });
@@ -365,9 +363,9 @@ var FS = (function () {
     }).catch(function () { return false; });
   }
 
-  /** v3.0.3（用户要求「断开后端也能验证是否已下载」）：把「存储目录 + 文件名」换算成**库根相对路径**（FSA 分支用）。
-   *  dir 可能是 Windows 绝对路径（用 App.libraryRoot() 前缀剥掉）或历史遗留的相对路径；
-   *  映射不到库根下（不是绝对路径也不在库根内）时返回 ''，表示 FSA 分支不可用。 */
+  /** 把「存储目录 + 文件名」换算成库根相对路径，供目录句柄分支使用。
+   *  dir 可能是 Windows 绝对路径（剥掉库根前缀）或相对路径；
+   *  映射不到库根下时返回 ''，表示这条分支不可用。 */
   function relPathFromLibrary(dir, name) {
     var d = normalizeWinPath(dir || '');
     if (!d) return '';
@@ -386,16 +384,16 @@ var FS = (function () {
     return rel ? (rel + '\\' + n) : n;
   }
 
-  /** v3.0.3：三档「文件是否真的在磁盘上」判定（用户要求：断开后端也能验证）。
-   *   ① 后端可用 → FS.host.exists(absPath)（权威；与改前行为一致）
-   *   ② 后端不可用、但**浏览器库根句柄可用且拿到读权限** → relativePathExists(relPath)（权威）
-   *   ③ 两者都没有 / 无法判定 → { known:false } ⇒ 调用方**静默保持乐观标记**（用户要求不加标注；但不得把"无法判定"当成"没有文件"）
+  /** 判断文件是否真的在磁盘上，后端离线时也要能答。
+   *   ① 后端可用 → 问后端（权威）
+   *   ② 后端不可用但库根句柄有读权限 → 按相对路径查（权威）
+   *   ③ 两者都不可用 → { known:false }，调用方保留原标记；不能把「无法判定」当成「没有文件」
    *  返回 Promise<{known:true, exists:boolean, via:'host'|'fsa'} | {known:false}> */
   function diskFileState(absPath, relPath) {
     function viaHost() {
       if (!absPath || !FS.host || typeof FS.host.exists !== 'function' || typeof FS.hostEnsure !== 'function') return Promise.resolve(null);
       return FS.hostEnsure().then(function (ok) {
-        if (!ok) return null;                        // 后端不可用 ⇒ 让位给 FSA 分支（不再像旧版那样直接放弃）
+        if (!ok) return null;                        // 后端不可用 ⇒ 让位给 FSA 分支，而不是直接放弃
         return FS.host.exists(absPath).then(function (k) { return { known: true, exists: k === 'file', via: 'host' }; });
       }).catch(function () { return null; });        // 后端刚掉线：也退化到 FSA 分支
     }
@@ -414,8 +412,8 @@ var FS = (function () {
       .catch(function () { return { known: false }; });
   }
 
-  /** v3.0.3：用浏览器库根句柄列出**库根相对目录**下的文件（后端离线时的降级枚举，与后端 scan(dir,0) 同口径）。
-   *  返回 {usable, exists, names}：usable=false ⇒ 句柄/读权限不可用（**不可判定**，不能让调用方误判成"没有文件"）。 */
+  /** 用库根句柄列出库根相对目录下的文件，供后端离线时降级枚举，口径与后端 scan 一致。
+   *  返回 {usable, exists, names}：usable=false 表示不可判定，不能被当成「没有文件」。 */
   function listLibraryDir(relDir) {
     var parts = String(relDir || '').replace(/^[\\/]+/, '').split(/[\\/]+/).filter(Boolean);
     return getLibraryRoot().then(function (root) {
@@ -510,23 +508,21 @@ var FS = (function () {
   }
 
   /**
-   * 打开本地路径。
-   * 本地后端在线时交给后端用资源管理器打开；
-   * 后端离线时降级为复制路径到剪贴板。
-   * 只接受完整绝对路径（G:\… / \\server\…）；不完整路径不再猜根目录，
+   * 打开本地路径：后端在线时交给资源管理器，离线时降级为复制路径。
+   * 只接受完整绝对路径（G:\… / \\server\…）；不猜根目录，
    * 否则 explorer 定位失败会回退到桌面。
    */
   function openPath(path) {
     var raw = normalizeWinPath(path);
     if (!raw) { Toast.warn('未提供可打开的本地路径'); return; }
-    // 只有完整绝对路径才交给 explorer；不完整的相对路径过去会定位失败并回退到桌面
+    // 不完整的相对路径交给 explorer 会定位失败并回退到桌面，所以先拦下
     if (!isAbsoluteWinPath(raw)) {
       copyText(raw);
       Toast.warn('该本地路径不完整（' + raw + '），无法直接打开。请在编辑页补全为 G:\\… 或 \\\\服务器\\… 的完整路径（已复制当前内容）。', 6200);
       return;
     }
     var abs = raw;
-    // 打开/定位统一由本地后端负责（vrcpath 协议已不再使用）；先给即时反馈，再做带重试的后端探测
+    // 先给即时反馈，再做带重试的后端探测：刚启动时后端可能还没就绪
     Toast.info('正在打开资源管理器（若后端刚启动会稍等 1~3 秒）…', 1800);
     hostEnsureRetry(3).then(function (ok) {
       if (!ok) {
@@ -543,12 +539,10 @@ var FS = (function () {
     });
   }
 
-  /** 素材文件夹重命名：标题/角色名修改后同步。优先交给本地后端（整目录 rename，快且不复制文件）；后端不在时回退浏览器句柄复制+删除。
-   *  v2.5.16（用户反馈「连着后端改名却仍走网页实现」）——**真因**：旧实现用 `libraryRoot() + 分类名 + folderName(旧标题)`
-   *  重建源路径，而磁盘上的文件夹名保留的是**导入时的原标题**。真实库实测（398 条有存储路径的素材）：
-   *  **293 条**磁盘名 ≠ 用当前标题重建的名字（父目录 100% 一致）。于是源路径不存在 → 后端 /api/move 抛
-   *  「源不存在」→ 代码**静默回退**到浏览器句柄复制+删除（慢、可能弹权限、多半直接失败）。
-   *  现在：源目录一律取素材自己的存储路径；后端在线时失败就**明说原因**，不再偷偷换成浏览器实现。 */
+  /** 素材文件夹改名：标题或角色名改完后同步磁盘目录。
+   *  源目录必须取素材自己的存储路径——磁盘文件夹名保留的是导入时的原标题，
+   *  用当前标题重建多半根本不存在，后端只会报「源不存在」。
+   *  后端在线却失败时明说原因，不再静默退回浏览器复制 + 删除。 */
   function renameAssetFolder(oldName, newName, categoryLabel, asset) {
     if (!oldName || oldName === newName) return Promise.resolve(false);
     function browserRename() {
@@ -581,7 +575,7 @@ var FS = (function () {
       });
     }
     var rootPath = App.libraryRoot();
-    /* 源目录优先取素材**自己的存储路径**（权威），没有才退回「根目录 + 分类 + 旧名」 */
+    /* 源目录优先取素材自己的存储路径；没有才退回「根目录 + 分类 + 旧名」 */
     var curPath = '';
     try { curPath = (asset && App.primaryLocalPath) ? App.primaryLocalPath(asset) : ''; } catch (e) { curPath = ''; }
     var parentDir, oldAbs;
@@ -594,8 +588,8 @@ var FS = (function () {
     }
     var newAbs = joinWinPath(parentDir, [newName]);
     if (oldAbs.toLowerCase() === newAbs.toLowerCase()) return Promise.resolve(false);
-    /* v5.4：改名只是「顺手同步磁盘目录」，绝不能拖住保存 —— 后端 8 秒不应答就放行，
-     * 旧目录本来就缺失（ENOENT）时也只提示一句，不拿红字吓人。 */
+    /* 改名只是顺手同步磁盘目录，不能拖住保存：后端 8 秒不应答就放行，
+     * 旧目录本来就缺失时也只提示一句，不拿红字吓人。 */
     var TIMEOUT = { timeout: true };
     function withTimeout(promise, ms) {
       return Promise.race([
@@ -617,8 +611,8 @@ var FS = (function () {
         }
         return true;
       }, function (err) {
-        /* 后端在线却失败：**不再静默**换成浏览器复制+删除（旧路径不存在时那只会留下半成品），
-         * 把后端给的原因显示出来，让用户知道文件夹没改成。 */
+        /* 后端在线却失败就明说原因：此时再回退到复制 + 删除，
+         * 源路径不存在时只会留下半成品。 */
         var msg = (err && err.message) || String(err);
         if (typeof console !== 'undefined' && console.warn) console.warn('[rename] 后端改名失败：' + msg + '（' + oldAbs + ' → ' + newAbs + '）');
         if (/ENOENT|not found|不存在|no such file/i.test(msg)) {
@@ -633,8 +627,7 @@ var FS = (function () {
   }
 
   /**
-   * 系统级移动（改写路径 = rename）：只由本地后端执行（vrcpath 协议已不再使用）。
-   * 返回 'host' | false。
+   * 系统级移动（改名即移动）：只由本机后端执行，返回 'host' | false。
    */
   async function movePath(src, dst) {
     var s = normalizeWinPath(src);
@@ -664,7 +657,7 @@ var FS = (function () {
     }
   }
 
-  /** 系统级复制：只由本地后端执行（fs.cpSync 整项复制、源保留）。返回 'host' | false */
+  /** 系统级复制：只由本机后端执行，源保留；返回 'host' | false */
   async function copyPath(src, dst) {
     var s = normalizeWinPath(src);
     var d = normalizeWinPath(dst);
@@ -708,7 +701,7 @@ var FS = (function () {
     if (!isAbsoluteWinPath(s) || !blob) return Promise.resolve(false);
     return Host.ensure().then(function (ok) {
       if (!ok) { Toast.warn('程序后端未就绪：无法把文件写到磁盘路径', 5200); return false; }
-      /* v6.1：能走原始字节就别绕 base64（写封面、导出图片都走这条） */
+      /* 能走原始字节就别绕 base64：写封面、导出图片都走这条 */
       if (Host.bytesSupported && Host.bytesSupported() && blob.arrayBuffer) {
         return blob.arrayBuffer().then(function (ab) {
           return Host.writeBytes(s, new Uint8Array(ab)).then(function () { return true; });
@@ -722,9 +715,9 @@ var FS = (function () {
     }).catch(function (e) { Toast.warn('写入文件失败：' + (e && e.message), 5600); return false; });
   }
 
-  /** 用后端把 URL 直接下载到本地路径（同名文件存在时返回 {exists:true}，不覆盖；
-   *  v2.5.0：「重新下载」传 overwrite=true，后端先下到 <file>.redl 成功后再替换旧文件）。
-   *  自动附带该站点已保存的 Cookie；后端会拒绝把 HTML 登录页/错误页保存成下载文件。 */
+  /** 用后端把 URL 直接下载到本地路径；同名文件存在时返回 {exists:true}，不覆盖。
+   *  overwrite=true 时先下到临时文件、成功后再替换，中途失败不会毁掉旧文件。
+   *  自动带上该站点已保存的 Cookie；后端会拒绝把 HTML 登录页 / 错误页存成下载文件。 */
   function downloadToPath(url, p, headers, jobId, overwrite) {
     var s = normalizeWinPath(p);
     if (!isAbsoluteWinPath(s) || !isHttpUrl(url)) return Promise.resolve(false);
@@ -751,11 +744,10 @@ var FS = (function () {
     });
   }
 
-  /** 存到**用户自己选**的位置：原生「另存为」优先，没有原生对话框时退回浏览器下载。
-   *  v6.2：以前一律走 <a download>，WebView2 会把它静默丢进系统「下载」文件夹 ——
-   *  不弹窗、不留路径提示，用户经常找不到文件、反复导出堆一堆同名副本。
-   *  返回 {status, path}：saved 已写盘 / cancelled 用户取消 / download 走了浏览器下载 / failed 写盘失败。
-   *  取消是正常操作，这里静默返回，不弹错误。 */
+  /** 存到用户自己选的位置：原生「另存为」优先，没有原生对话框才退回浏览器下载。
+   *  一律走 <a download> 会被壳静默丢进系统「下载」文件夹——不弹窗也没有路径提示，
+   *  用户常常找不到文件、反复导出堆同名副本。
+   *  返回 {status, path}：saved / cancelled / download / failed；取消是正常操作，静默返回。 */
   function saveToUserPath(blob, defaultName, opts) {
     opts = opts || {};
     if (!TAURI_INVOKE) {
@@ -824,8 +816,10 @@ var FS = (function () {
 
   /** 导出 CSV（Excel 友好，带 BOM） */
   function downloadCSV(assets) {
+    /* 最后一列是素材编号而不是内部主键：内部 id 只在库里有意义，
+     * 抄到表里对不上任何东西；编号才是能拿去和好友核对的那一个。 */
     var head = ['自定义标题', '原标题', '来源', '分类', '标签', '支持角色', '商店链接', '本地路径',
-      '上架日期', '作者/店铺', '喜欢', '备注', '添加时间', 'ID'];
+      '上架日期', '作者/店铺', '喜欢', '备注', '添加时间', '素材编号'];
     var lines = [head.map(csvCell).join(',')];
     assets.forEach(function (a) {
       lines.push([
@@ -836,7 +830,7 @@ var FS = (function () {
         (a.paths || []).map(function (p) { return p.path; }).join(' | '),
         a.publishedAt ? fmtDate(a.publishedAt) : '',
         a.author || a.shop || '', a.favorite ? '是' : '否',
-        (a.note || '').replace(/\r?\n/g, ' '), fmtDate(a.createdAt, true), a.id
+        (a.note || '').replace(/\r?\n/g, ' '), fmtDate(a.createdAt, true), App.fileIdOf(a)
       ].map(csvCell).join(','));
     });
     var blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
@@ -856,7 +850,7 @@ var FS = (function () {
 
   /** 生成「建议目录结构」文本 + 一键创建脚本 */
   function buildStructurePlan(assets, rootPath) {
-    rootPath = rootPath || App.libraryRoot();   // v3.0.4：由应用目录推导，不再硬编码个人路径
+    rootPath = rootPath || App.libraryRoot();   // 由应用目录推导，不写死机器路径
     var tree = {};
     assets.forEach(function (a) {
       var cat = App.categoryLabel(a.category);
@@ -932,7 +926,7 @@ var FS = (function () {
     pickDirectory: pickDirectory, pickDirectoryPath: pickDirectoryPath, setLibraryRoot: setLibraryRoot, getLibraryRoot: getLibraryRoot,
     resolveDirectoryPath: resolveDirectoryPath,
     relativePathExists: relativePathExists, completeRelativePaths: completeRelativePaths,
-  /* v3.0.3：断开后端也能验证「是否已下载」——三档判定 + 库根相对路径换算 + 离线目录枚举 */
+  /* 后端离线也能核对「是否已下载」：三档判定 + 库根相对路径换算 + 离线目录枚举 */
   relPathFromLibrary: relPathFromLibrary, diskFileState: diskFileState, listLibraryDir: listLibraryDir,
     ensurePermission: ensurePermission, scanDirectory: scanDirectory,
     createCategoryFolders: createCategoryFolders, openPath: openPath,

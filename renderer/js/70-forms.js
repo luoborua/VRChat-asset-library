@@ -1,48 +1,42 @@
-/* ============ 70-forms.js ============ */
-/* =====================================================================
- * 70-forms.js  —  素材详情视图 / 新增·编辑表单 / 信息获取交互
- *   抓取交互遵循「默认手动粘贴源码（零外部请求）」
- * ===================================================================== */
+/* 素材详情视图与新增 / 编辑表单：
+ * 负责详情弹窗的组装、字段编辑、封面与图集处理，以及信息抓取与填充交互。
+ * 依赖 App / Store / FS / Importer / Fetchers 等全局模块，自身不直接读写磁盘。
+ * 抓取默认「手动粘贴源码」，即零外部请求；联网动作一律交给后端与 Fetchers。
+ */
 
 var Modals = {
 
   /**
-   * 素材变更后的统一刷新入口（保存 / 自动补全 / 导入自动保存共用，避免多种刷新行为）：
-   *   renderAll → 定位并稳定显示目标卡片；
-   *   keepModal=false 时关闭当前弹窗；
-   *   reopenDetail=true 时关闭后重新打开详情（用于详情页触发的后台自动补全）。
+   * 素材变更后的统一刷新入口：
+   * 能原地刷新就只换目标卡片，否则整页重渲染并重新定位；同时负责关闭或重开详情。
    */
   refreshAfterChange: function (target, opts) {
     opts = opts || {};
-    /* v2.5.2：素材改完时**不要**无脑「重新定位」——只要它还在当前页的网格里，就静默刷新，
-     * 不换页、不滚动、不抢视线（用户原话：不会触发排序变化时就不要从头定位）。
-     * 只有它被筛掉 / 被排到别的页了，才走 revealAsset 去把它找出来。 */
+    /* 只要目标还在当前页就静默刷新，不换页、不滚动 —— 重渲染后从头定位会抢走视线。
+     * 只有被筛掉或被排到别的页时，才走 revealAsset 把它找出来。 */
     var wasOnPage = !!(target && target.id && document.querySelector('.card[data-id="' + target.id + '"]'));
-    /* v5.2（用户要求）：编辑一条素材时，只要那张卡还在屏幕上，就只换这一张，不动整页。 */
+    /* 编辑一条素材时，只要那张卡还在屏幕上，就只换这一张，不动整页 */
     if (wasOnPage && !opts.keepModal && target && target.id && UI.refreshCard && UI.refreshCard(target.id)) {
-      /* v5.7：只换卡片也要把编辑弹窗关掉；关掉之后若底下还压着这条素材的详情页，
-       * 详情页里的「存储路径 / 标题」也得跟着重建 —— 否则看到的还是改名前的旧路径。 */
+      /* 只换卡片也要关掉编辑弹窗；底下若还压着这条素材的详情，也要跟着重建，
+       * 否则详情里看到的仍是改名前的路径。 */
       Modal.closeTop();
       if (App.refreshAssetView) App.refreshAssetView(target);
       return;
     }
-    var keepY = (typeof window !== 'undefined') ? (UI.sY()) : 0;   // v2.5.2：重渲染前记住滚动位置
+    var keepY = (typeof window !== 'undefined') ? (UI.sY()) : 0;   // 重渲染前记住滚动位置
     UI.renderAll();
     var stillOnPage = !!(target && target.id && document.querySelector('.card[data-id="' + target.id + '"]'));
-    /* v2.5.3 修复：只有「原地不动」时才做 140ms 后的滚动兜底。
-     * 目标被筛掉 / 被排到别的页时要走 revealAsset 定位，而这个定时器会在 80ms 定位之后把它拽回旧位置
-     * ——「编辑后目标不在当前页 → 瞬间定位」就会失效（用户看到的是回到旧位置）。 */
+    /* 只有「原地不动」时才做 140ms 后的滚动兜底：
+     * 目标被筛掉或被排到别的页时要走 revealAsset 定位，这个定时器会把定位结果拽回旧位置。 */
     var willReveal = !opts.keepModal && !!(target && target.id) && !(wasOnPage && stillOnPage);
     if (typeof window !== 'undefined' && keepY) {
       UI.scrollTo(keepY);                                                                        // 渲染后立刻还原
       if (!willReveal) setTimeout(function () { UI.scrollTo(keepY); }, 140);                      // 卡片/封面加载后文档变高，再无声兜一次（否则可能被钳到顶部）
     }
     if (opts.keepModal) {
-      /* v3.0.0 修复「弹窗劫持」（P1）：原地刷新**只允许**更新「用户当前正在看的那个素材」的详情弹窗。
-       * 旧判据只看「顶层是不是详情弹窗」——用户正看着 B 的详情时，A 的后台任务（自动补全 / 重新解析 /
-       * 简介汉化 / 封面补写）一完成就会把弹窗内容换成 A（顶层的 handle 不变，只是原地重建了内容）。
-       * 现在必须素材 id 一致（App.detailAssetId 由 Modals.syncDetailId 维护）；不是同一个素材就只保留
-       * 上面已经做完的网格刷新，**绝不碰别人的弹窗**（不重开、不滚动、不改内容）。 */
+      /* 原地刷新只允许更新「用户当前正在看的那一条」的详情弹窗。
+       * 后台任务完成时若只看栈顶，会把用户正看着的 B 换成 A —— 必须素材 id 一致，
+       * 否则只保留上面已完成的网格刷新，绝不碰别人的弹窗。 */
       var top = Modal.stack && Modal.stack.length ? Modal.stack[Modal.stack.length - 1] : null;
       var sameDetail = !!(top && top.kind === 'detail' && target && target.id && App.detailAssetId === target.id);
       if (sameDetail) Modals.detail(target.id, top, { noAutoEnrich: true });
@@ -58,10 +52,8 @@ var Modals = {
     if (opts.reopenDetail && target && target.id) Modals.detail(target.id);
   },
 
-  /** v3.0.0：同步「当前详情弹窗展示的是哪一个素材」→ App.detailAssetId（栈顶往下第一个详情弹窗）。
-   *  打开详情 / 原地更新详情 / 关闭详情后都要调用；没有详情弹窗时置空串。
-   *  这是 refreshAfterChange(keepModal) 判定「能不能原地更新」的唯一依据——
-   *  后台任务完成时绝不允许把用户正在看的**另一个**素材的详情窗换成目标素材。 */
+  /** 同步「当前详情弹窗展示的是哪一条素材」到 App.detailAssetId（栈顶往下第一个详情弹窗）。
+   *  没有详情弹窗时置空；这是 refreshAfterChange 判断能否原地复用的唯一依据。 */
   syncDetailId: function () {
     var h = null;
     if (Modal.stack) {
@@ -73,7 +65,7 @@ var Modals = {
     return App.detailAssetId;
   },
 
-  /** v2.3.21：更新日志（点顶栏版本号打开）——按次版本号（2.3 / 2.2 / …）聚合，功能为主、修复一句带过 */
+  /** 更新日志（点顶栏版本号打开），按次版本号聚合展示 */
   changelog: function () {
     var RECENT = 3;   // 默认展开最近 3 个「次版本」，更早的折起来
     var rows = (typeof CHANGELOG !== 'undefined' ? CHANGELOG : []);
@@ -114,12 +106,12 @@ var Modals = {
   /* ------------------------------------------------------------------
    * 素材详情
    * ------------------------------------------------------------------ */
+  /** 打开或原地重建一条素材的详情弹窗 */
   detail: function (id, targetHandle, opts) {
-    opts = opts || {};   // v2.5.3：noAutoEnrich=true 时不再自动补全（防「刷新详情 → 再次判定 → 再次补全」死循环）
+    opts = opts || {};   // noAutoEnrich：本条重渲染不再触发自动补全，避免「刷新 → 判定 → 再补全」
     var a = App.assets.find(function (x) { return x.id === id; });
     if (!a) { Toast.err('未找到该素材'); return; }
-    /* v2.5.14（用户批复 · 修3）：打开详情页就顺手把封面补写到磁盘（covers 目录 + 素材文件夹），
-     * 缺哪补哪、静默；浏览器里没有 blob 时允许联网补抓一次。不阻塞界面。 */
+    /* 打开详情就顺手把封面补写到磁盘（covers 目录 + 素材文件夹），缺哪补哪、静默，不阻塞界面 */
     try { App.ensureCoverOnDisk(a, { quiet: true, allowFetch: true }); } catch (e) {}
 
     /** 标题清洗：去掉「- 店名 - BOOTH」类站点后缀 */
@@ -140,7 +132,7 @@ var Modals = {
         el('div', { class: 'kv-v' }, typeof node === 'string' ? [document.createTextNode(node)] : [node])
       ]);
     }
-    // v2.5.2：section 支持右上角动作节点（如「版本与下载」标题右侧的「重新解析」）
+    // section 支持标题右侧的动作节点（如「版本与下载」旁的「重新解析」）
     function section(title, content, rightNode) {
       if (!content && !rightNode) return null;
       return el('section', { class: 'detail-section' }, [
@@ -162,7 +154,7 @@ var Modals = {
       cover.innerHTML = '';
       cover.appendChild(el('img', { src: url, alt: title }));
     });
-    // v2.3.5：应用内没有封面时，按商品ID 从素材本地路径认领（命中即当封面显示并写入封面缓存）
+    // 应用内没有封面时，按商品 ID 从素材本地路径认领（命中即当封面显示并写入封面缓存）
     if (!a.hasCover && !a.coverURL) {
       App.adoptDiskCover(a).then(function (hit) {
         if (!hit) return;
@@ -170,7 +162,7 @@ var Modals = {
           if (!url) return;
           cover.innerHTML = '';
           cover.appendChild(el('img', { src: url, alt: title }));
-          // v2.3.16：只把这一张卡片的封面补上，不做整列表重渲染（重渲染会打断滚动/闪烁，也让人以为「又刷新了一次」）
+          // 只补这一张卡片的封面：整列表重渲染会打断滚动，也让人以为又刷新了一次
           var card = document.querySelector('.card[data-id="' + a.id + '"]');
           if (card) {
             var cv = card.querySelector('.card-cover');
@@ -196,18 +188,18 @@ var Modals = {
       function setLabel(txt) { var t = labelNode(); if (t) ICONS.apply(t, txt); }
       if (btn) { btn.disabled = true; setLabel('\u23F3 下载中 …'); }
       function restore() { if (btn) { btn.disabled = false; setLabel(origLabel || '\u2B07 下载'); } }
-      // v2.3.4：不再直接下载，改为入队（由下载队列执行，悬浮窗显示进度；v2.3.13 起可并发，默认 4）
+      // 统一走下载队列（进度见悬浮窗，可并发），不直接发起下载
       Importer.ensureStoragePathQuiet(a).then(function (folderPath) {
         if (!folderPath) { Toast.err('无法创建存储路径，已取消下载。请检查「设置 → 本地库与整理」的素材库根目录与程序后端状态。', 6200); restore(); return; }
         var dst = joinWinPath(folderPath, [name || 'download']);
         var queued = DLQueue.enqueue({ url: url, name: name || '下载文件', dst: dst, assetId: a.id,
           overwrite: !!opts.overwrite, expectSize: opts.expectSize || 0 });
-        if (queued && queued.state === 'running') {   // v2.5.1（P1）：正在下的文件不重复入队
+        if (queued && queued.state === 'running') {   // 正在下载的文件不重复入队
           Toast.info('该文件正在下载中，稍后再点「重新下载」', 3600);
           restore();
           return;
         }
-        // v2.3.10：入队后按队列真实状态刷新（排队中 → 下载中 xx%），不再写死「排队中」
+        // 入队后按队列真实状态刷新（排队中 → 下载中 xx%），不写死「排队中」
         if (btn) { btn.disabled = true; }
         App.syncDownloadButtons();
         Toast.info((opts.overwrite ? '已加入下载队列（重新下载，将覆盖旧文件）：' : '已加入下载队列：') + (name || '下载文件') + '（进度见右下「下载任务」悬浮窗）', 3600);
@@ -244,8 +236,13 @@ var Modals = {
       [ICONS.make('edit', { size: 15 }), document.createTextNode('编辑')]);
     var deleteBtn = el('button', {
       class: 'btn btn-danger-ghost', onclick: function () {
-        var doDel = function () { App.remove(a.id).then(function () { Modal.closeTop(); UI.renderAll(); Toast.ok('已删除该素材'); }); };
-        if (App.settings.confirmDelete) Modal.confirm('确定要删除「' + title + '」吗？此操作不可撤销。', { okText: '删除' }).then(function (ok) { if (ok) doDel(); });
+        var doDel = function () {
+          App.remove(a.id).then(function (asset) {
+            Modal.closeTop(); UI.renderAll();
+            App.deletedToast([asset || a]);      // 10 秒内可撤回，错过就在左侧「回收站」里找回
+          });
+        };
+        if (App.settings.confirmDelete) Modal.confirm('确定要删除「' + title + '」吗？\n\n删掉的记录会进回收站，48 小时内可以找回。', { okText: '删除' }).then(function (ok) { if (ok) doDel(); });
         else doDel();
       }
     }, [ICONS.make('trash', { size: 15 }), document.createTextNode('删除')]);
@@ -269,9 +266,9 @@ var Modals = {
       a.hidden ? el('span', { class: 'chip' }, '已隐藏') : null
     ]));
 
-    /* v2.5.8（用户反馈）：这段是**上方按钮的注释**，必须紧贴按钮、并以 * 起头（不能飘在头部下方远处）。 */
+    /* 这行提示解释的是上方主按钮，所以要贴着按钮放、并以 * 起头 */
     var hint = el('div', { class: 'action-hint', text: '* ' +
-      ((a.paths || []).length ? '已关联本地路径，点击「打开文件」定位；有多个路径时在下方逐个打开。'
+      ((a.paths || []).length ? '已关联本地路径，点击「打开文件」定位。'
       : ((a.downloadLinks || []).length ? '尚未关联本地路径——先去下载，下载后请登记路径或使用「文件夹导入」。'
       : '尚未关联本地路径，也没有下载链接——先补充下载链接（也可直接手动导入本地文件）。')) });
 
@@ -280,7 +277,7 @@ var Modals = {
       var tstate = UI.tagFilterState(t);
       return el('span', { class: 'tag tag-click' + (Smart.isUntranslated(t) ? ' tag-untrans' : '') + UI.tagFilterClass(tstate),
         title: UI.tagFilterTitle(t, tstate),
-        /* v3.0.0（用户要求）：详情页标签也走三态（不再「替换成只筛这一个」）：默认 → 必须包含 → 排除 → 默认 */
+        /* 详情页标签同样走三态：默认 → 必须包含 → 排除 → 默认 */
         onclick: function () { Modal.closeTop(); UI.cycleTagFilter(t); } },
         t + (Smart.isUntranslated(t) ? '（待翻译）' : ''));
     })) : null;
@@ -288,11 +285,10 @@ var Modals = {
     var avatarChips = !isAvatar && App.filterAvatars(a).length ? el('div', { class: 'chip-wrap' },
       App.filterAvatars(a).map(function (v) { return el('span', { class: 'chip chip-av' }, App.avatarLabel(v)); })) : null;
 
-    /** BOOTH 商品链接统一显示成中文页。实测两条硬规则：
-     *   · 主域名：语言段是必需的——https://booth.pm/items/8842608 → 404，https://booth.pm/zh-cn/items/8842608 → 200
-     *   · 自定义店铺：语言段反而是错的——https://r2f.booth.pm/zh-cn/items/8783321 → 404（ja / en 同样 404），
-     *     必须是不带语言段的 https://r2f.booth.pm/items/8783321 → 200
-     *  所以只对主域名加 zh-cn；自定义店铺保持原样，并顺手去掉历史误加的语言段。 */
+    /** BOOTH 商品链接统一显示中文页，两条硬规则：
+     *   · 主域名必须带语言段：/items/xxx → 404，/zh-cn/items/xxx → 200
+     *   · 自定义店铺反而不能带语言段：<店铺>.booth.pm/zh-cn/items/xxx → 404
+     *   所以只给主域名加 zh-cn，自定义店铺保持原样。 */
     function boothZhUrl(url) {
       var u = String(url || '');
       var m = u.match(/^(https?:\/\/)(?:www\.)?([^\/]*booth\.pm)\/(?:(?:ja|zh-cn|en|ko)\/)?(items\/.*)$/i);
@@ -327,14 +323,14 @@ var Modals = {
         ? ('已购买 ' + purchasedVer.length + ' 个版本' + (sum ? '，合计 ' + purchasedPriceLabel(sum, cur) : '') + '；灰色 = 未购买，不计价')
         : '未解析到已购买版本（灰色 = 未购买），价格记为 0';
     }
-    // v2.5.2：商品价不再显示（变体价更准）——详情页不再有「已购买 N 个版本，合计 …」这行
+    // 商品价统一看变体价，详情页不再单列合计行
     var activeTotalNode = null;
 
-    // 「获取更新」：手动解析已购版本订单页里的下载文件（订单链接存在但 files 尚未解析时补充）
-    // v2.5.0：改为共用 Importer.applyOrderFilesToVersion（批量获取更新走同一份逻辑）
+    // 「获取更新」：解析已购版本订单页里的下载文件（订单链接存在但 files 尚未解析时补充）
+    // 与批量获取更新共用同一份应用逻辑
     function orderFilesFromItem(it, v) { return Importer.applyOrderFilesToVersion(it, v); }
-    // v2.5.0：常驻黄色「获取更新」——首次点它补全缺失文件，之后点它刷新已解析的文件（含作者新上传的文件）
-    /** v2.5.1：抓商品页——BOOTH 走公开 JSON；Gumroad 走商品页 data-page；抓不到返回 null */
+    // 「获取更新」常驻：先补缺失文件，之后用来刷新已解析文件（含作者新上传的）
+    /** 抓商品页：BOOTH 走公开 JSON，Gumroad 走商品页 data-page，抓不到返回 null */
     function fetchItemInfo() {
       if (typeof Net === 'undefined' || !Net.networkAllowed()) return Promise.resolve(null);
       var itemId = String(a.itemId || '').trim();
@@ -353,8 +349,8 @@ var Modals = {
       }
       return Promise.resolve(null);
     }
-    /* v2.5.1：只要这条素材还能抓到商品页/订单页，就给「获取更新」入口——
-     * 免费素材（没有已购变体）以前完全没有这个按钮，白瞎了「获取更新」。 */
+    /* 只要这条素材还能抓到商品页 / 订单页，就给「获取更新」入口：
+     * 免费素材没有已购变体，同样需要刷新文件。 */
     var canUpdate = purchasedVer.length > 0
       || !!(a.itemId && String(a.itemId).trim())
       || (a.links || []).some(function (l) { return isHttpUrl(l.url); });
@@ -371,9 +367,8 @@ var Modals = {
             var parsed = Importer.parseOrderPage(url, r.text);
             var items = parsed.items;
             if (!items.length) return { url: url, item: null };
-            /* v2.5.2：不做「无脑取第一条」——那会把别的商品的条目并进本条素材（会表现成「详情页变成另一个商品」）。
-             * 仍接受的情况：① itemId 对得上；② 订单页只有一条（一个订单页通常就一件商品）；③ 条目没带 itemId。
-             * 只有「多条且都对不上」才放弃更新。 */
+            /* 不无脑取第一条：那会把别的商品的条目并进来，表现成「详情页变成另一个商品」。
+             * 只接受 itemId 对得上、订单页只有一条、或条目没带 itemId 的情况。 */
             var myIid = String(a.itemId || '');
             function normU(u) { return String(u || '').replace(/[?#].*$/, '').replace(/\/+$/, '').toLowerCase(); }
             var myUrls = Object.create(null);
@@ -426,8 +421,8 @@ var Modals = {
             return;
           }
           return App.save(a).then(function () {
-            try { App.ensureCoverOnDisk(a, { quiet: true, allowFetch: true }); } catch (e) {}   // v2.5.14：解析完顺手补写封面
-            Modals.refreshAfterChange(a, { keepModal: true });   // v2.3.16：原地静默刷新，不关弹窗、不跳列表
+            try { App.ensureCoverOnDisk(a, { quiet: true, allowFetch: true }); } catch (e) {}   // 解析完顺手补写封面
+            Modals.refreshAfterChange(a, { keepModal: true });   // 原地静默刷新，不关弹窗、不跳列表
             var shopTxt = shop
               ? ((shop.files ? '；刷新 ' + shop.files + ' 个变体文件' : '') + (shop.priced ? '；未购价 ' + shop.priced + ' 个' : '')
                 + (shop.added ? '；新增变体 ' + shop.added + ' 个' : '') + (shop.links ? '；新增下载链接 ' + shop.links + ' 条' : ''))
@@ -438,13 +433,12 @@ var Modals = {
         });
       }
     }, ICONS.label('\u{1F504} 重新解析')) : null;
-    // v2.5.2：按钮上移到「版本与下载」标题右侧（右对齐），这里不再需要「已购买版本 / 版本·变体」副标签
     var verSectionNode = purchasedVer.length ? el('div', { class: 'ver-section' }, [
       el('div', { class: 'ver-list' }, purchasedVer.map(function (v) {
         return el('div', { class: 'ver-item on' }, [
           el('div', { class: 'ver-main' }, [
             el('b', { text: v.name || v.fileName || '（未命名版本）' }),
-            el('span', { class: 'grow' }),   // v2.5.2：价格靠右对齐（同一行，不占多行）
+            el('span', { class: 'grow' }),   // 撑开占位，价格与订单链接靠右
             el('div', { class: 'field-hint mono' }, [
               el('a', { href: v.orderUrl, target: '_blank', rel: 'noopener', title: v.orderUrl }, '订单链接')
             ])
@@ -452,8 +446,8 @@ var Modals = {
         ]);
       }))
     ]) : null;
-    // 统一的「已下载」检测：详情页所有下载按钮共用，渲染时按同名文件在存储目录下探测。
-    // 存储目录优先取 note=存储路径 的那条，不再只认 paths[0]（技术手册 §51.7）。
+    // 统一的「已下载」检测：详情页所有下载按钮共用，按同名文件在存储目录下探测。
+    // 存储目录优先取 note=存储路径 的那条，不能只认 paths[0]。
     function storageDirOf() {
       var ps = a.paths || [];
       var local = ps.filter(function (x) { return x && x.path; });
@@ -467,12 +461,7 @@ var Modals = {
       if (!name) return;
       a.downloadedFiles = uniq((a.downloadedFiles || []).concat([String(name)]));
     }
-    /**
-     * v2.3.2 统一的「已下载」标记：先按本地记录乐观标记，再用磁盘结果权威覆盖。
-     * 之所以不能只等权威结果：FS.hostEnsure() 有 4 秒「刚探测成功」缓存，后端刚掉线时
-     * 它会先返回 true，随后的真实请求失败若被吞掉，按钮就会错误地回到「⬇ 下载」。
-     */
-    /** v2.5.0：磁盘上已有该文件 → 按钮变浅红「重新下载」（可点，点击时后端覆盖旧文件） */
+    /** 磁盘上已有该文件 → 按钮变浅红「重新下载」（点击时后端覆盖旧文件） */
     function markRedownload(btn, dst, why) {
       btn.classList.remove('btn-primary');
       btn.classList.add('btn-redl');
@@ -489,13 +478,18 @@ var Modals = {
       ICONS.apply(btn, ('\u2B07 下载'));
       btn.title = '';
     }
+    /**
+     * 统一的「已下载」标记：先按本地记录乐观标记，再用磁盘结果权威覆盖。
+     * 不能只等权威结果：后端刚掉线时 FS.hostEnsure() 会因短时缓存先返回 true，
+     * 随后的真实请求失败若被吞掉，按钮就会错误地回到「⬇ 下载」。
+     */
     function markDownloaded(btn, name) {
       if (!btn || !name) return;
       var known = localKnown(name);
-      /* v3.0.3（用户要求「网页端断开后端后也能验证是否已下载」）：三档判定 ——
-       *   ① 后端可用 → FS.host.exists（权威，行为与改前一致）
+      /* 三档判定：
+       *   ① 后端可用 → FS.host.exists（权威）
        *   ② 后端离线但浏览器有库根句柄且能读 → FS.diskFileState 内部走 relativePathExists（权威）
-       *   ③ 两者都没有 → **静默**保持乐观标记（用户要求：不加「（未校验）」这类标注），但绝不把"无法判定"当成"没下载"。 */
+       *   ③ 都判定不了 → 静默保持乐观标记，绝不能把「无法判定」当成「没下载」。 */
       if (known) markRedownload(btn, '', '此前成功下载过；当前无法确认文件是否还在磁盘上');
       var dir = storageDirOf();
       if (!dir || !FS.diskFileState) return;
@@ -512,12 +506,8 @@ var Modals = {
         if (known) markRedownload(btn, '', '此前成功下载过；校验请求失败，未能确认文件是否还在磁盘上');
       });
     }
-    // ---- 下载链接：按变体分组（v2.2.12 重构）----
-    // 旧实现把同一批文件分散在「免费下载链接（许可证/readme）」「公开 / 免费下载链接」
-    // 「订单页解析出的下载链接」与 downloadLinks 四个互不感知的区块，同一 URL 被渲染 2~3 次
-    // （商品 8821023 实测：VRChatDLSS5Cam-win64.zip 出现两行）。现在统一为：
-    // 一个变体一个分组、组内挂它自己的文件、历史版本默认折叠、同一 URL 全局只出现一次；
-    // 许可证/readme 单独成框。
+    // ---- 下载链接：按变体分组 ----
+    // 一个变体一个分组、组内挂它自己的文件、历史版本默认折叠、同一 URL 全局只出现一次；许可证 / readme 单独成框。
     function isLicenseName(n) {
       return /(^|[_\-\s（(])(licen[cs]e|copyright|readme|利用規約|規約|ライセンス|説明書?|取扱説明|はじめに|注意事項)/i.test(String(n || ''));
     }
@@ -619,10 +609,9 @@ var Modals = {
     var unpurchasedNode = unpurchasedVer.length ? el('div', { class: 'ver-unpurchased' }, [
       el('div', { class: 'ver-unpurchased-head', text: '未购买（点击可前往购买）' }),
       el('div', { class: 'chip-wrap chip-wrap-sm' }, unpurchasedVer.map(function (v) {
-        // v2.5.2：未购变体的价格也显示字母币种（JPY 500），避免 ¥ 的 JPY/CNY 歧义
-        /* v2.5.14（用户反馈 · 修5）：重新解析会把 BOOTH 商品页的**裸数字价**（如 1680）写回变体，
-         * 空币种时旧实现由 codePriceText 默认成 CNY → 这里显示成「CNY 1,680」。现在按**商店来源**兜底
-         * （BOOTH=JPY / Gumroad=USD），0 价直接显示「免费」。 */
+        // 未购价也带字母币种（JPY 500），避免 ¥ 的 JPY/CNY 歧义
+        /* 抓取可能只给裸数字价，空币种不能默认成 CNY：按商店来源兜底（BOOTH=JPY / Gumroad=USD），
+         * 0 价直接显示「免费」。 */
         var vpdU = derivePrice(String(v.price || ''));
         var vShopCodeU = App.sourceCurrency(a);
         var vPriceU = (vpdU && vpdU.value != null)
@@ -634,7 +623,7 @@ var Modals = {
         if (firstLink) buyUrl = boothZhUrl(firstLink.url);
         else if (a.itemId && a.source === 'booth') buyUrl = 'https://booth.pm/zh-cn/items/' + a.itemId;
         return buyUrl
-          ? el('button', { class: 'chip chip-ver-off chip-buy', title: '前往购买：' + txt, onclick: function () { window.open(buyUrl, '_blank', 'noopener'); } }, txt)
+          ? el('button', { class: 'chip chip-ver-off chip-buy', title: '前往购买：' + txt, onclick: function () { FS.openExternal(buyUrl); } }, txt)
           : el('span', { class: 'chip chip-ver-off', title: txt }, txt);
       }))
     ]) : null;
@@ -646,7 +635,7 @@ var Modals = {
       ]);
     })) : null;
 
-    // 店铺名：URL / 站点根地址不再当作作者名
+    // 店铺名：URL / 站点根地址不能当作者名
     var shopName = a.author || a.shop || '';
     if (/^https?:\/\//i.test(shopName)) shopName = '';
     var shopHost = '';
@@ -659,9 +648,9 @@ var Modals = {
       ? el('a', { href: a.shopUrl, target: '_blank', rel: 'noopener', title: '打开店铺主页' }, shopName)
       : shopName) : '';
 
-    // 商品 ID：普通文本展示即可；商品页访问已由「商店链接」提供，不再做超链接/复制按钮
+    // 商品 ID 只作文本展示：商品页入口已由「商店链接」提供
     var idKV = a.itemId ? el('span', { text: a.itemId }) : '';
-    // v2.2.12 网盘：http(s) 链接可点，其它按纯文本展示
+    // 网盘：http(s) 链接可点，其它按纯文本展示
     var cloudKV = a.cloudUrl
       ? (/^https?:\/\//i.test(a.cloudUrl)
         ? el('a', { href: a.cloudUrl, target: '_blank', rel: 'noopener', title: '打开网盘链接' }, a.cloudUrl)
@@ -669,12 +658,12 @@ var Modals = {
       : '';
 
     // 商品图集：头部缩略条浏览 + 预览窗口（上一张/下一张/设为封面）
-    // 图集本地化：外链图下载后转 PNG 存 vrclib-data\gallery\<商品ID>\（v2.3.6 起），之后离线也能浏览
-    var galleryImages = (a.images || []).slice();   // v2.3.6：不再截断到 24 张（缓存/预览覆盖全部图集）
+    // 图集本地化：外链图下载后转 PNG 存 vrclib-data\gallery\<商品ID>\，之后离线也能浏览
+    var galleryImages = (a.images || []).slice();   // 缓存与预览覆盖全部图集，不截断
     var galleryLocal = Object.create(null);
-    var galleryDisposed = false;   // v2.5.3：本轮已回收（原地刷新/关闭弹窗后，异步预加载不得再产 blob URL）
-    /** v2.5.3：回收本轮图集 blob。原地刷新分行必须**先回收上一轮**——旧实现只在 onClose 里回收，
-     *  而原地刷新（自动补全/保存后的静默刷新）走的是提前 return 分支，整册 objectURL 会变成永久孤儿。 */
+    var galleryDisposed = false;   // 本轮已回收：原地刷新/关闭后，异步预加载不得再产 blob URL
+    /** 回收本轮图集 blob。原地刷新必须先回收上一轮 —— 那条路径会提前 return，
+     *  只在 onClose 回收会让整册 objectURL 变成永久孤儿。 */
     function revokeGallery() {
       galleryDisposed = true;
       Object.keys(galleryLocal).forEach(function (u) {
@@ -683,9 +672,8 @@ var Modals = {
         delete galleryLocal[u];
       });
     }
-    /* v2.5.2：缩略图**只加载一次**。原来是渲染时先给 img.src 设外链（第一次加载），等 galleryPreload
-     * 拿到磁盘缓存后再换成 blob URL（第二次加载）——打开详情页能明显看到「图先出现、随后又刷一遍」。
-     * 现在渲染时不设 src，等预加载判定完（磁盘命中 → blob，未命中 → 外链）一次性设定。 */
+    /* 缩略图只加载一次：渲染时不设 src，等预加载判定完（磁盘命中 → blob，未命中 → 外链）一次性设定，
+     * 否则图会先以「外链」出现、随后又被 blob 覆盖一遍。 */
     var galleryThumbs = [];
     function applyThumbSrc() {
       if (galleryDisposed) return;
@@ -696,7 +684,7 @@ var Modals = {
       });
     }
     App.galleryPreload(a, galleryImages).then(function (items) {
-      if (galleryDisposed) return;   // v2.5.3：本轮已回收（原地刷新/关闭）→ 不能再建 blob URL
+      if (galleryDisposed) return;   // 本轮已回收 → 不能再建 blob URL
       (items || []).forEach(function (it) {
         if (it && it.blob) galleryLocal[it.url] = URL.createObjectURL(it.blob);
       });
@@ -708,14 +696,14 @@ var Modals = {
       if (!u) return Promise.resolve(null);
       if (galleryLocal[u]) return Promise.resolve(galleryLocal[u]);
       function adopt(blob) {
-        if (galleryDisposed) return '';   // v2.5.3：本轮已回收 → 丢弃（异步下载可能晚于刷新/关闭）
+        if (galleryDisposed) return '';   // 本轮已回收 → 丢弃迟到的异步下载结果
         var objectURL = URL.createObjectURL(blob);
         galleryLocal[u] = objectURL;
-        // v2.5.2：只补「还没决定 src」的缩略图；已经按外链加载过的不再换源——换源=同一张图加载两次
+        // 只补「还没决定 src」的缩略图；已按外链加载过的不再换源 —— 换源等于同一张图加载两次
         galleryThumbs.forEach(function (t) { if (t.url === u && !t.decided) t.img.src = objectURL; });
         return objectURL;
       }
-      // v2.3.6：先看磁盘缓存（vrclib-data\gallery\<商品ID>\），没有才联网下载并转 PNG 落盘
+      // 先看磁盘缓存（vrclib-data\gallery\<商品ID>\），没有才联网下载并转 PNG 落盘
       return App.galleryFromDisk(a, i).then(function (hit) {
         if (hit && hit.blob) return adopt(hit.blob);
         return Net.fetchBlob(u, {}).then(function (b) {
@@ -723,7 +711,7 @@ var Modals = {
           return toPngBlob(b, App.settings.imageMaxWidth).then(function (png) {
             return App.galleryToDisk(a, i, u, png).then(function (p) {
               if (p) return adopt(png);
-              // 后端离线等写不了盘：退回浏览器缓存兜底，等后端回来由迁移搬到磁盘（不会白抓一次）
+              // 后端离线等写不了盘：退回浏览器缓存兜底，等后续同步再搬到磁盘（不会白抓一次）
               return Store.galleryAdd(a.id, { url: u, blob: png }).then(function () { return adopt(png); })
                 .catch(function () { return adopt(png); });
             });
@@ -753,12 +741,8 @@ var Modals = {
         .catch(function (e) { Toast.err('设置封面失败：' + (e.message || e)); });
     }
 
-    /* v2.5.4（用户要求）预览页改造：
-     *  ① 图片下方一行「全部图集」缩略图（与详情页同一套外观 + 两侧渐隐，可点选、当前项高亮、自动滚到可见）；
-     *  ② 上/下一张循环（首尾相接），且不再重复显示同一张；
-     *  ③ 下方「删除这张」——从素材库图集里移除该图并即时刷新详情页；
-     *  ④ 上/下一张按钮改成**贴在图片左右两侧**的半透明箭头，鼠标不在图片两侧时不显示；
-     *  ⑤ 「缓存全部图集」如实汇报缓存了几张 / 失败几张（原来无论成败都提示「已本地化缓存」）。 */
+    /* 图集预览：整条缩略图（与详情页同款，可点选、自动滚到可见）+ 左右 1/3 热区循环翻页，
+     * 支持删除当前图与缓存全部图集。 */
     function openGalleryViewer(idx) {
       var cur = Math.max(0, Math.min(galleryImages.length - 1, idx || 0));
       var img = el('img', { class: 'viewer-img', alt: '商品图预览' });
@@ -774,7 +758,7 @@ var Modals = {
         var u = galleryImages[cur];
         img.src = galleryLocal[u] || u;
         counter.textContent = (cur + 1) + ' / ' + galleryImages.length;
-        // v2.5.4 修正：迟到的本地化回调只在「仍停在同一张」时才替换 src（旧写法 cur === cur 恒真，快速翻页会串图）
+        // 迟到的本地化回调只在「仍停在同一张」时才替换 src，否则快速翻页会把图串掉
         ensureGalleryLocal(cur).then(function (localURL) { if (localURL && galleryImages[cur] === u) { img.src = localURL; scheduleNavSize(); } });
         syncStrip();
         scheduleNavSize();
@@ -788,10 +772,8 @@ var Modals = {
       })) : null;
       function navTo(step) { cur = (cur + step + galleryImages.length) % galleryImages.length; show(); }   // 循环：末张→首张
       var imgWrap = el('div', { class: 'viewer-imgwrap' }, [img]);
-      /* v2.5.6（用户反馈「按钮太小 / 图标没有竖直居中」）：
-       * 箭头改用**定尺寸内联 SVG**，不再用字体字符 '‹' —— 字符墨迹只有字号的约 0.35，
-       * 且墨迹中心 ≠ 行盒中心（实测：字号 34.5px 时墨迹仅 8×12px、中心偏上 1.5px），
-       * 靠 line-height 居中永远有偏差。SVG 放进 flex 居中容器里是**几何精确居中**。 */
+      /* 箭头用定尺寸内联 SVG，不用字体字符 '‹'：字符墨迹只有字号的约 0.35，
+       * 且墨迹中心 ≠ 行盒中心，靠 line-height 永远居中不准；SVG 放在 flex 容器里是几何居中。 */
       var SVG_NS = 'http://www.w3.org/2000/svg';
       function navArrow(dir) {
         var svg = document.createElementNS(SVG_NS, 'svg');
@@ -808,8 +790,8 @@ var Modals = {
         svg.appendChild(p);
         return svg;
       }
-      /* v2.5.8（用户批复，最终口径）：翻页热区 = **舞台的左 1/3 / 右 1/3**（左中右三段结构），
-       * 与图片尺寸无关、只看舞台；鼠标进入整条带内即显示箭头。所以热区挂在 stage 上，不挂图片。 */
+      /* 翻页热区按舞台左右各 1/3 划分，与图片尺寸无关；鼠标进入整条带内即显示箭头。
+       * 所以热区挂在 stage 上，不挂图片。 */
       var prevZone = null, nextZone = null;
       if (galleryImages.length > 1) {
         prevZone = el('div', { class: 'viewer-navzone viewer-navzone-prev', title: '上一张（可循环）', onclick: function () { navTo(-1); } }, [
@@ -819,13 +801,10 @@ var Modals = {
           el('span', { class: 'viewer-nav' }, [navArrow('next')])
         ]);
       }
-      /* v2.5.6（用户要求）：按钮尺寸基准 = **图片纵向（显示高度）的 1/7**（原为「长边/7」），
-       * 夹在 36~200px；按钮做成正方形 → 圆形光晕不被压扁。
-       * 点击范围规则不变：仍然是「按钮 + 两侧留白」贴着图片左右边缘。
+      /* 箭头尺寸取图片显示高度的 1/7，夹在 36~200px，正方形以保证圆形光晕不被压扁；
        * 图片加载 / 换图 / 窗口缩放时重算。 */
       function sizeNav() {
-        /* v2.5.8：量 imgWrap（与图片同盒，但一定已挂到 DOM）；直接量 img 会在
-         * "图片还没排版"时得到 0 并走舞台兜底，之后又不一定有机会重量。 */
+        /* 量 imgWrap 而不是 img：图片还没排版时 img 会量到 0，之后不一定有机会重量。 */
         var r = (imgWrap || img).getBoundingClientRect();
         var base = r.height || 0;                      // 纵向（高度）
         if (!base) {   // 图片还没加载出来（外链被墙/加载中）：退而用舞台尺寸，别让箭头停在默认小尺寸
@@ -834,9 +813,8 @@ var Modals = {
         }
         if (!base) return;
         var h = Math.max(36, Math.min(200, Math.round(base / 7)));
-        /* v2.5.8 关键修复：热区已经挂在 **stage** 上，而 CSS 变量沿 DOM 继承 ——
-         * 写在 imgWrap 上热区根本收不到（实测 --nav-h 写成了 42px，按钮却仍渲染 78px 的默认值）。
-         * 所以变量必须写在热区的父级 stage 上。imgWrap 也写一份，兼容以后有元素要用。 */
+        /* 热区挂在 stage 上，而 CSS 变量沿 DOM 继承：变量必须写在热区的父级 stage 上，
+         * 写在 imgWrap 上热区收不到。imgWrap 也写一份，兼容其它使用方。 */
         var host = (stage && stage.style) ? stage : imgWrap;
         host.style.setProperty('--nav-h', h + 'px');
         host.style.setProperty('--nav-w', h + 'px');
@@ -847,36 +825,30 @@ var Modals = {
           imgWrap.style.setProperty('--nav-w', h + 'px');
           imgWrap.style.setProperty('--nav-gap', gap + 'px');
         }
-        /* v2.5.8（用户批复，最终口径）：热区 = **舞台的左右各 1/3**（左中右三段），
-         * 与图片尺寸无关 —— 几何全在 CSS 里，JS 只负责箭头尺寸。 */
+        /* 热区 = 舞台左右各 1/3，几何全在 CSS 里，JS 只负责箭头尺寸。 */
       }
-      /* v2.5.6（性能）：翻页 / 换图路径里**不要做同步强制布局**——刚改过 src 的 img 立刻
-       * getBoundingClientRect() 会强制同步排版。改成 rAF 合帧：一帧最多量一次，
-       * 连点翻页也只算一次；实测该路径每帧节省一次强制 layout。 */
+      /* 换图后立刻 getBoundingClientRect() 会强制同步排版：
+       * 改成 rAF 合帧，一帧最多量一次，连点翻页也只算一次。 */
       var navRaf = 0;
       function scheduleNavSize() {
         if (navRaf) return;
-        navRaf = requestAnimationFrame(function () {           // 双帧：等布局稳定后再量（实测单帧会量到未落定的高度，差 1px）
+        navRaf = requestAnimationFrame(function () {           // 双帧：等布局稳定后再量，单帧会量到未落定的高度
           navRaf = requestAnimationFrame(function () { navRaf = 0; sizeNav(); });
         });
       }
       img.addEventListener('load', scheduleNavSize);
       window.addEventListener('resize', scheduleNavSize);
-      /* v2.5.8：图片的**渲染尺寸**会随弹窗/图集条/滚动条变化（load 事件之后仍会变），
-       * 只靠 load + resize 会量到过期高度（实测 78px 的箭头对应 292px 的图 = 比例 0.267 而非 1/7）。
-       * 用 ResizeObserver 盯住 img 自身尺寸 —— 一变就重算；关弹窗时断开。 */
+      /* 图片渲染尺寸会随弹窗 / 图集条 / 滚动条变化，load 之后仍会变；
+       * 只靠 load + resize 会量到过期高度，用 ResizeObserver 盯住 img 自身，关弹窗时断开。 */
       var navRO = (typeof ResizeObserver === 'function') ? new ResizeObserver(function () { scheduleNavSize(); }) : null;
       if (navRO) { try { navRO.observe(img); } catch (e) {} }
-      /* v2.5.8：首次打开时 img 往往还没排版（getBoundingClientRect().height = 0），
-       * sizeNav 会走"舞台兜底值"；之后图片定型却不会再量第二次（实测：兜底算出 78px，
-       * 而图片实际 292px → 比例 0.267 而不是 1/7）。这里补**有限次稳定重测**（有界，不常驻），
-       * 关弹窗时全部清掉。 */
+      /* 首次打开时图片往往还没排版，sizeNav 会走舞台兜底值，之后不会再量第二次。
+       * 这里补有限次稳定重测（有界、不常驻），关弹窗时全部清掉。 */
       var navSettleTimers = [80, 240, 600, 1200].map(function (ms) {
         return setTimeout(function () { scheduleNavSize(); }, ms);
       });
       var stage = el('div', { class: 'viewer-stage' }, [imgWrap, prevZone, nextZone]);
-      /* v2.5.14（用户反馈）：双击翻页热区不再产生文本选区。mousedown 的默认行为是「开始选择」，
-       * preventDefault 只挡选择、不影响随后的 click 导航（探针 build/_probe-viewer-select.mjs 复测）。 */
+      /* 热区 mousedown 阻止默认的文本选择，但不影响随后的 click 导航 */
       stage.addEventListener('mousedown', function (e) { e.preventDefault(); });
       try { img.setAttribute('draggable', 'false'); } catch (e) {}
       var cacheAllBtn = el('button', { class: 'btn', onclick: function () {
@@ -914,7 +886,7 @@ var Modals = {
       } }, ICONS.label('\u{1F5D1} 删除这张'));
       var vh = Modal.open({
         title: '商品图集预览', size: 'lg',
-        onClose: function () {   // v2.5.4b：别把缩放监听留在窗口上；v2.5.6：待执行的合帧回调也一并取消
+        onClose: function () {   // 关弹窗时收掉窗口监听、合帧回调、尺寸观察与重测定时器
         window.removeEventListener('resize', scheduleNavSize);
         if (navRaf) { cancelAnimationFrame(navRaf); navRaf = 0; }
         if (navRO) { try { navRO.disconnect(); } catch (e) {} navRO = null; }
@@ -937,7 +909,7 @@ var Modals = {
     var galleryStripMax = 24;   // 缩略条只画前 24 张，但预览/缓存覆盖全部
     var galleryNode = galleryImages.length
       ? el('div', { class: 'detail-gallery-strip' }, galleryImages.slice(0, galleryStripMax).map(function (u, i) {
-          // v2.5.2：alt 留空（无 src 时不会渲染出「图片缺失」文字）；加载失败也**不隐藏**（隐藏会让后面的图左移 = 看起来像重新排序）
+          // alt 留空（无 src 时不会渲染出「图片缺失」文字）；加载失败也不隐藏，隐藏会让后面的图左移、像重新排序
           var im = el('img', { alt: '', loading: 'lazy', title: '浏览并设为封面' });   // src 由 applyThumbSrc 一次性设定
           im.onerror = function () { im.classList.add('img-failed'); };
           galleryThumbs.push({ url: u, img: im });
@@ -945,9 +917,8 @@ var Modals = {
         }))
       : el('div', { class: 'detail-gallery-strip empty' }, [el('span', { text: '暂无商品图集' })]);
 
-    /* v2.5.2：图集固定一行——滚轮 = 横向滚动，两侧虚化提示「还有更多」；滚到底虚化消失。
-     * 这样详情页头部的高度由封面决定，不会被图集撑高。
-     * v2.5.4：抽成 attachStripScroll()，预览页底部那一行缩略图复用同一套外观与滚动行为。 */
+    /* 图集固定一行：滚轮转成横向滚动，两侧虚化提示还有更多，滚到底虚化消失。
+     * 这样详情页头部高度由封面决定，不被图集撑高；预览页底部那行复用同一套。 */
     function attachStripScroll(node) {
       function slotEl() { return node.closest ? node.closest('.detail-gallery-slot') : null; }
       function syncEnd() {
@@ -972,10 +943,10 @@ var Modals = {
     }
     if (galleryImages.length) attachStripScroll(galleryNode);
 
-    /* v2.5.4（用户要求）：图集右上角「重新获取」——重新联网抓商品页图集，把整列表换成网页端当前的样子。
-     * 既是「和网页端不一样」的修复入口，也是剔除重复 / 陈旧图的保底手段。 */
+    /* 图集右上角「重新获取」：重新联网抓商品页图集，整列表换成网页端当前的样子，
+     * 用于剔除重复 / 陈旧图。 */
     var refetchGalleryBtn = el('button', {
-      // v2.5.12（用户要求）：样式与「隐藏 / 喜欢 / 删除」一致（统一用 .btn），文案改「重新获取图集」
+      // 样式与「隐藏 / 喜欢 / 删除」一致（统一用 .btn），文案为「重新获取图集」
       class: 'btn gallery-refetch', type: 'button',   // 不占用 .btn-parse：那个类名被「版本与下载 → 重新解析」与冒烟夹具锚定
       title: '重新联网获取商品页图集：整列表替换为网页端当前的样子（自动去重），用于剔除重复 / 陈旧图',
       onclick: function () {
@@ -1003,7 +974,7 @@ var Modals = {
       }
     }, ICONS.label('\u{1F504} 重新获取图集'));
 
-    // 商品图集本地化：打开详情后自动后台逐个缓存，已缓存则直接跳过（v2.5.4：按真实结果提示，不再谎报「已缓存」）
+    // 打开详情后后台逐个缓存图集，已缓存则跳过；完成后按真实结果提示
     var galleryPrefetch = Promise.resolve(), galleryPreOk = 0, galleryPreFail = 0;
     galleryImages.slice(0, galleryStripMax).forEach(function (u, i) {
       galleryPrefetch = galleryPrefetch.then(function () {
@@ -1034,9 +1005,10 @@ var Modals = {
     var meta = el('div', { class: 'kv-list' }, [
       !isAvatar ? kv('支持角色', avatarChips || '未指定')
                 : kv('角色名', [a.charNameZh, a.charNameJa, a.charNameEn].filter(Boolean).join(' / ') || ''),
-      // v2.5.2：商品价不再显示（价格看变体）
+      // 价格看变体，不再单列商品价
       kv('商店链接', linksNode || '无'),
       kv('作者 / 店铺', shopKV),
+      kv('素材编号', el('span', { class: 'mono', title: '好友导出/导入时按它判定是不是同一份素材' }, App.fileIdOf(a) || '—')),
       kv('商品 ID', idKV),
       kv('网盘', cloudKV),
       kv('原始标签', (a.rawTags || []).length ? (a.rawTags || []).join(' / ') : ''),
@@ -1055,21 +1027,116 @@ var Modals = {
         el('div', { class: 'detail-gallery-slot' }, [galleryNode]),
         el('div', { class: 'detail-tools' }, [
           hideBtn, favBtn,
-          /* v2.5.10（用户要求）：「重新获取」挪到「喜欢」右边，中间留一段**更宽的空白**（.tool-sep） */
           el('span', { class: 'tool-sep' }),
           refetchGalleryBtn,
           el('span', { class: 'grow' }),
           deleteBtn
         ]),
         el('div', { class: 'detail-actions' }, [
-          el('div', { class: 'detail-actions-cell' }, [primaryBtn, hint]),   // v2.5.8：注释跟着它注释的按钮走
-          el('div', { class: 'detail-actions-cell' }, [editBtn, el('button', { class: 'btn btn-lg', onclick: function () { if (window.WB && WB.importToUnity) { WB.importToUnity(a); } else { Toast.err('「导入与工程」页还没加载，稍后再试'); } } }, '导入到 Unity')])
+          el('div', { class: 'detail-actions-cell' }, [primaryBtn, hint]),
+          el('div', { class: 'detail-actions-cell' }, [editBtn])
         ])
       ])
     ]);
 
+    /* 从商品链接补充信息：粘贴商品页 → 解析 → 预览 → 应用 */
+    function linkEnrichBlock() {
+      var input = el('input', {
+        class: 'input', type: 'text',
+        placeholder: '粘贴商品链接，如 https://booth.pm/ja/items/8562330'
+      });
+      var tip = el('div', { class: 'wb-hint', text: '' });
+      var btn = el('button', {
+        class: 'btn btn-sm', type: 'button', text: '解析并补充',
+        onclick: function () {
+          var url = String(input.value || '').trim();
+          if (!/^https?:\/\//i.test(url)) { tip.textContent = '先粘贴一个 http(s) 链接'; return; }
+          if (typeof Net === 'undefined' || !Net.networkAllowed()) { tip.textContent = '网络权限没开：设置 → 网络'; return; }
+          btn.disabled = true; btn.textContent = '解析中…'; tip.textContent = '';
+          Fetchers.fetchInfo(url, { forceNetwork: true, noCache: true }).then(function (info) {
+            btn.disabled = false; btn.textContent = '解析并补充';
+            if (!info || info.__failed) {
+              tip.textContent = '抓不到这个页面：' + ((info && info.reason) || '链接无效或需要登录');
+              return;
+            }
+            previewApply(info, url);
+          }, function (e) {
+            btn.disabled = false; btn.textContent = '解析并补充';
+            tip.textContent = '解析失败：' + ((e && e.message) || e);
+          });
+        }
+      });
+      return section('从商品链接补充信息', el('div', { class: 'detail-stack' }, [
+        el('div', { class: 'detail-enrich' }, [input, btn]),
+        tip
+      ]));
+    }
+
+    /** 预览将从商品页补充的字段，只列空白项 */
+    function previewApply(info, url) {
+      var rows = [];
+      /* 只补空白字段：已有的值一律不动，避免覆盖你手填的内容 */
+      function add(label, cur, next) {
+        if (cur != null && String(cur).trim() !== '') return;
+        if (next == null || String(next).trim() === '') return;
+        rows.push(kv(label, el('span', {}, [
+          el('span', { class: 'dim', text: (cur || '（空）') + ' → ' }),
+          el('b', { text: String(next) })
+        ])));
+      }
+      add('标题', a.originalTitle || a.title, info.originalTitle || info.title);
+      add('店铺', a.shop, info.shop);
+      add('作者', a.author, info.author);
+      add('商品 ID', a.itemId, info.itemId);
+      add('标签', '', (info.tags || []).length ? (info.tags || []).join(' / ') : '');
+      if (!rows.length) rows.push(kv('结果', '没有比现在更新的信息'));
+      var modal = Modal.open({
+        title: '补充信息预览',
+        size: 'sm',
+        body: [el('div', { class: 'detail-stack' }, rows)],
+        footer: [
+          el('button', { class: 'btn', onclick: function () { Modal.close(modal); } }, '取消'),
+          el('button', { class: 'btn btn-primary', onclick: function () {
+            Modal.close(modal);
+            applyInfo(info, url);
+          } }, '应用')
+        ]
+      });
+    }
+
+    function applyInfo(info, url) {
+      if (info.itemId && !a.itemId) a.itemId = String(info.itemId);
+      var t = info.originalTitle || info.title || '';
+      if (t && !a.originalTitle) a.originalTitle = t;
+      if ((!a.title || /^未命名/.test(a.title)) && t) a.title = cleanTitle ? (cleanTitle(t) || t) : t;
+      if (info.shop && !a.shop) a.shop = info.shop;
+      if (info.author && !a.author) a.author = info.author;
+      if (/gumroad/i.test(url)) a.source = 'gumroad';
+      else if (/booth/i.test(url)) a.source = 'booth';
+      else if (info.sourceId && !a.source) a.source = info.sourceId;
+      var tags = (info.tags || []).map(function (x) { return String(x || '').trim(); }).filter(Boolean);
+      if (tags.length) {
+        var merged = (a.rawTags || []).slice();
+        tags.forEach(function (x) { if (merged.indexOf(x) < 0) merged.push(x); });
+        a.rawTags = merged;
+        if (typeof Smart !== 'undefined' && Smart.purgeAvatarTags) {
+          try { var clean = Smart.purgeAvatarTags(merged, { shop: a.shop, author: a.author, url: url }); if (clean && clean.length) a.rawTags = clean; } catch (e) {}
+        }
+      }
+      if (!a.links) a.links = [];
+      if (!a.links.some(function (l) { return normU(l.url) === normU(url); })) {
+        a.links.push({ url: url, label: info.shop || '商品页' });
+      }
+      if (info.coverURL && !a.coverURL) a.coverURL = info.coverURL;
+      if (info.description && !a.description) a.description = info.description;
+      App.save(a).then(function () {
+        Toast.ok('已补充：' + (a.originalTitle || a.title || ''));
+        try { Modals.detail(a.id); } catch (e) {}
+      }, function (e) { Toast.err('保存失败：' + ((e && e.message) || e)); });
+    }
     var content = el('div', { class: 'detail-content-wrap' }, [
       el('div', { class: 'detail-content-head' }, [ICONS.make('box', { size: 15 }), el('span', { text: '详细信息' })]),
+      linkEnrichBlock(),
       el('div', { class: 'detail-content' }, [
         // 左栏：标签 + 商品信息 + 商品描述（平衡两栏内容量）
         el('div', { class: 'detail-col' }, [
@@ -1089,8 +1156,8 @@ var Modals = {
 
     // BOOTH / Gumroad 源缺少有效变体时打开详情自动获取一次（免费素材不需要购买变体，直接跳过；成功刷新并锁定，失败保持原样）
     var epAuto = App.effectivePrice(a);
-    // v2.3.12：BOOTH「未购买」素材的商品价按模型就是 0（= 没有任何已购变体），不能因此当免费而跳过补全，
-    // 否则变体/价格永远补不上（核对时发现 27 个素材卡在这个状态）。
+    // BOOTH「未购买」素材的商品价按模型就是 0（= 没有任何已购变体），不能因此当免费而跳过补全，
+    // 否则变体 / 价格永远补不上。
     var unpurchasedAsset = App.purchaseState(a) === 'unpurchased';
     var freeAsset = !unpurchasedAsset && (a.isFree === true || !!(epAuto && epAuto.value === 0));
     var needsVariantAuto = !freeAsset && !a.delisted && !Importer.autoEnrichBusy() &&
@@ -1103,24 +1170,23 @@ var Modals = {
       var enrichFn = a.source === 'gumroad' ? Importer.autoEnrichGumroadAsset : Importer.autoEnrichBoothAsset;
       enrichFn(a).then(function (saved) {
         if (!saved || saved.delisted) return;
-        /* v2.5.3 修复「自动补全无限循环」：补全会**放弃**（返回同一个对象 = 什么都没改：商品页 ID 不符 /
-         * 抓取失败 / 没有可解析的订单链接），此时既不能刷新详情、也不能报「已补全」——刷新会重跑本段判定，
-         * 形成每轮一对 Toast 的死循环（实测 3 秒 101 轮；fetch 命中缓存时微任务链直接饿死事件循环 = 标签页卡死）。
-         * 详情页自身的重渲染一律走 opts.noAutoEnrich（见 refreshAfterChange）。 */
+        /* 补全可能「放弃」：返回同一个对象 = 什么都没改（ID 不符 / 抓取失败 / 无可解析订单链接）。
+         * 此时既不能刷新详情也不能提示已补全 —— 刷新会重跑本段判定，形成每轮一对 Toast 的死循环，
+         * 页面的重渲染一律走 opts.noAutoEnrich。 */
         var locked = !!(saved.autoFilled && saved.autoFilled.versions);
         if (saved === a && !locked) { console.warn('[enrich] 本次未补全，保持原样（下次打开详情会再试一次）'); return; }
         Modals.refreshAfterChange(saved, { keepModal: true });
         if (locked) Toast.ok('已自动补全版本 / 变体信息');
-        try { App.ensureCoverOnDisk(saved, { quiet: true, allowFetch: true }); } catch (e) {}   // v2.5.14：补全后顺手补写封面
+        try { App.ensureCoverOnDisk(saved, { quiet: true, allowFetch: true }); } catch (e) {}   // 补全后顺手补写封面
       });
     }
 
     if (targetHandle && targetHandle.body) {
-      // v2.5.3：原地刷新前先回收上一轮图集的 blob URL（否则每刷新一次就泄漏一整册）
+      // 原地刷新前先回收上一轮图集 blob，否则每刷新一次就泄漏一整册
       if (typeof targetHandle._revokeGallery === 'function') { try { targetHandle._revokeGallery(); } catch (e) {} }
       targetHandle._revokeGallery = revokeGallery;
       targetHandle.kind = 'detail';
-      targetHandle.assetId = id;              // v3.0.0：原地刷新也要钉住「这个弹窗属于谁」
+      targetHandle.assetId = id;              // 原地刷新也要钉住「这个弹窗属于谁」
       Modals.syncDetailId();
       targetHandle.body.innerHTML = '';
       appendChildren(targetHandle.body, body);
@@ -1128,10 +1194,9 @@ var Modals = {
     }
     var h = Modal.open({
       title: '素材详情', size: 'lg', body: [body],
-      /* v3.0.0：关闭时清空归属记录——Modal.close() 会先把 handle 移出栈再回调 onClose，
-       * 所以这里 syncDetailId() 扫到的是「剩下还在的详情弹窗」（没有则置空）。
-       * v4.6：顺带收掉卡片上的「正在看」高亮——以前 App.activeAssetId 一直留着，
-       * 那张卡会长期挂一圈主色光晕，看着像一直选中。原地刷新时 detailAssetId 还在，不清。 */
+      /* 关闭时清空归属记录：Modal.close() 先把 handle 移出栈再回调，
+       * 这里扫到的是「剩下还在的详情弹窗」（没有则置空）。
+       * 顺带收掉卡片上的「正在看」高亮；原地刷新时 detailAssetId 还在，不清。 */
       onClose: function () {
         revokeGallery();
         Modals.syncDetailId();
@@ -1141,10 +1206,10 @@ var Modals = {
         }
       }
     });
-    h._revokeGallery = revokeGallery;   // v2.5.3：原地刷新时用它回收上一轮图集 blob
-    App.syncDownloadButtons();   // v2.3.10：重开详情也按下载队列的真实状态显示按钮
+    h._revokeGallery = revokeGallery;   // 原地刷新时用它回收上一轮图集 blob
+    App.syncDownloadButtons();   // 重开详情按下载队列的真实状态显示按钮
     h.kind = 'detail';
-    h.assetId = id;   // v3.0.0：弹窗归属的素材 id（refreshAfterChange keepModal 的唯一判据）
+    h.assetId = id;   // 弹窗归属的素材 id：refreshAfterChange keepModal 的判断依据
     Modals.syncDetailId();
     return h;
   },
@@ -1152,6 +1217,7 @@ var Modals = {
   /* ------------------------------------------------------------------
    * 新增 / 编辑表单
    * ------------------------------------------------------------------ */
+  /** 打开新增 / 编辑表单；id 为空表示新增 */
   edit: function (id, opts) {
     opts = opts || {};
     var isNew = !id;
@@ -1265,13 +1331,16 @@ var Modals = {
       }
       function markAuto(key) { a.autoFilled = a.autoFilled || {}; a.autoFilled[key] = true; }
 
-      if (info.originalTitle) {
-        if (canAuto('titleOrig')) {
-          titleOrig.value = info.originalTitle; setScalarBase('titleOrig', info.originalTitle); markAuto('titleOrig');
+      /* 抓到的标题优先写「原标题」：解析器有的给 originalTitle、有的只给 title，两个都要认；
+         原标题为空时即使字段被标记过也补一次，否则永远空着。 */
+      var infoTitle = info.originalTitle || info.title || '';
+      if (infoTitle) {
+        if (canAuto('titleOrig') || !String(titleOrig.value || '').trim()) {
+          titleOrig.value = infoTitle; setScalarBase('titleOrig', infoTitle); markAuto('titleOrig');
         } else skip('原标题');
         // 自定义标题只在本来为空时用原标题兜底
         if (!titleInput.value.trim() && canAuto('title')) {
-          titleInput.value = info.originalTitle.slice(0, 60); setScalarBase('title', info.originalTitle.slice(0, 60)); markAuto('title');
+          titleInput.value = infoTitle.slice(0, 60); setScalarBase('title', infoTitle.slice(0, 60)); markAuto('title');
         }
       }
       if (info.author || info.shop) {
@@ -1281,9 +1350,8 @@ var Modals = {
       }
       if (info.shopUrl && canAuto('shopUrl')) { a.shopUrl = info.shopUrl; setHiddenBase('shopUrl', info.shopUrl); markAuto('shopUrl'); } else if (info.shopUrl) skip('店铺链接');
       if (info.itemId && canAuto('itemId')) { a.itemId = info.itemId; setHiddenBase('itemId', info.itemId); markAuto('itemId'); } else if (info.itemId) skip('商品 ID');
-      // 商品价（只读）：BOOTH 稍后用变体计算价覆盖；其他来源取抓取到的商店价。
-      // 统一存成「币种符号 + 数值」，避免页面 JSON-LD 带来的 “USD 15” 双前缀。
-      // v2.5.2（用户批准）：商品价不再写入素材——价格一律按变体价现算。
+      // 商品价（只读）：统一存成「币种符号 + 数值」，避免页面 JSON-LD 带来的 “USD 15” 双前缀。
+      // 价格一律按变体价现算，这里不再写入素材。
       if (false && info.price && canAuto('shopPrice')) {
         var spd = (info.priceValue != null && isFinite(Number(info.priceValue)))
           ? { value: Number(info.priceValue), currency: info.currency || '' }
@@ -1316,7 +1384,7 @@ var Modals = {
       if (guess && guess !== 'other') {
         if (canAuto('category')) {
           catSelect.value = guess; setScalarBase('category', guess); markAuto('category');
-          onCategoryChange();   // v2.3.1：抓到的就是角色模型时立即显示「角色名」区块，不必手动改一次类型
+          onCategoryChange();   // 抓到角色模型时立即切出「角色名」区块，不必手动改一次类型
           log('\u2714 分类：' + App.categoryLabel(guess) + (info.categoryId || info.category ? '（来自 BOOTH 站方分类：' + (info.category || '') + '）' : ''));
         } else skip('分类');
       }
@@ -1328,7 +1396,7 @@ var Modals = {
         a.extra = a.extra || {}; a.extra.r18 = true;
         log('\u26A0 识别为成人向素材（R-18），已追加 R18 特殊标签');
       } else if (info.r18 === false && (a.extra && a.extra.r18) && canAuto('r18')) {
-        delete a.extra.r18;   // 清除历史误判：简介里“允许用于 R-18 作品”并不代表商品本身是成人向
+        delete a.extra.r18;   // 简介写「允许用于 R-18 作品」不代表商品本身成人向，这里清掉误判
         markAuto('r18');
         log('\u2714 已清除误判的 R18 标签（商品本身非成人向）');
       }
@@ -1481,7 +1549,7 @@ var Modals = {
           setScalarBase('cover', info.coverURL); markAuto('cover');
           renderCover();
           if (App.settings.autoFetchCover && App.isGitHubSource(a) && (info.images || []).length) {
-            // v2.3.23：GitHub README 图片抓取即本地化——首图下载失败自动顺延下一张，全部失败保留仓库头像外链
+            // GitHub README 图抓到即本地化：首图失败顺延下一张，全失败保留仓库头像外链
             log('正在下载 README 图片（封面 + 图集）…');
             App.ghLocalizeImages(a, info, { log: log }).then(function (r) {
               if (!r || !r.cover) { log('\u26A0 README 图片均未能下载，封面继续使用仓库头像外链'); return; }
@@ -1506,7 +1574,34 @@ var Modals = {
         } else skip('封面');
       }
       if (skipped.length) log('\u26A0 以下字段已被用户自定义 / 自动获取锁定，本次抓取未覆盖：' + skipped.join('、'));
+      syncFileId();   // 抓取可能写入商品号，编号要立刻变成锁定态
       return true;
+    }
+
+    /** 当前表单里的 BOOTH 商品号：抓取写进 a.itemId，或链接里带 /items/<数字> */
+    function boothIdNow() {
+      var links = [];
+      try { links = linkEditor.getValue() || []; } catch (e) { links = []; }
+      var pasted = String(fetchInput.value || '').trim();
+      if (isHttpUrl(pasted)) links = links.concat([{ url: pasted }]);
+      return Store.boothIdOf({ itemId: a.itemId, links: links });
+    }
+
+    /** 按当前链接刷新编号显示：有 BOOTH 商品号就显示它，否则显示存着的自动编号 */
+    function syncFileId() {
+      var booth = boothIdNow();
+      var saved = String(a.fileId || '').trim();
+      if (booth) {
+        fileIdInput.value = booth;
+        fileIdHint.textContent = 'BOOTH 商品编号。编号固定不变，好友导入时按它判定同一份';
+        fileIdBox.title = '已填 BOOTH 链接：编号即商品编号 ' + booth + '，只读。要换编号只能换素材链接。';
+        return;
+      }
+      fileIdInput.value = saved;
+      fileIdHint.textContent = saved
+        ? '自动生成、固定不变的编号，好友导出/导入时按它判定同一份'
+        : '新建素材保存时自动生成（V 开头），之后不再变化';
+      fileIdBox.title = '素材唯一编号，只读。好友导出/导入时靠它判定是不是同一份素材';
     }
 
     function rememberLink() {
@@ -1543,7 +1638,7 @@ var Modals = {
       var url = fetchInput.value.trim();
       pasteHint.textContent = '操作步骤：① 在浏览器打开商品页 / 仓库页 → ② 按 Ctrl+U 查看网页源代码 → ③ Ctrl+A 全选、Ctrl+C 复制 → ④ 粘贴到下方文本框 → ⑤ 点击「解析粘贴内容」。全过程不产生任何外部请求。';
       pasteHintLink.innerHTML = '';
-      // v2.3.25：任何有 jsonURL 的来源都给出「直接打开 JSON」的省事入口（BOOTH / GitHub 都适用）
+      // 任何有 jsonURL 的来源都给出「直接打开 JSON」入口，识别率最高（BOOTH / GitHub 通用）
       var f = isHttpUrl(url) ? Fetchers.detect(url) : null;
       var jurl = (f && f.jsonURL) ? (f.jsonURL(url) || '') : '';
       if (jurl) {
@@ -1558,7 +1653,7 @@ var Modals = {
         class: 'btn btn-sm btn-primary', type: 'button', onclick: function () {
           var url = rememberLink();
           var raw = pasteArea.value.trim();
-          if (/^https?:\/\/\S+$/i.test(raw)) {          // v2.3.25：粘的是「链接」而不是「内容」时给出明确指引
+          if (/^https?:\/\/\S+$/i.test(raw)) {          // 粘的是链接而不是内容：给出明确指引
             var gf = Fetchers.detect(raw);
             var gj = (gf && gf.jsonURL) ? (gf.jsonURL(raw) || '') : '';
             Toast.warn('这里要粘的是页面内容（源码或 JSON），不是链接：' + (gj ? ('请打开 ' + gj + ' 复制整页粘贴') : '请粘贴页面源码'), 7000);
@@ -1589,15 +1684,8 @@ var Modals = {
       onclick: function () { doFetch({ forceFill: true, forceNetwork: true, noCache: true }); }
     }, ICONS.label('\u26A1 强制联网填充'));
 
-    function looksDelisted(info) {
-      if (!info) return false;
-      if (info.status === 404 || info.status === 410) return true;
-      var tried = info.tried || [];
-      for (var i = 0; i < tried.length; i++) {
-        if (tried[i] && /HTTP (404|410)\b/.test(String(tried[i].error || ''))) return true;
-      }
-      return false;
-    }
+    /* 判据在 Fetchers.looksDelisted（批量更新商品信息共用），这里只转发 */
+    function looksDelisted(info) { return Fetchers.looksDelisted(info); }
 
     /** 输入的是商品 ID（不是完整链接）时，后台依次尝试 BOOTH / Gumroad 候选链接；
      *  成功就把输入框替换为完整链接，并继续按该链接完成信息获取填充。 */
@@ -1773,7 +1861,7 @@ var Modals = {
       class: 'btn', type: 'button', title: '在新标签页打开商品页', onclick: function () {
         var url = rememberLink();
         if (!isHttpUrl(url)) { Toast.warn('请先填写商品链接'); return; }
-        window.open(url, '_blank', 'noopener');
+        FS.openExternal(url);
       }
     }, ICONS.label('\u{1F517} 打开商品页'));
 
@@ -1790,8 +1878,8 @@ var Modals = {
       cookieBtn.style.display = (paste && hasCookie) ? '' : 'none';
       updatePasteHint();
     }
-    /* v2.5.3 修复：去抖函数必须只创建一次。写在回调里＝每次按键新建一个闭包，新闭包的定时器变量是 undefined，
-     * 永远清不掉上一键的定时器 ⇒ 去抖完全失效（连打 20 个字符＝20 个定时器全触发）。 */
+    /* 去抖函数必须只创建一次：写在回调里等于每次按键新建闭包，
+     * 新闭包的定时器变量是 undefined，永远清不掉上一键的定时器，去抖完全失效。 */
     var updatePasteHintDebounced = debounce(updatePasteHint, 250);
     fetchInput.addEventListener('input', function () { updateFetchHint(); updatePasteHintDebounced(); });
 
@@ -1823,10 +1911,151 @@ var Modals = {
       return el('option', { value: c.id, selected: a.category === c.id }, c.label);
     }));
 
-    var linkEditor = Field.multi(a.links, { placeholder: 'https://…（商店 / 商品页链接）', labelPlaceholder: '备注', addText: '添加链接', emptyText: '尚未添加商店链接' });
+    var linkEditor = Field.multi(a.links, {
+      placeholder: 'https://…（商店 / 商品页链接）', labelPlaceholder: '备注', addText: '添加链接', emptyText: '尚未添加商店链接',
+      onChange: function () {
+        syncFileId();   // 链接变了可能带出 BOOTH 商品号，编号显示要跟着换
+        /* 从链接编辑器里加号进来的地址也要自动取标题；scheduleAutoTitle 定义在下面，
+         * var 提升期间是 undefined，用 typeof 兜一下（正常交互时已经定义好）。 */
+        if (typeof scheduleAutoTitle === 'function') scheduleAutoTitle();
+      }
+    });
+
+    /* 素材编号：好友导出/导入时靠它认「是不是同一份」。用户只能看，不能改 ——
+     * 它是对外身份，手改一次就会让已经发出去的包认不回来。
+     * 值来自 BOOTH 商品号或创建时自动生成，见 syncFileId。 */
+    var fileIdInput = el('input', {
+      class: 'input mono input-locked', readOnly: true, placeholder: '保存后自动生成'
+    });
+    var fileIdHint = el('div', { class: 'field-hint' });
+    var fileIdCopy = el('button', {
+      class: 'btn btn-sm', type: 'button', title: '复制编号',
+      onclick: function () {
+        var v = String(fileIdInput.value || '').trim();
+        if (!v) { Toast.info('保存后才有编号'); return; }
+        copyText(v).then(function () { Toast.ok('编号已复制：' + v, 3000); })
+          .catch(function () { Toast.warn('复制失败，请手动选中输入框里的编号'); });
+      }
+    }, '复制');
+    var fileIdRow = el('div', { class: 'file-id-row' }, [fileIdInput, fileIdCopy]);
+    var fileIdBox = el('div', { class: 'field' }, [
+      el('label', { class: 'field-label', text: '素材编号' }),
+      el('div', { class: 'field-control' }, [fileIdRow, fileIdHint])
+    ]);
+
+    /* ---------------- 链接 → 自动填「原标题」 ----------------
+     * 打开表单、或粘贴/更换商品链接后，由后端取一次商品标题填进「原标题」；
+     * 「自定义标题」为空时顺带用它兜底。其他字段（简介、标签、价格）仍要用户点「联网自动填充」。
+     * 两点约束：
+     *   1. 手动粘贴模式（默认）下一律不联网 —— 「不发外部请求」是程序对外的承诺；
+     *   2. 用户自己填过原标题就不覆盖，只有「空」或「上次自动写进去的值」才更新。 */
+    var autoTitleCache = Object.create(null);      // url -> 标题（本进程内复用，换表单不用再请求）
+    var autoTitleApplied = Object.create(null);    // 自动写过的值，用来认出「这条是我们填的」
+    var autoTitleLastUrl = '';
+    var autoTitleBusy = false;
+    var autoTitleSeq = 0;
+    var lastAutoTitle = '';
+    var titleAutoHint = el('div', { class: 'field-hint' });
+
+    function autoTitleUrl() {
+      var raw = String(fetchInput.value || '').trim();
+      if (isHttpUrl(raw)) return raw;
+      var list = [];
+      try { list = linkEditor.getValue() || []; } catch (e) { list = []; }
+      for (var i = 0; i < list.length; i++) {
+        var u = String((list[i] && list[i].url) || '').trim();
+        if (isHttpUrl(u)) return u;
+      }
+      return '';
+    }
+
+    function autoTitleWritable() {
+      var cur = String(titleOrig.value || '').trim();
+      if (!cur) return true;
+      if (cur === String(lastAutoTitle || '').trim()) return true;
+      for (var u in autoTitleApplied) { if (autoTitleApplied[u] === cur) return true; }
+      return false;
+    }
+
+    function fillAutoTitle(rawTitle) {
+      var t = String(rawTitle || '').replace(/\s+/g, ' ').trim();
+      if (!t) return false;
+      if (String(titleOrig.value || '').trim() === t) {
+        titleAutoHint.textContent = '已从链接获取标题：' + t;
+        return false;
+      }
+      if (!autoTitleWritable()) {
+        titleAutoHint.textContent = '原标题是你手动填的，链接标题不会覆盖它';
+        return false;
+      }
+      titleOrig.value = t;
+      lastAutoTitle = t;
+      /* 记进 autoBase：这样后面「重新抓取不覆盖手动修改」的判据认得这是我们填的，
+       * 再次抓取时该更新就更新，不会误判成用户手写。 */
+      autoBase.titleOrig = t;
+      if (!String(titleInput.value || '').trim()) {
+        var covered = t.slice(0, 60);
+        titleInput.value = covered;
+        autoBase.title = covered;
+      }
+      titleAutoHint.textContent = '已从链接自动获取标题；可直接改';
+      return true;
+    }
+
+    function maybeAutoTitle() {
+      var url = autoTitleUrl();
+      if (!url) { titleAutoHint.textContent = ''; return; }
+      if (url === autoTitleLastUrl) return;
+      if (!autoTitleWritable()) { titleAutoHint.textContent = '原标题是你手动填的，链接标题不会覆盖它'; return; }
+      var netOpen = (typeof Net !== 'undefined' && Net.networkAllowed());
+      /* 「手动粘贴源码」默认零请求；唯一例外是设置里明确开着的「粘贴链接自动取标题」，
+       * 它只发一次、只取标题。用户关掉后连这一次都不发。 */
+      if (!netOpen && App.settings.autoTitleFetch === false) {
+        titleAutoHint.textContent = '「粘贴链接自动取标题」已关闭，不会联网（可在「设置 → 联网与抓取」打开）';
+        return;
+      }
+      if (autoTitleCache[url]) { autoTitleLastUrl = url; fillAutoTitle(autoTitleCache[url]); return; }
+      autoTitleLastUrl = url;
+      if (autoTitleBusy) autoTitleSeq++;      // 旧请求还在路上：把它的结果作废
+      autoTitleBusy = true;
+      var seq = ++autoTitleSeq;
+      titleAutoHint.textContent = '正在获取链接标题…';
+      /* 手动粘贴模式下要靠 forceNetwork 才发得出去：这是上面那个开关授权的，不是绕过用户设置 */
+      Fetchers.fetchTitle(url, { forceNetwork: !netOpen }).then(function (r) {
+        if (seq !== autoTitleSeq) return;
+        autoTitleBusy = false;
+        if (r && r.ok && r.title) {
+          autoTitleCache[url] = r.title;
+          autoTitleApplied[url] = r.title;
+          fillAutoTitle(r.title);
+        } else {
+          titleAutoHint.textContent = '没能取到标题（' + ((r && r.reason) || '网络问题') + '），可点「联网自动填充」';
+        }
+      }).catch(function (e) {
+        autoTitleBusy = false;
+        if (seq === autoTitleSeq) titleAutoHint.textContent = '标题获取失败：' + ((e && e.message) || e);
+      });
+    }
+
+    /* 去抖只建一次：每次按键新建闭包会让上一键的定时器清不掉（同 updatePasteHint 那条注释） */
+    var scheduleAutoTitle = debounce(maybeAutoTitle, 700);
+    fetchInput.addEventListener('input', scheduleAutoTitle);
+    fetchInput.addEventListener('blur', maybeAutoTitle);
+    /* 编辑老素材时原标题多半是空的：打开就补一次，省得用户再点一下链接框 */
+    if (!String(a.originalTitle || '').trim()) setTimeout(maybeAutoTitle, 400);
+
     var dlEditor = Field.multi(a.downloadLinks, { placeholder: 'https://…（直接下载链接）', labelPlaceholder: '文件名', addText: '添加下载链接', emptyText: '尚未添加下载链接', dedupe: true });
     var dlSectionTitle = null;   // 便于聚焦提示
-    var pathEditor = Field.multi(a.paths, { placeholder: '例如 D:\\素材库\\衣装\\戚风\\冬季毛衣', labelPlaceholder: '说明', addText: '添加本地路径', emptyText: '尚未关联本地路径', pickDir: true, asPath: true });   // v3.0.4：中性示例
+    /* 本地路径只允许一条：多路径会让「导入到 Unity / 获取更新」挑错目标目录 */
+    if ((a.paths || []).length > 1) {
+      var keepOne = (a.paths || []).filter(function (p) { return p && p.note === '存储路径'; })[0] || a.paths[0];
+      a.paths = [keepOne];
+    }
+    var pathEditor = Field.multi(a.paths, { placeholder: '例如 D:\\素材库\\衣装\\戚风\\冬季毛衣', labelPlaceholder: '说明', addText: '添加本地路径', emptyText: '尚未关联本地路径', pickDir: true, asPath: true });
+    /* 隐藏「添加本地路径」按钮：本地路径只保留一条 */
+    Array.prototype.forEach.call(pathEditor.querySelectorAll('button'), function (b) {
+      if (/添加/.test(b.textContent || '')) b.style.display = 'none';
+    });
 
     var versionEditor = Field.versions(a.versions);
     var tagEditor = Field.tags(a.tags, a.rawTags);
@@ -1850,7 +2079,7 @@ var Modals = {
 
     /* ---------------- 封面 & 图集 ---------------- */
     var coverPreview = el('div', { class: 'cover-preview' });
-    var coverPreviewURL = '';   // v2.5.3：本函数自建的封面预览 blob URL（重绘/关弹窗前必须先回收，否则每敲一键泄漏一份）
+    var coverPreviewURL = '';   // 本函数自建的封面预览 blob URL：重绘 / 关弹窗前必须先回收，否则每敲一键泄漏一份
     function renderCover() {
       if (coverPreviewURL) { try { URL.revokeObjectURL(coverPreviewURL); } catch (e) {} coverPreviewURL = ''; }
       coverPreview.innerHTML = '';
@@ -1875,7 +2104,7 @@ var Modals = {
     }
     if (!isNew && a.hasCover && !App.coverCache[a.id]) App.coverURLFor(a).then(renderCover);
     renderCover();
-    // v2.3.5：编辑页同样按商品ID 认领本地路径下的封面
+    // 编辑页同样按商品 ID 从本地路径认领封面
     if (!isNew && !a.hasCover && !a.coverURL) {
       App.adoptDiskCover(a).then(function (hit) {
         if (!hit) return;
@@ -1928,7 +2157,7 @@ var Modals = {
     ]);
 
 
-    /* v2.3.28：三个 AI 翻译按钮上提为变量——分别挂到各自字段标签的右侧（labelRight） */
+    /* 三个 AI 翻译按钮上提为变量，分别挂到各自字段标签的右侧（labelRight） */
     var aiTitleBtn = el('button', {
       class: 'btn btn-xs btn-ghost', type: 'button', title: '翻译原标题并写入显示标题',
       onclick: function () {
@@ -1979,8 +2208,15 @@ var Modals = {
         el('div', { class: 'form-col' }, [
           el('div', { class: 'section-title'}, ICONS.label('\u{1F4DD} 基本信息')),
           Field.row('显示标题 *', titleInput, '作为卡片主标题显示', aiTitleBtn),
-          Field.row('原标题', titleOrig, '在卡片上以小字显示于自定义标题下方'),
-          /* v2.3.28：来源与分类并到同一行（仅此处两栏） */
+          (function () {
+            /* 原标题这一行要多挂一条动态提示（正在获取 / 已获取 / 不覆盖），
+             * Field.row 的 hint 只吃字符串，所以拿到节点后自己追加。 */
+            var row = Field.row('原标题', titleOrig, '在卡片上以小字显示于自定义标题下方');
+            var ctrl = row.querySelector('.field-control');
+            if (ctrl) ctrl.appendChild(titleAutoHint);
+            return row;
+          })(),
+          /* 来源与分类并成一行（仅此处两栏） */
           el('div', { class: 'form-two' }, [
             Field.row('来源 *', el('div', {}, [srcSelect, srcCustomRow])),
             Field.row('分类 *', catSelect)
@@ -1992,10 +2228,9 @@ var Modals = {
             Field.row('英文名（角色模型必填）', charNameEn, '角色模型素材必须填写英文角色名，创建存储路径/下载文件时用作文件夹名')
           ]),
           Field.row('商店链接', linkEditor, '可添加多个链接'),
+          fileIdBox,
           Field.row('作者 / 店铺', authorInput),
 
-          /* v2.3.28：状态 / 上架日期 从右栏上移到「商品价格」与「商品简介」之间 */
-          /* v2.3.29：备注移到「商品简介」之后（原来的顺序是 备注 → 商品描述） */
           Field.row('状态', el('div', { class: 'inline-row' }, [
             el('label', { class: 'check' }, [giftCheck, el('span', { text: '获赠' })]),
             el('label', { class: 'check' }, [favCheck, el('span', { text: '喜欢' })]),
@@ -2051,6 +2286,7 @@ var Modals = {
     onSourceChange();
     onCategoryChange();
     refreshModeUI();
+    syncFileId();
 
     // BOOTH / Gumroad 源缺少有效变体（没有带订单链接的版本）时：打开编辑页自动获取一次（成功标记锁定，失败不打扰）
     var credsAuto = App.settings.credentials || {};
@@ -2099,9 +2335,8 @@ var Modals = {
       }
       saving = true;
       saving = true;
-      /* v5.5（用户要求）：标题/角色名变了会连磁盘上的素材文件夹一起改名，
-       * 改名期间按钮必须锁住 —— 否则连点两次会在「旧名→新名」还没完成时又按旧名算一遍。
-       * delay > 0 时额外冷却一会儿再放开，确保目录那边真的落定。 */
+      /* 标题 / 角色名变化会连磁盘上的素材文件夹一起改名，改名期间必须锁住按钮 ——
+       * 否则连点两次会在「旧名→新名」还没完成时又按旧名算一遍。delay > 0 时额外冷却一会儿再放开。 */
       function resetSaving(delay) {
         if (!saveBtn) { saving = false; return; }
         saveBtn.disabled = true;
@@ -2117,15 +2352,20 @@ var Modals = {
         resetSaving(0);
         Toast.warn('保存耗时异常，已中止等待；请检查素材库目录后重试', 6000);
       }, 30000);
+      var catBeforeSave = a.category;
       a.title = titleInput.value.trim();
       a.originalTitle = titleOrig.value.trim();
       a.source = srcSelect.value;
       a.sourceCustom = srcCustom.value.trim();
       a.category = catSelect.value;
-      /* v4.3.2：以前这里把编辑器的值和原始 links 做并集，本意是「不改动就保留」，
-       * 结果是删掉的链接保存时又被并回来，永远删不掉。编辑器初始化时已经装了全部链接，
-       * 以编辑器的值为准即可。 */
+      /* 分类换了：把库内文件夹搬到新分类目录（库外路径不动） */
+      if (catBeforeSave !== a.category) { App.relocateToCategory(a, catBeforeSave).catch(function () {}); }
+      /* 以编辑器的值为准：若再与原始 links 求并集，删掉的链接保存时会被并回来，永远删不掉 */
       a.links = linkEditor.getValue();
+      /* 编号：有 BOOTH 商品号以它为准，否则沿用已存的；都没有（新建）才现生成。
+       * 不从输入框取值 —— 那个框是只读的，取值只会把显示值写回去。 */
+      a.fileId = boothIdNow() || String(a.fileId || '').trim()
+        || Store.newFileId(App.fileIdTakenMap(a.id));
       a.downloadLinks = dlEditor.getValue();
       a.versions = versionEditor.getValue();
       // 已购买 = 有订单链接，自动派生，不提供勾选
@@ -2135,7 +2375,7 @@ var Modals = {
       a.activeVersion = activeList[0] || '';
       // BOOTH 商品价 = 已购变体计算价（无已购买 = 0）
       if (srcSelect.value === 'booth') {
-        // v2.5.2：商品价不再记录（变体价现算）——这里只提示，不再写 shopPrice*
+        // 商品价不再记录（变体价现算），这里只保留提示
       }
       // 有效价格：购买价优先；否则 BOOTH 用变体商品价；其他来源商品价仅展示
       var eff = App.effectivePrice(Store.normalizeAsset(a));
@@ -2149,7 +2389,7 @@ var Modals = {
       } else {
         a.price = ''; a.priceValue = null; a.isFree = null;
       }
-      a.paths = pathEditor.getValue();
+      a.paths = (pathEditor.getValue() || []).slice(0, 1);   // 只保留第一条
       a.tags = tagEditor.getValue();
       a.rawTags = tagEditor.getRaw();
       a.avatars = avatarPicker.getValue();
@@ -2159,15 +2399,15 @@ var Modals = {
       a.author = authorInput.value.trim();
       a.cloudUrl = cloudInput.value.trim();
       a.description = descInput.value.trim();
-      a.images = galleryImages.slice();   // v2.3.11：不再截断到 24 张
+      a.images = galleryImages.slice();   // 图集全量保存，不截断
       a.note = noteInput.value;
       a.gifted = giftCheck.checked;
       a.favorite = favCheck.checked;
       a.hidden = hideCheck.checked;
-      /* v4.3.2：清空上架日期以前会退回旧值，等于日期永远删不掉（只能改不能删）。 */
+      /* 清空上架日期必须落成空串：退回旧值会让日期只能改不能删 */
       a.publishedAt = publishedAtInput.value ? new Date(publishedAtInput.value + 'T00:00:00').toISOString() : '';
       a.coverURL = coverState.removed ? '' : (coverState.url || '');
-      /* 是否会动磁盘目录：只有老素材、且文件夹名真的变了才算 */
+      /* 是否会动磁盘目录：只有已存在的素材、且文件夹名真的变了才算 */
       var renaming = !isNew && orig && App.folderName(orig) !== App.folderName(a);
       if (renaming && saveBtn) ICONS.apply(saveBtn, ('\u23F3 改名中 …'));
 
@@ -2205,7 +2445,7 @@ var Modals = {
         step = step.then(function (t) {
           if (coverBlob) {
             t.hasCover = true; t.coverCleared = false; App.dropCover(t.id);
-            // v2.3.7：封面确定后自动写进素材本地路径（Unity 按商品ID 读的就是这个文件），不再需要手动「保存封面」按钮
+            // 封面确定后自动写进素材本地路径：Unity 按商品 ID 读的就是这个文件
             return Store.putCover(t.id, coverBlob).then(function () {
               return App.saveCoverToPath(t, coverBlob).then(function () { return t; });
             });
@@ -2244,6 +2484,7 @@ var Modals = {
 
     /** 导入/创建路径前把表单里的基本字段同步到 a：拖拽/按钮导入会用当前分类、标题和角色英文名生成素材库目录 */
     function syncFormBasics() {
+      var catBeforeSave = a.category;
       a.title = titleInput.value.trim();
       a.originalTitle = titleOrig.value.trim();
       a.category = catSelect.value;
@@ -2274,7 +2515,7 @@ var Modals = {
       title: isNew ? '添加素材' : '编辑素材',
       size: 'lg',
       body: [body],
-      onClose: function () {   // v2.5.3：关弹窗时回收封面预览 blob URL
+      onClose: function () {   // 关弹窗时回收封面预览 blob URL
         if (coverPreviewURL) { try { URL.revokeObjectURL(coverPreviewURL); } catch (e) {} coverPreviewURL = ''; }
       },
       footer: [

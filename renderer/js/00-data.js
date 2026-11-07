@@ -1,19 +1,19 @@
-/* ============ 00-data.js ============ */
-/* =====================================================================
- * 00-data.js  —  静态数据字典（分类 / 来源 / 角色 / 标签翻译）
- * 界面一律显示中文，内部保留英文标识以便扩展与数据交换。
- * ===================================================================== */
+/*
+ * 00-data.js —— 静态数据字典：分类 / 来源 / 角色 / 标签 / 默认设置。
+ * 界面显示中文，内部保留英文标识，供筛选、排序、翻译与配置共用。
+ * 交互：渲染层各处只读；默认设置经 App 落到 settings.json。
+ * 边界：只声明常量与纯换算函数，不读写存储、不发起请求、不碰 DOM。
+ */
 
-/** 应用信息 */
 var APP = {
   name: 'VRChat 改模素材管理库',
-  version: '1.3.0',
+  version: '1.4.0',
   dbName: 'vrc_asset_library',
-  dbVersion: 3,
+  dbVersion: 4,
   lsKey: 'vrc_asset_library_fallback'
 };
 
-/** 主题（v4.5）：id 同时写在 html[data-theme]；titleBar / symbol 用于窗口按钮覆盖层配色。
+/** 主题表：id 同时写在 html[data-theme]；titleBar / symbol 供窗口按钮覆盖层取色。
  *  'auto' 只是设置里的取值，应用时按系统深浅色解析成 light / dark。 */
 var THEMES = [
   { id: 'dark',   label: '暗色',       icon: '\u{1F319}', titleBar: '#14171d', symbol: '#a3abbb' },
@@ -27,12 +27,12 @@ function themeMeta(id) {
   return THEMES[0];
 }
 
-/** 分类汉化映射（显示中文 / 内部标识） */
+/** 分类表：id 是内部标识、label 是显示名，icon 指向 05-icons.js 的图标名 */
 var CATEGORIES = [
   { id: 'clothing',    label: '衣装',     icon: 'clothing' },
   { id: 'hair',        label: '发型',     icon: 'hair' },
-  { id: 'accessories', label: '配饰',     icon: 'accessories' },   // v2.3.27：原来错用 props（画的是沙发）；改用新描摹的蝴蝶结图标
-  { id: 'props',       label: '道具',     icon: 'props' },        // v2.5.5（用户批复）：原为用户自建分类，现固化为内置分类（带内置 props 图标）
+  { id: 'accessories', label: '配饰',     icon: 'accessories' },   // 用蝴蝶结，别复用道具图标（道具画的是沙发）
+  { id: 'props',       label: '道具',     icon: 'props' },        // 用户自建分类里同名，故固化为内置项
   { id: 'gimmicks',    label: '功能组件', icon: 'gimmicks' },
   { id: 'shaders',     label: '着色器',   icon: 'shaders' },
   { id: 'textures',    label: '纹理贴图', icon: 'textures' },
@@ -44,18 +44,18 @@ var CATEGORIES = [
   { id: 'other',       label: '其他',     icon: 'other' }
 ];
 
-/** 来源选项（显示中文 / 内部标识） */
+/** 来源表：home 是官网，library 是已购内容页，用于快捷跳转 */
 var SOURCES = [
-  { id: 'booth',   label: 'BOOTH',    icon: 'booth',   color: '#fc4d50', home: 'https://booth.pm/',       library: 'https://accounts.booth.pm/library', iconURL: BRAND_ICONS.booth },   // v2.3.27：品牌图标本地内嵌（见 00-brand.js）
+  { id: 'booth',   label: 'BOOTH',    icon: 'booth',   color: '#fc4d50', home: 'https://booth.pm/',       library: 'https://accounts.booth.pm/library', iconURL: BRAND_ICONS.booth },   // 图标内嵌自 00-brand.js，不走外链
   { id: 'gumroad', label: 'Gumroad',  icon: 'gumroad', color: '#ff90e8', home: 'https://gumroad.com/',    library: 'https://app.gumroad.com/library' },
-  { id: 'xianyu',  label: '闲鱼购买', icon: 'xianyu',  color: '#ffc107', home: 'https://www.goofish.com/', iconURL: BRAND_ICONS.xianyu },   // v2.3.27：品牌图标本地内嵌（原外链已失效）
-  { id: 'github',  label: 'GitHub',   icon: 'github',  color: '#8b949e', home: 'https://github.com/' },   // v2.3.27：改用内置猫头图标
+  { id: 'xianyu',  label: '闲鱼购买', icon: 'xianyu',  color: '#ffc107', home: 'https://www.goofish.com/', iconURL: BRAND_ICONS.xianyu },   // 原外链已失效，改为内嵌图
+  { id: 'github',  label: 'GitHub',   icon: 'github',  color: '#8b949e', home: 'https://github.com/' },   // 猫头用内置矢量图标
   { id: 'friend',  label: '好友分享', icon: 'friend',  color: '#4dabf7' },
   { id: 'self',    label: '自建',     icon: 'self',    color: '#69db7c' },
   { id: 'other',   label: '其他',     icon: 'unknown', color: '#adb5bd' }
 ];
 
-/** 预置支持角色（显示中文，附原名便于自动识别） */
+/** 预置角色表：label 用于显示，alias 收集中日英韩写法供自动识别匹配 */
 var AVATARS = [
   { id: 'universal', label: '通用/多角色', alias: ['汎用', '共通', 'universal', 'multi', '全対応', '全Avatar', '全avatar', '全Avatar対応', '全avatar対応', '全アバター', '全アバター対応', 'all avatar', 'all avatars', 'general'] },
   { id: 'chiffon',   label: '戚风',       alias: ['シフォン', 'Chiffon', 'chiffon', '戚风', '雪纺', '쉬폰'] },
@@ -80,7 +80,6 @@ var AVATARS = [
   { id: 'grus',      label: '格鲁斯',     alias: ['グルース', 'Grus', 'grus'] }
 ];
 
-/** 排序方式 */
 var SORTS = [
   { id: 'created_desc', label: '添加时间（新到旧）' },
   { id: 'created_asc',  label: '添加时间（旧到新）' },
@@ -97,7 +96,6 @@ var SORTS = [
   { id: 'shopupdated_asc',  label: '商品更新（旧到新）' }
 ];
 
-/** 价格筛选（借鉴 BoothPM-SDK 的免费/付费筛选维度） */
 var PRICE_FILTERS = [
   { id: 'all',     label: '全部' },
   { id: 'free',    label: '免费' },
@@ -105,7 +103,6 @@ var PRICE_FILTERS = [
   { id: 'unknown', label: '未记录价格' }
 ];
 
-/** 每页数量选项 */
 var PAGE_SIZES = [
   { id: 24,   label: '每页 24' },
   { id: 48,   label: '每页 48' },
@@ -113,7 +110,6 @@ var PAGE_SIZES = [
   { id: 0,    label: '不分页' }
 ];
 
-/** 状态筛选（已下载 / 未下载 / 已关联本地路径按需求移除） */
 var STATUS_FILTERS = [
   { id: 'all',      label: '全部素材' },
   { id: 'favorite', label: '喜欢的素材' },
@@ -122,9 +118,8 @@ var STATUS_FILTERS = [
 ];
 
 /**
- * 抓取方案（默认「手动粘贴源码」，零外部请求、零隐私风险）
- * 联网功能（自动抓取 / Cookie 已购识别 / AI 翻译）全部由程序自身的 Rust 后端直连，
- * 不经过任何端口、外部进程或 CORS 代理。
+ * 抓取方案：默认手动粘贴源码，全程零外部请求；联网模式的外部请求全部由本机后端直接发出，
+ * 不经过端口、外部进程或 CORS 代理。
  */
 var FETCH_MODES = [
   { id: 'paste',  label: '手动粘贴源码（默认 · 离线）',
@@ -133,10 +128,7 @@ var FETCH_MODES = [
     desc: '全部外部请求都由程序自身的后端直接发起，不经过端口、外部进程或任何第三方代理。' }
 ];
 
-/**
- * 内置标签翻译表（日文 / 英文 -> 中文）
- * 用户可在「设置 → 标签翻译」中增删改，用户表优先级更高。
- */
+/** 内置标签翻译表：日 / 英 → 中文；同名词条用户表优先，可在设置里增删。 */
 var TAG_DICT = {
   // —— 大类 ——
   '衣装': '衣装', '服': '服装', '洋服': '洋装', '衣服': '衣服',
@@ -196,11 +188,8 @@ var TAG_DICT = {
   'パーティクル': '粒子特效', 'particle': '粒子特效', 'ライト': '灯光', 'light': '灯光'
 };
 
-/**
- * 标签同义合并组：不同表达形式 / 不同语种的同一含义，合并为组内第一个中文规范名。
- * 例如：3D服装/洋服/衣装 → 服装；ニーソ/ニーソックス/过膝袜 → 过膝袜。
- * 多原始标签对应一个显示标签，减少实际用于筛选的标签数量。
- */
+/** 标签同义合并组：组内第一个中文名是规范名，其余写法都归并过去。
+ *  同一含义只留一个显示标签，筛选时的标签数量才收得住。 */
 var TAG_MERGE_GROUPS = [
   // 服装
   ['服装', '衣装', '洋服', '服', '3D服装', '3D衣装', '3D洋服', '3D服', '衣服', 'clothing', 'clothes', 'outfit', '의상'],
@@ -265,17 +254,16 @@ var TAG_MERGE_GROUPS = [
 ];
 
 /**
- * 标签黑名单（中日韩英）：与分类重叠、或对素材管理没有增量信息的标签一律不添加。
- * 用户可在「设置 → 标签黑名单」中增删；用户表优先级高于内置表。
+ * 更新日志：点顶栏版本号查看，只写用户看得见的变化，一条一句。
+ * 同一系列内的修补合并进该系列条目，实现细节与量测数据不写在这里。
  */
-/**
- * 更新日志（v2.5.13 精简）：点顶栏「本地素材管理 · vX.Y.Z」查看。
- * **只在「次版本号」变动时新增一条**——同一系列内的补丁合并进该系列条目；
- * （**例外：v3.0.1** —— 用户要求把该热修单列一条，故 `['3.0.1', […]]` 独立成条，排在 `['3.0']` 之前。）
- * 每条只写**用户看得见的变化**、一条一句话。实现细节 / 量测数据 / 门禁与工具都不进这里
- * （那些在 docs/技术手册.md、docs/交接提示词.md）。逐版本的完整记录见 docs/技术手册.md §51 与 docs/历史/。
- */
-var CHANGELOG = [  ['1.3', [
+var CHANGELOG = [  ['1.4', [
+    'v1.4 自动更新：Release 里带了 win-x64 便携包时，点「检查更新」会多出「立即更新并重启」—— 程序自己下载、校验、解压，退出后覆盖安装目录再用原参数重启，不用再手动解压覆盖；vrclib-data、本地素材库、runtime 一个文件都不会动，装不上会回滚并写清原因。',
+    'v1.4 更新商品信息：多选后用顶部操作条新加的「更新商品信息」对选中素材重抓一次商品页，刷新原标题、作者 / 店铺、简介、标签、图集、封面外链、上架与更新时间、分类；你手改过的字段默认保持不动，标签与图集只增不减，自定义标题与角色名永不覆盖。',
+    'v1.4 原标题：在编辑页粘贴商品链接会自动取商店标题填进「原标题」（「显示标题」空着时一并兜底），手填过的不会被覆盖；取标题只读 BOOTH 的商品 JSON，比抓整页快也不怕语言跳转。',
+    'v1.4 素材编号：每条素材有了只读编号（BOOTH 商品直接用商品号，其余是 V 开头的 8 位），好友素材包只按编号判断「是不是同一份」，不再靠标题猜；发号时全表查重、启动时自动修重号，两条素材共用一个号互相覆盖的情况不会再出现。',
+    'v1.4 其它：多选浮动区与批量操作条不再重复堆按钮；「已下架」只看 404 / 410，网络抖一下不会被标成下架；检查更新下载的包只认名字带 win-x64 的 zip，旧版单 exe 壳包会被拒绝。'
+  ]],  ['1.3', [
     'v1.3 重大更新：新增局域网 P2P 传输 —— 勾选素材后点「传给好友」，把 6 位口令发给对方，同一局域网（含 Radmin / ZeroTier 这类虚拟局域网）自动发现、直连、断点续传，文件不经过任何服务器；信令服务连续 15 分钟没有传输会自动关闭，重新分享即可。',
     'v1.3 交互：素材卡片支持长按进入多选；导入改为后台队列，右下角任务条显示进度、可继续浏览和追加素材；导入前统一选择目标工程，解压完可以先勾选要导入的内容。',
     'v1.3 动画：卡片入场、悬停、侧栏收放与翻页过渡重新调过，顶部与底部操作条改为按需出现的浮动入口，界面更安静。',
@@ -407,10 +395,8 @@ var CHANGELOG = [  ['1.3', [
     '逐版本记录见 docs/技术手册.md §51。'
   ]]
 ];
-/**
- * 工具 / 软件 / 技术名词表（v2.3.17）：这些词经常出现在「対応」列表里，但它们不是角色名，
- * 也不是素材属性——支持角色识别与标签黑名单都拿它兜底（用户实测：lilToon 着色器 / Modular Avatar 被当成支持角色）。
- */
+/** 工具 / 技术名词表：这些词常出现在「対応」列表里，但既不是角色名也不是素材属性，
+ *  角色识别与标签黑名单都拿它兜底，免得把 lilToon、Modular Avatar 当成支持角色。 */
 var TOOL_STOPWORDS = [
   'liltoon', 'poiyomi', 'poiyomitoont', 'poiyomi toon', 'modular', 'modularavatar', 'modular avatar',
   'vrcsdk', 'vrchat sdk', 'sdk', 'vrcfury', 'ndmf', 'vcc', 'creator companion', 'unity', 'unitypackage',
@@ -421,17 +407,16 @@ var TOOL_STOPWORDS = [
   'avatar 3.0', 'avatar 2.0', 'gesturemanager', 'faceemo', 'vrcquest', 'quest', 'android', 'ios',
   'booth', 'vket', 'assetstore', 'github', 'readme', 'license'
 ];
-/* v2.3.19 反向筛（用户提醒：Maya 也是某个模型角色的英文名）：
- * 摘掉了 maya / sai / painter / designer / bouquet / menu / rig / animation / expression / parameter /
- * pc / credits / credit —— 这些都是**可能是角色名或太宽泛**的词，宁可漏判工具词，也不要把角色名吃掉。
- * 现在这张表只保留「明确不可能是角色名」的软件/技术名词。 */
+/* 只收「明确不可能是角色名」的词：maya / sai / painter 这类既是软件名又可能当角色名的一律不收，
+ * 宁可漏判工具词，也不要把角色名吃掉。 */
 var TOOL_STOP_RE = new RegExp('^(?:' + TOOL_STOPWORDS.map(function (w) {
   return w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*');
 }).join('|') + ')(?:\\s*(?:着色器|シェーダー|shader|対応|対応アバター|用|版|ツール|tool|addon|plugin|設定|マニュアル|セット|入り|付き|付))*$', 'i');
 // 例：「lilToon 着色器」「Modular Avatar」「Poiyomi 対応」都算工具名；纯角色名（桔梗 / マヌカ）不受影响
 
+/** 标签黑名单：与分类重叠、或对素材管理没有增量信息的标签不入库；用户表在内置表之上追加。 */
 var TAG_BLACKLIST = [
-  // 分类重叠（中/日/英/韩）：用正则合并同义词，便于维护
+  // 与分类同义的标签：正则里合并多语种写法，免得逐条维护
   '/^(衣装|服装|衣服|洋服|服|clothing|clothes|outfit|의상)$/i',
   '/^(发型|头发|髪型|髪|ヘアー?|hair|hairstyle|헤어|헤어스타일)$/i',
   '/^(配饰|アクセサリー?|アクセ|accessor(?:y|ies)|액세서리)$/i',
@@ -449,10 +434,8 @@ var TAG_BLACKLIST = [
   '/^(?:avata?r|アバター)\\s*(?:3(?:\\.0)?|2\\.0)$/i'
 ];
 
-/**
- * 标签停用词：平台名 / 站点导航词 / 与素材属性无关的噪声。
- * 抓取到的标签会先过一遍这张表，避免出现 booth、ブース、pixiv 之类的无效标签。
- */
+/** 抓取标签的停用词：平台名与站点导航词，入库前先过滤，
+ *  免得 booth、ブース 这类噪声占满标签。 */
 var TAG_STOPWORDS = [
   // 平台与站点
   '/^(booth(?:\\.pm)?|ブース(?:販売)?|pixiv(?:booth)?|ピクシブ|gumroad|jinxxy|fanbox|ファンボックス|ko-?fi|kofi|payhip|vket|バーチャルマーケット|twitter|x|discord|youtube|niconico)$/i',
@@ -463,17 +446,15 @@ var TAG_STOPWORDS = [
 ];
 
 /** 默认设置 */
-/* =====================================================================
- * v3.0.4（用户要求）：路径默认值一律从**应用目录**推导，绝不硬编码某台机器的绝对路径。
- *   应用目录 = 程序（HTML）所在目录；网页端与桌面壳同源（桌面壳也以 HTML 所在目录为基准）。
- *   取不到应用目录时（vm 自检 / 非 file:// 打开）返回中性相对名，绝不回退到某个人的机器路径。
- * ===================================================================== */
+/*
+ * 路径默认值一律从应用目录（程序所在目录）推导，绝不硬编码某台机器的路径。
+ * 桌面壳与网页端同源；取不到应用目录时返回相对名，由调用方决定能否使用。
+ */
 function appBaseDir() {
   try {
     if (typeof Store !== 'undefined' && Store) {
-      /* v4.0.0 修复：htmlDir 一直挂在 Store.local 下（20-store.js 的 local 对象），
-       * 旧写法读 Store.htmlDir 恒为 undefined ⇒ 应用目录恒为空 ⇒ 默认路径退化成相对名「本地素材库」，
-       * 进一步被写进 settings.json（切目录后素材路径全错）。这里两个位置都认。 */
+      /* htmlDir 挂在 Store.local 下；直接读 Store.htmlDir 会恒为 undefined，
+       * 默认路径退化成相对名并被写进 settings.json（切目录后素材路径全错）。两个位置都认。 */
       var fn = (Store.local && typeof Store.local.htmlDir === 'function') ? Store.local.htmlDir
              : (typeof Store.htmlDir === 'function' ? Store.htmlDir : null);
       if (fn) {
@@ -496,7 +477,10 @@ function defaultLibraryRootPath() { return appPathJoin(appBaseDir(), '本地素�
 function defaultSettings() {
   return {
     theme: 'dark',
-    glass: true,          // v4.5：毛玻璃（半透明面 + 背景模糊）默认开，可在「设置 → 主题与显示」关掉
+    glass: true,          // 毛玻璃：半透明面 + 背景模糊
+    /* 滚轮三档：fine 每格位移减半、开销低；system 交给浏览器但一格硬跳；
+     * smooth 自己缓动最跟手，代价是每格十几帧会堵住窗口线程。默认取中间档。 */
+    wheelMode: 'fine',
     cardSize: 'm',
     view: 'grid',
     sort: 'created_desc',
@@ -506,16 +490,16 @@ function defaultSettings() {
     autoFetchCover: true,
     imageMaxWidth: 720,
     imageQuality: 0.82,
-    // 抓取：默认手动粘贴源码，不联网；联网功能全部由内置宿主负责
+    // 抓取：默认手动粘贴源码，不联网；联网请求一律由内置后端发出
     fetchMode: 'paste',
     proxies: [],
     // 抓取结果缓存（同一链接不重复请求/解析）
     cacheEnabled: true,
     cacheTTLHours: 168,
-    // v2.3.13 下载：同时下载的文件数（1~8，默认 4）；单文件 ≥16MB 且服务器支持 Range 时宿主自动分段（最多 8 段）
+    // 下载并发数 1~8；单文件 ≥16MB 且服务器支持 Range 时由后端分段（最多 8 段）
     dlConcurrency: 4,
     credentials: {},
-    // v2.3.25：可选 GitHub Token（本机加密保存，与 Cookie 一样不进 settings.json、不随备份导出）——填了就走 5000 次/小时
+    // 可选 GitHub Token：本机加密保存，不进 settings.json、不随备份导出；填了配额更高
     githubToken: '',
     userTagDict: {},
     customCategories: [],
@@ -525,11 +509,11 @@ function defaultSettings() {
     confirmDelete: true,
     pageSize: 48,
     showHidden: false,
-    // v2.2.12 模糊搜索：开关 + DeepSeek 生成的近义词/俗称/常见错拼词表 { 原词: [扩展词…] }
+    // 模糊搜索：开关 + AI 生成的近义词 / 俗称 / 错拼词表 { 原词: [扩展词…] }
     fuzzySearch: false,
     fuzzyDict: {},
-    // v2.2.12 网盘（WebDAV）：账号列表 [{id,label,url,username,passwordEnc}]，密码为本机加密；
-    // 素材「本地文件路径」可填 webdav://账号名/远端路径，由宿主代为读写
+    // 网盘（WebDAV）：账号列表 [{id,label,url,username,passwordEnc}]，密码本机加密；
+    // 素材路径可填 webdav://账号名/远端路径，由后端代为读写
     webdavAccounts: [],
     // 分类 / 来源 的自定义图标覆盖：{ 'clothing': '👗' | 'https://…/icon.png' }
     customIcons: {},
@@ -549,16 +533,15 @@ function defaultSettings() {
     avatarOrder: [],             // 角色显示顺序
     // 本地素材库（文件夹导入的复制目标）
     libraryRootName: '',
-    libraryRootPath: defaultLibraryRootPath(),   // v3.0.4：由应用目录推导（原为硬编码的个人路径）
+    libraryRootPath: defaultLibraryRootPath(),   // 由应用目录推导，不写死机器路径
     importCopyFiles: true,
-    importMoveInsteadOfCopy: false,   // 导入本地文件的默认搬运方式：true=移动（失败跳过、不复制），false=复制
-    // AI 翻译（DeepSeek，密钥经本机加密保存；请求由内置宿主直连官方接口）
+    importMoveInsteadOfCopy: false,   // 默认搬运方式：true=移动（失败跳过），false=复制
+    // AI 翻译：密钥本机加密，请求由内置后端直连官方接口
     ai: { model: 'deepseek-flash', apiBase: 'https://api.deepseek.com', apiKeyEnc: '' },
     aiAutoTags: false,           // 导入/解析时自动用 AI 翻译未命中标签（需配置 Key）
     autoCookieFetch: true,       // 编辑素材且已保存 Cookie 时，自动获取已购版本/价格/下载链接
+    autoTitleFetch: true,        // 粘贴商品链接时自动取一次标题（只取标题，可在设置里关）
     importCreateFolders: true,   // 导入素材后，在素材库中自动创建对应文件夹
-    // v4.1.0：hostToolPath / hostBackground 随旧 WebView2 壳移除（宿主已内置在 Electron 主进程，无启动器参数）
-    // v6.7：updateSource 已删除 —— 更新源固定为 84-update.js 里的仓库常量，用户不再配置
   };
 }
 

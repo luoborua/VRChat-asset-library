@@ -48,3 +48,9 @@ WebView2Loader.dll
 
 功能组件/
 道具/
+
+# ---------------- Electron / Rust 边车 ----------------
+# Electron 运行时约 350MB，绝对不能入库；靠 启动素材库_Electron版.bat 首次运行时自动下载
+electron/node_modules/
+# 边车的编译中间产物；成品 exe 在 host/vrclib-host.exe（0.8MB，随包分发）
+host-sidecar/target/

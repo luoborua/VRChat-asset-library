@@ -1,7 +1,8 @@
-/* ============ 10-util.js ============ */
-/* =====================================================================
- * 10-util.js  —  通用工具函数
- * ===================================================================== */
+/*
+ * 10-util.js —— 通用工具：DOM 构造、路径与文本处理、图片与剪贴板、提示条。
+ * 交互：渲染层各模块直接调用；本文件不持有状态，也不读写存储。
+ * 边界：只做纯换算与浏览器 API 包装，业务规则留在各自模块。
+ */
 
 function $(sel, root) { return (root || document).querySelector(sel); }
 function $$(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
@@ -29,7 +30,7 @@ function appendChildren(node, children) {
   if (!Array.isArray(children)) children = [children];
   children.forEach(function (c) {
     if (c === null || c === undefined || c === false) return;
-    if (Array.isArray(c)) { appendChildren(node, c); return; }   // 嵌套数组扁平化
+    if (Array.isArray(c)) { appendChildren(node, c); return; }
     if (typeof c === 'string' || typeof c === 'number') node.appendChild(document.createTextNode(String(c)));
     else node.appendChild(c);
   });
@@ -60,23 +61,23 @@ function fmtDate(iso, withTime) {
 
 function fmtSize(bytes) {
   if (!bytes && bytes !== 0) return '—';
-  var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0, n = bytes;
+  var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0, n = Number(bytes);
+  if (!isFinite(n) || n < 0) return '—';   // 非有限值不参与换算，否则界面会显示 NaN KB
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
   return (i === 0 ? n : n.toFixed(n < 10 ? 2 : 1)) + ' ' + u[i];
 }
 
 /**
- * Windows 路径工具：所有本地磁盘路径统一走这里，避免「手动拼反斜杠」。
- * - normalizeWinPath：统一分隔符、压缩重复分隔符、去掉末尾分隔符（保留 UNC 的 \\ 前缀）
- * - joinWinPath：root + 若干子段 → 规范绝对路径
- * 注意：JS 源码里写单个反斜杠是 '\\'（两个字符），写四个字符 '\\\\' 会得到运行时双反斜杠。
+ * Windows 路径工具：本地磁盘路径统一走这里，避免各处手拼反斜杠。
+ * 注意源码转义：写 '\\' 得到一个反斜杠，写 '\\\\' 会得到运行时的两个。
  */
 function normalizeWinPath(p) {
   var s = String(p == null ? '' : p).trim();
   if (!s) return '';
-  var unc = /^\\\\/.test(s);
-  s = s.replace(/\//g, '\\').replace(/\\+/g, '\\');
-  if (unc && !/^\\\\/.test(s)) s = '\\' + s;
+  s = s.replace(/\//g, '\\');
+  var unc = /^\\\\/.test(s);          // 先统一分隔符再判 UNC，否则 //server/share 会被压成 \server\share
+  s = s.replace(/\\+/g, '\\');
+  if (unc) s = '\\' + s;
   return s.replace(/\\+$/, '');
 }
 function joinWinPath(root, parts) {
@@ -137,29 +138,78 @@ function deobfuscate(str) {
 
 /** 提示条 */
 var Toast = {
-  show: function (msg, type, ms) {
+  /** 组装一条提示。ms > 0 时顶部有一条倒计时进度条，走完自动关闭 —— 所有有时限的
+   *  提示都走这里，别再各写一套：进度条是 CSS 动画、关闭是 setTimeout，
+   *  两者共用同一个 ms，分开算就会出现「条走完了窗还在」。 */
+  make: function (opts) {
+    opts = opts || {};
     var root = $('#toastRoot');
-    if (!root) { console.log('[toast]', msg); return; }
-    var icons = { ok: 'check', err: 'error', warn: 'warning', info: 'info' };   // v2.3.27：Toast 图标位改用内联 SVG
-    var node = el('div', { class: 'toast toast-' + (type || 'info') }, [
-      ICONS.make(icons[type || 'info'] || 'info', { size: 15, class: 'toast-ico' }),
-      el('span', { class: 'toast-msg', text: msg })
+    if (!root) { console.log('[toast]', opts.msg); return null; }
+    var type = opts.type || 'info';
+    var ms = (opts.ms == null) ? 2600 : Number(opts.ms);
+    var icons = { ok: 'check', err: 'error', warn: 'warning', info: 'info' };   // 图标位用内联 SVG，不依赖字体
+    var closed = false, timer = null;
+    var bar = ms > 0 ? el('i', { style: { animationDuration: ms + 'ms' } }) : null;
+    var actBtn = null;
+    if (opts.action && typeof opts.action.onClick === 'function') {
+      actBtn = el('button', { class: 'toast-act', type: 'button' }, opts.action.text || '撤回');
+    }
+    var node = el('div', {
+      class: 'toast toast-' + type + (ms > 0 ? ' toast-timed' : '') + (actBtn ? ' toast-undo' : '')
+    }, [
+      bar ? el('div', { class: 'toast-prog' }, [bar]) : null,
+      el('div', { class: 'toast-row' }, [
+        ICONS.make(opts.icon || icons[type] || 'info', { size: 15, class: 'toast-ico' }),
+        el('span', { class: 'toast-msg', text: opts.msg }),
+        actBtn
+      ])
     ]);
-    root.appendChild(node);
-    requestAnimationFrame(function () { node.classList.add('in'); });
-    setTimeout(function () {
+    function close() {
+      if (closed) return;
+      closed = true;
+      if (timer) { clearTimeout(timer); timer = null; }
       node.classList.remove('in');
       setTimeout(function () { if (node.parentNode) node.parentNode.removeChild(node); }, 260);
-    }, ms || 2600);
-    return node;
+    }
+    if (actBtn) {
+      actBtn.addEventListener('click', function () {
+        if (closed) return;
+        actBtn.disabled = true;      // 连点两次会把同一件事做两遍（恢复、撤回都是写库）
+        close();
+        try { opts.action.onClick(); }
+        catch (e) { if (window.console) console.warn('[toast] 动作失败：' + ((e && e.message) || e)); }
+      });
+    }
+    root.appendChild(node);
+    requestAnimationFrame(function () { node.classList.add('in'); });
+    if (ms > 0) timer = setTimeout(close, ms);
+    return { node: node, close: close };
+  },
+
+  show: function (msg, type, ms) {
+    var h = Toast.make({ msg: msg, type: type, ms: ms });
+    return h ? h.node : null;
   },
   ok: function (m, ms) { return Toast.show(m, 'ok', ms); },
   err: function (m, ms) { return Toast.show(m, 'err', ms || 4200); },
   warn: function (m, ms) { return Toast.show(m, 'warn', ms || 3600); },
-  info: function (m, ms) { return Toast.show(m, 'info', ms); }
+  info: function (m, ms) { return Toast.show(m, 'info', ms); },
+
+  /** 可撤销提示：10 秒内点按钮执行 onAction，进度条走完就关（关闭与条共用同一个 ms） */
+  undo: function (msg, opts) {
+    opts = opts || {};
+    var ms = Math.max(1000, opts.ms || 10000);
+    return Toast.make({
+      msg: msg, type: 'info', ms: ms, icon: opts.icon || 'trash',
+      action: {
+        text: opts.actionText || '撤回',
+        onClick: function () { if (typeof opts.onAction === 'function') opts.onAction(); }
+      }
+    });
+  }
 };
 
-/** 复制到剪贴板（含降级方案） */
+/** 复制到剪贴板；非安全上下文没有 navigator.clipboard，退回 execCommand */
 function copyText(text) {
   if (navigator.clipboard && window.isSecureContext) {
     return navigator.clipboard.writeText(text).then(function () { return true; }).catch(fallback);
@@ -227,7 +277,7 @@ function compressImage(src, maxWidth, quality) {
   });
 }
 
-/** 图片转 PNG：输入 Blob/File/DataURL/URL，输出 PNG Blob（本身已是 PNG 且不需缩放则原样返回，避免二次编码）；maxWidth 给定时按宽度等比缩小 */
+/** 图片转 PNG；本身已是 PNG 且不需缩放时原样返回，避免二次编码掉画质 */
 function toPngBlob(src, maxWidth) {
   if (src && typeof src !== 'string') {
     if (src.type === 'image/png' && !maxWidth) return Promise.resolve(src);
@@ -264,7 +314,11 @@ function toPngBlob(src, maxWidth) {
 
 /** 安全 JSON 解析 */
 function safeJSON(text, fallbackValue) {
-  try { return JSON.parse(text); } catch (e) { return fallbackValue; }
+  if (text == null) return fallbackValue;   // JSON.parse(null) 返回 null 而不抛错
+  try {
+    var v = JSON.parse(text);
+    return (v && typeof v === 'object') ? v : fallbackValue;
+  } catch (e) { return fallbackValue; }
 }
 
 /** 数组去重 */
@@ -297,6 +351,7 @@ var collator = (function () {
 /** 简易 CSV 字段转义 */
 function csvCell(v) {
   var s = v == null ? '' : String(v);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;   // 前置单引号：标题以 = + - @ 开头时 Excel 会当公式执行
   if (/[",\n\r]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
   return s;
 }

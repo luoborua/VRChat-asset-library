@@ -1,16 +1,11 @@
-/* ============ 95-shell-bridge.js ============ */
-/* =====================================================================
- * 95-shell-bridge.js  —  Tauri 载体的拖拽桥
+/*
+ * 95-shell-bridge.js  —  主进程拖拽事件的转接层
  *
- * 为什么需要它：
- *   WebView2 只要开着原生拖放（Tauri 默认），DOM 的 dragover / drop 就收不到，
- *   而页面又必须拿到**磁盘绝对路径**（导入要复制/移动原文件，光有 File 内容不够）。
- *   所以主进程收 WindowEvent::DragDrop，把 {kind, paths, x, y} 发过来，
- *   这里再合成标准的 dragover / drop 事件还给页面。
- *
- * 结果：89-pack.js 的遮罩提示、拖图设封面、按内容分流那套逻辑一行都不用改，
- *       因为它们拿到的还是同一个 drop 事件、同一个 dataTransfer.files。
- * ===================================================================== */
+ * 负责：把主进程推来的 vrc://drag 帧（{kind, paths, x, y}）合成标准的
+ *       dragover / drop / dragleave 事件，页面照常走自己那套拖放逻辑。
+ * 与谁交互：window.__TAURI__.event.listen 收帧，取文件字节走 vrcasset:// 自定义协议。
+ * 边界：不复制文件，也不改 89-pack.js 的分流规则 —— 只造事件与文件替身。
+ */
 
 (function () {
   var T = window.__TAURI__;

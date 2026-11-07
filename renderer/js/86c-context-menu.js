@@ -1,15 +1,11 @@
-/* ============ 86c-context-menu.js ============ */
-/* =====================================================================
+/*
  * 86c-context-menu.js  —  素材右键菜单
  *
- * 目标（用户原话）：「在编辑方面也希望能便捷一些，先加一个右键该素材时的选单」。
- * 所以这里只做两件事：
- *   ① CtxMenu：一个通用的浮层菜单（定位夹在视口内、键盘 ↑↓/Enter/Esc、点外面关闭、二级菜单）；
- *   ② AssetMenu：素材专属的菜单内容 —— 编辑 / 重命名 / 分类 / 标签 / 角色 / 打开路径 /
- *      复制 / 喜欢 / 隐藏 / 导出素材包 / 删除。
- *
- * 不做的事：不在菜单里放「需要再走一遍长表单」的重操作；长操作一律交给详情页或编辑弹窗。
- * ===================================================================== */
+ * 负责：CtxMenu 一个通用浮层菜单（视口内夹取定位、键盘导航、悬停二级菜单），
+ *       AssetMenu 素材专属的菜单内容（编辑 / 分类 / 标签 / 角色 / 路径 / 复制 / 删除）。
+ * 与谁交互：菜单动作调用 App / Modals / Packer / WB，菜单自身不读写存储。
+ * 边界：不放需要走长表单的重操作 —— 那类一律交给详情页或编辑弹窗。
+ */
 
 var CtxMenu = (function () {
   var cur = null;      // { root, onDown, onKey, onBlur, levels, idx }
@@ -65,11 +61,8 @@ var CtxMenu = (function () {
   }
 
   /**
-   * open(x, y, items) —— x/y 用 clientX/clientY（菜单是 position:fixed）
-   * v4.4.1：二级菜单改成**悬停浮出**（90ms 防抖，避免快速划过时乱弹）：
-   *   · 悬停带 sub 的项 → 右侧浮出；右边放不下自动翻到左侧，纵向也夹在视口内；
-   *   · 指针斜穿到浮层时不会闪断（主菜单移出不立即关，进浮层就取消）；
-   *   · 键盘 → 打开、← 返回、Esc 先关浮层再关主菜单。
+   * open(x, y, items) —— x/y 用 clientX/clientY（菜单是 position:fixed）。
+   * 二级菜单悬停 90ms 后浮出，右边放不下翻到左侧；键盘 → 打开、← 返回、Esc 逐层关。
    */
   function open(x, y, items) {
     close();
@@ -252,9 +245,9 @@ var CtxMenu = (function () {
 })();
 
 
-/* =====================================================================
+/*
  * AssetMenu —— 素材右键菜单的内容
- * ===================================================================== */
+ */
 var AssetMenu = (function () {
 
   /** 卡片里的 `a` 是渲染那一刻的快照，写回前必须拿库里最新的一条 */
@@ -267,9 +260,8 @@ var AssetMenu = (function () {
     mutate(live);
     live.updatedAt = nowISO();
     return App.save(live).then(function () {
-      /* v6.6：加标签 / 评分 / 隐藏这类「只改一条」的操作只重画那一张卡，
-       * 不再 UI.renderAll() —— 整页重建会让所有卡片重播入场动画（页面闪一下）。
-       * 卡片被筛掉或翻到别的页时，refreshCard 自己会退回整体重绘。 */
+      /* 只改一条的操作只重画那一张卡：整页重建会让所有卡片重播入场动画。
+       * 卡片被筛掉或翻到别的页时，refreshCard 会退回整体重绘。 */
       UI.refreshCard(live.id) || UI.renderAll();   // 找不到那张卡（异常情形）就退回整体重绘
       UI.renderSidebar();          // 侧栏里「喜欢 / 标签 / 分类」的计数要跟着变
       if (okText) Toast.ok(okText, 3200);
@@ -284,8 +276,7 @@ var AssetMenu = (function () {
       .catch(function () { Toast.err('复制失败'); });
   }
 
-  /* v5.6（用户要求）：右键改名不再自己拼一套逻辑 —— 统一交给 App.renameAssetTo：
-   * 查重 → 改磁盘目录 → 更新存储路径 → 落库 → 刷新卡片与详情页。 */
+  /* 改名统一交给 App.renameAssetTo：查重 → 改磁盘目录 → 更新存储路径 → 落库 → 刷新。 */
   function rename(a) {
     var live = liveOf(a);
     Modal.prompt('新的标题（留空 / 取消 = 不改）', live.title || '', {
@@ -338,13 +329,13 @@ var AssetMenu = (function () {
 
   function removeAsset(a) {
     var title = a.title || a.originalTitle || '（未命名）';
-    Modal.confirm('删除素材「' + title + '」？\n\n只删素材库里的这条记录和封面缓存，磁盘上的文件不会被动。',
+    Modal.confirm('删除素材「' + title + '」？\n\n只摘掉素材库里的记录，磁盘上的文件不会被动。\n删掉的记录会进回收站，48 小时内可以找回。',
       { title: '删除素材', okText: '删除' }).then(function (ok) {
         if (!ok) return;
         var live = liveOf(a);
-        App.remove(live.id).then(function () {
+        App.remove(live.id).then(function (asset) {
           UI.renderAll();
-          Toast.ok('已删除「' + title + '」');
+          App.deletedToast([asset || live]);     // 10 秒内可撤回，错过就在左侧「回收站」里找回
         }).catch(function (e) {
           Toast.err('删除失败：' + ((e && e.message) || e), 6000);
         });
@@ -376,7 +367,15 @@ var AssetMenu = (function () {
             checked: c.id === cur.category,
             action: function () {
               if (c.id === cur.category) return;
-              commit(cur, function (x) { x.category = c.id; }, '已移到「' + c.label + '」');
+              var oldCat = cur.category;
+              var pr = commit(cur, function (x) { x.category = c.id; }, '已移到「' + c.label + '」');
+              /* 分类换了：库内文件夹跟着搬到新分类目录 */
+              if (pr && pr.then) {
+                pr.then(function () {
+                  var live2 = (App.assets || []).filter(function (x) { return x.id === cur.id; })[0] || cur;
+                  App.relocateToCategory(live2, oldCat).catch(function () {});
+                });
+              }
             }
           };
         })
@@ -396,7 +395,7 @@ var AssetMenu = (function () {
       link ? {
         label: '打开商店页面',
         icon: 'link',
-        action: function () { window.open(link.url, '_blank', 'noopener'); }
+        action: function () { FS.openExternal(link.url); }
       } : null,
       {
         label: '复制…',
@@ -426,7 +425,7 @@ var AssetMenu = (function () {
         }
       },
       { label: '导出为素材包', icon: 'parcel', action: function () { Packer.exportDialog([cur]); } },
-      /* v6.7（用户要求）：右键直接送进 Unity —— 以前只有详情页和多选浮动按钮有这个入口 */
+      /* 右键直接把素材送进「导入与工程」的队列 */
       {
         label: '导入到 Unity',
         icon: 'box',

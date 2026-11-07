@@ -25,11 +25,19 @@
 - `download-queue.json` — 下载队列
 - `trash\` — 被替换掉的旧版本，保留 30 天
 
+## 怎么运行
+
+双击 `启动素材库_Electron版.bat`。运行时已经放在 `electron/node_modules/electron/` 里，不需要单独装环境。
+
 ## 自己构建
 
-需要 Rust 和 Tauri 2，环境要求写在 [`src-tauri/README.md`](src-tauri/README.md)。
+边车（改模工作台的磁盘部分）需要 Rust 与 gnu 工具链：
 
 ```
-powershell -File src-tauri/build/build-tauri.ps1                       日常构建
-powershell -File src-tauri/build/build-tauri.ps1 -Configuration release  发布版，会做 LTO，体积小一点
+cd host-sidecar
+cargo +stable-x86_64-pc-windows-gnu build --release
+copy target\release\vrclib-host.exe ..\host\vrclib-host.exe
 ```
+
+本机默认的 MSVC 工具链会把 `link.exe` 解析成 Git 自带的 `link` 而报错，所以必须显式指定上面那个 toolchain。
+前端不需要构建：Electron 直接从 `renderer/` 读文件，改完重启窗口即可。

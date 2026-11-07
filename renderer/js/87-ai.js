@@ -1,11 +1,11 @@
-/* ============ 87-ai.js ============ */
-/* =====================================================================
+/*
  * 87-ai.js  —  DeepSeek AI 翻译（标签 / 简介 / 标题汉化）
- *   · 用户批复范围：可选配置 API Key（本机 AES-GCM 加密，永不随备份导出）
- *   · 仅在用户点击「AI 翻译」时发起请求；全部由程序后端直连 DeepSeek，
- *     不经过任何代理；后端离线时 AI 翻译暂不可用，页面其他功能不受影响
- *   · 结果写入本地缓存，避免重复调用
- * ===================================================================== */
+ *
+ * 负责：拼提示词、走流式或整份请求、解析 JSON、写本地翻译缓存。
+ * 与谁交互：请求经 FS.host 的 fetch / stream 直连 DeepSeek；Key 由 Secure 加解密，
+ *           术语表来自 settings.userTagDict。
+ * 边界：只在用户点「AI 翻译」时联网；Key 不随备份导出，缓存命中就不重复调用。
+ */
 
 var AI = (function () {
 
@@ -21,7 +21,7 @@ var AI = (function () {
     };
   }
 
-  /** 官方已改名的旧模型（api-docs：模型名请使用 deepseek-flash） */
+  /** 官方已改名的模型：调用前统一换成当前名字 */
   var RETIRED_MODELS = { 'deepseek-v4-flash': 'deepseek-flash' };
 
   function normalizeConfig() {
@@ -29,9 +29,8 @@ var AI = (function () {
     if (!a.model) a.model = 'deepseek-flash';
     if (RETIRED_MODELS[a.model]) a.model = RETIRED_MODELS[a.model];
     if (!a.apiBase) a.apiBase = 'https://api.deepseek.com';
-    // v2.3.27 修复：历史明文 Key 做一次性真加密。
-    // 旧写法 a.apiKeyEnc = 'enc:' + a.apiKey 只是加前缀，Secure.decrypt 会按 AES 去解 → 失败 → catch 返回 ''，
-    // 于是启动时（90-main.js 会调用本函数）历史 Key 被无声清空。
+    // 库里可能还留着明文 Key：只加 'enc:' 前缀会让解密按 AES 去解、
+    // 失败后返回空串，等于启动时把 Key 无声清空。
     var step = Promise.resolve();
     if (a.apiKey) {
       var plain = String(a.apiKey);
@@ -62,9 +61,9 @@ var AI = (function () {
     return Promise.resolve(deobfuscate(payload));
   }
 
-  /* ---------------- 请求超时（v2.5.15：可在设置里配；秒/毫秒自动归一化） ----------------
-   * 思路借鉴 kiss-translator（fishjar/kiss-translator）的 httpTimeout：老配置可能是毫秒（>600），
-   * 新配置按秒记；两端都做限幅，避免用户填 0 或 999999 把界面拖死。 */
+  /* ---------------- 请求超时（秒 / 毫秒自动归一化） ----------------
+   * 老配置可能按毫秒记（>600），新配置按秒记；两端都要限幅，
+   * 避免填 0 或 999999 把界面拖死。 */
   var DEFAULT_TIMEOUT_SEC = 120;
   function httpTimeoutMs() {
     var v = Number((App.settings.ai || {}).httpTimeout);
@@ -72,8 +71,8 @@ var AI = (function () {
     var ms = v > 600 ? v : v * 1000;
     return Math.min(600000, Math.max(10000, Math.round(ms)));
   }
-  /** 术语表：把个人词典里「原文 ≠ 译文」的条目做成「原文 = 译文」行，注入 system prompt
-   *  （kiss-translator 的「自定义 AI 术语词典」思路）—— 保证同一术语每次译法一致。 */
+  /** 术语表：把个人词典里「原文 ≠ 译文」的条目做成「原文 = 译文」行注入 system prompt，
+   *  保证同一术语每次译法一致。 */
   function glossaryLines(max) {
     var dict = App.settings.userTagDict || {};
     var keys = Object.keys(dict);
@@ -141,8 +140,7 @@ var AI = (function () {
             return data;
           });
         }
-        /** v2.5.15：流式（后端 2.3.18 的 /api/stream）——长回答边到边用，后端侧是**空闲超时**，
-         *  不会因为"整份响应太慢"被掐断；页面侧还能实时显示进度。 */
+        /** 流式：长回答边到边用，后端按空闲超时计，不会因为整份响应太慢被掐断 */
         function viaStream() {
           var acc = '';
           return FS.host.streamFetch(url, hdrs, 'POST',
@@ -184,10 +182,10 @@ var AI = (function () {
 
   /* ---------------- 缓存 ---------------- */
   function cacheMap() { return Store.kvGet(CACHE_STORE, {}); }
-  /* v2.5.3：翻译缓存加上限——原来只增不减，批量翻译会让这张表无限膨胀（每次落盘还要整表写回）。
+  /* 翻译缓存要有上限：只增不减会让这张表无限膨胀，每次落盘还要整表写回。
    * 字符串键保留插入顺序，超限时丢最早写入的条目。 */
   var CACHE_MAX = 2000;
-  /** v4.3.2：长文本的缓存键。djb2 —— 够快，且不同简介撞键的概率可以忽略。 */
+  /** 长文本的缓存键：djb2 够快，不同简介撞键的概率可以忽略 */
   function textHash(s) {
     var h = 5381;
     for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
@@ -258,7 +256,7 @@ var AI = (function () {
 
   /** 单块翻译：强制 JSON 输出 {"0": "中文", ...} */
   function translateChunk(part, key, onLog) {
-    /* v2.5.15：把个人词典做成术语表注入（同一术语每次译法一致） */
+    /* 把个人词典做成术语表注入，保证同一术语每次译法一致 */
     var prompt = glossaryBlock(60) +
       '你是 VRChat 改模素材标签的日英->简体中文翻译器。把下列词语/短语翻译成中文素材标签风格（服装、发型、功能组件、着色器等语境），专有名词（如 VRChat、PhysBone、lilToon、BOOTH、Quest）保留原文。\n' +
       '只输出一个 JSON 对象，键为数字序号（字符串），值为中文翻译，不要输出任何解释。\n' +
@@ -272,7 +270,7 @@ var AI = (function () {
     var lastTick = 0;
     return chatCompletion(messages, {
       json: true, key: key,
-      // v2.5.15：流式进度（后端 2.3.18 起）——长回答不再"静默等"，也便于判断是不是卡住
+      // 流式进度：长回答不再静默等待，也便于判断是不是卡住
       onDelta: function (t, acc) {
         var now = Date.now();
         if (now - lastTick > 1500) { lastTick = now; onLog('\u23F3 接收中 ' + acc.length + ' 字符 …'); }
@@ -308,9 +306,8 @@ var AI = (function () {
     return getApiKey().then(function (key) {
       if (!key) { var e = new Error('未配置 DeepSeek API Key'); e.code = 'NO_KEY'; throw e; }
       return Store.kvGet(CACHE_STORE, {}).then(function (map) {
-        /* v4.3.2：缓存键以前只用前 60 个字。BOOTH 店铺模板的开头常常一模一样
-         * （「ご購入ありがとうございます。本商品は…」），于是两个不同商品会共用同一份译文，
-         * 用户还会看到「命中缓存」，把错的译文存进简介。改成「长度 + 全文哈希」。 */
+        /* 缓存键不能用开头几十个字：店铺模板的开头往往一模一样，
+         * 两个不同商品会共用同一份译文。改成「长度 + 全文哈希」。 */
         var ck = 'txt:' + text.length + ':' + textHash(text);
         if (map[ck] !== undefined) { onLog('\u2714 命中简介翻译缓存'); return map[ck]; }
         onLog('\u23F3 正在翻译简介（' + Math.min(text.length, 2000) + ' 字符）…');
@@ -321,7 +318,7 @@ var AI = (function () {
           var out = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
           out = String(out).replace(/^\s*(json|\u0060\u0060\u0060json|\u0060\u0060\u0060)\s*/i, '').replace(/\u0060\u0060\u0060\s*$/, '').trim();
           map[ck] = out;
-          /* 以前这里直接 kvSet，绕过了 CACHE_MAX —— 简介条目可以无限长（v2.5.3 的上限只管标签）。 */
+          /* 这里也要过 trimCache：简介条目长度不受标签上限约束，绕过去等于没有上限 */
           return Store.kvSet(CACHE_STORE, trimCache(map)).then(function () { return out; });
         });
       });
@@ -354,8 +351,7 @@ var AI = (function () {
   }
 
   /**
-   * AI 建议合并冗余标签：
-   * 输入一组当前标签，返回 [{canonical, members:[...]}]。
+   * AI 建议合并冗余标签，返回 [{canonical, members}]；
    * 结果只做建议，最终由用户在设置页勾选审批后应用。
    */
   function suggestConsolidations(tags, onLog) {
@@ -394,10 +390,8 @@ var AI = (function () {
   }
 
   /* ------------------------------------------------------------------
-   * 模糊搜索词表（v2.2.12）
-   * 把标签词典 + 支持角色（三语名/别名）+ 分类名 + 来源名交给 DeepSeek，
-   * 生成 { 原词: [近义词, 俗称, 常见错拼…] } 写入 settings.fuzzyDict。
-   * 只在你点按钮时调用，搜索过程本身不联网。
+   * 模糊搜索词表：把标签词典 + 角色名 + 分类名 + 来源名交给 DeepSeek，
+   * 生成 { 原词: [近义词, 俗称, 常见错拼…] } 写进 settings.fuzzyDict；只在点按钮时调用。
    * ------------------------------------------------------------------ */
   function fuzzySourceTerms() {
     var seen = Object.create(null), out = [];

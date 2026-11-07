@@ -1,16 +1,10 @@
-/* ============ 89-pack.js ============ */
-/* =====================================================================
- * 89-pack.js  —  素材包（.vrcpack）：导出与导入
- *
- * 定位（用户原话：「像 MC 的 PCL 启动器那样，打完整包」）：
- *   · 导出 = 把选中的素材连**文件本体**一起打成一个包，别人导入即用；
- *   · 包就是**标准 zip**，只是扩展名不同 —— 对方没装本程序，或只想看看里面有什么，
- *     双击 / 7-Zip 直接解压就是排好的「素材/<标题>/<原始文件>」，不会是打不开的私有格式；
- *   · 素材里的文件形态不限（zip / 7z / rar / unitypackage / 散文件目录都行），
- *     目录会**递归收全并保留子目录结构**，不会把 textures/ 这类结构摊平。
- *
- * 不做的事：不做在线传输。包怎么给到对方（微信 / 网盘 / U 盘）由用户自己决定。
- * ===================================================================== */
+/*
+ * 89-pack.js  —  素材包（.vrcpack）的导出、导入与清单对比
+ *   导出把素材连同文件本体打成标准 zip（只是扩展名不同），超限按体积拆成可独立导入的分包；
+ *   导入先 inspect 出清单，再由用户逐条选择动作；对比只读清单与本库。
+ *   交互：FS.host.pack 负责真正读写包，App/Store 读写素材库，Modal/Toast 承担反馈。
+ *   边界：不做在线传输，包怎么送到对方手上由用户自己决定。
+ */
 
 var Packer = (function () {
   var st = { busy: '', pct: 0, note: '', polling: null };
@@ -38,11 +32,8 @@ var Packer = (function () {
     return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '_' + p(d.getHours()) + p(d.getMinutes());
   }
 
-  /* v6.6：单个素材包上限 1 GB。
-     超了就按体积拆成 xxx-part1.vrcpack / part2 …，每个包都是**完整可独立导入**的，
-     不是必须凑齐才能解的分卷。理由很实际：U 盘 FAT32 单文件上限 4 GB、
-     微信/QQ 传文件有大小限制、部分网盘单文件也卡 1～4 GB，
-     给对方一个 3 GB 的包等于让他没法接收。 */
+  /* 单个包上限 1 GB，超出按体积拆成 part1 / part2，每个包都能独立导入。
+     卡在 1 GB 是因为 FAT32 单文件 4 GB、聊天工具与网盘的单文件限制，再大对方就收不了。 */
   var PART_LIMIT = 1024 * 1024 * 1024;
 
   /** 按 fileSize 顺序装箱：同一素材不会被拆到两个包里，单个超限的素材自己占一包。 */
@@ -62,10 +53,7 @@ var Packer = (function () {
   /* ------------------------------------------------------------------ */
 
   /**
-   * 一条素材 → [{ rel, path }]
-   * 路径可能是单个压缩包，也可能是解压后的整个文件夹：
-   *   · 文件  → 直接收，rel = 文件名
-   *   · 目录  → **递归全收**，rel = 相对该目录的路径（保留 textures/、materials/ 这类子结构）
+   * 一条素材 → [{ rel, path }]。文件直接收；目录递归收全并保留 textures/ 这类子结构，不摊平。
    */
   function collectFiles(asset) {
     var roots = ((asset && asset.paths) || [])
@@ -73,6 +61,7 @@ var Packer = (function () {
       .filter(function (p) { return !!p; });
 
     var out = [];
+    var missing = [];
     var seen = Object.create(null);
     var chain = Promise.resolve();
 
@@ -81,14 +70,12 @@ var Packer = (function () {
         return FS.host.exists(root).then(function (kind) {
           if (kind === 'file') {
             var name = baseName(root);
-            /* v4.3.2：去重键必须带来源路径。以前只按文件名比，
-             * 一条素材同时登记了「原始位置」和「存储路径」时，两个目录里的同名文件
-             * 只会被打进包里一份，另一份静默消失。 */
+            /* 去重键必须带来源路径：只按文件名比，两个目录里的同名文件只会进包一份 */
             var fkey = root + '\u0000' + name;
             if (name && !seen[fkey]) { seen[fkey] = 1; out.push({ rel: name, path: root, size: 0 }); }
             return;
           }
-          if (kind !== 'dir') return;
+          if (kind !== 'dir') { missing.push(root); return; }
           return FS.host.scan(root, 0).then(function (entries) {     // maxDepth=0 → 全递归
             (entries || []).forEach(function (e) {
               if (!e || e.kind !== 'file') return;
@@ -99,18 +86,18 @@ var Packer = (function () {
               out.push({ rel: rel, path: joinWinPath(root, [rel]), size: e.size || 0 });
             });
           });
-        }).catch(function () {});
+        }).catch(function () { missing.push(root); });
       });
     });
 
-    return chain.then(function () { return out; });
+    // 缺失的根路径挂在数组上透出，调用方据此提示
+    return chain.then(function () { out.missing = missing; return out; });
   }
 
-  /** 封面转 base64（封面只存在 IndexedDB 的 blob 里，没有稳定磁盘路径，直接读出来塞进包） */
+  /** 封面优先给磁盘路径，取不到才退回 base64（有的封面只存在于 IndexedDB 的 blob 里） */
   function coverData(asset) {
     if (!asset || !asset.hasCover) return Promise.resolve(null);
-    /* v6.1：磁盘上已有 covers\<id>.<ext> 就直接交路径，让 Rust 侧流式写进包。
-     * 只有「封面仅存在于 IndexedDB」的老数据才退回 base64。 */
+    /* 磁盘上已有封面文件就给路径，让后端流式写进包；只有仅存 IndexedDB 的才转 base64 */
     var preferPath = !!(typeof FS !== 'undefined' && FS.host && FS.host.bytesSupported && FS.host.bytesSupported());
     if (preferPath && App.diskCoverFile) {
       return App.diskCoverFile(asset).then(function (f) {
@@ -158,6 +145,7 @@ var Packer = (function () {
     /* 署名：对方导入时会显示「来自「X」」，并作为他的落地目录名。
      * 记进设置里，下次导出自动带出。 */
     var signName = String((App.settings && App.settings.nickname) || '').trim();
+    var missingWarned = false;
     var totalBytes = 0;
     list.forEach(function (a) { totalBytes += Number(a.fileSize || 0); });
 
@@ -210,7 +198,7 @@ var Packer = (function () {
             el('span', { class: 'pack-dim', text: '（备注常写私下信息，默认不带）' })
           ])
         ]),
-        /* 对方想要「我库里都有啥」时，只要这份清单就够了 —— 一键切到纯清单模式，不用逐项取消 */
+        /* 只想要清单时一键切换，不必逐项取消勾选 */
         el('div', { class: 'btn-row' }, [
           el('button', {
             class: 'btn btn-sm',
@@ -244,14 +232,30 @@ var Packer = (function () {
       body.appendChild(btnRow);
     }
 
+    /* 进度行只建一次，之后只改文本与宽度。取消按钮要一直留在原位 ——
+     * 每次重设进度都重建 DOM 的话，用户正要点的那颗按钮会在动画里被换掉。 */
+    var progText = null, progBar = null, progCancel = null, cancelling = false;
     function setProg(text, pct) {
       prog.style.display = '';
-      prog.innerHTML = '';
-      prog.appendChild(el('div', { class: 'pack-prog-text', text: text }));
-      prog.appendChild(el('div', { class: 'pack-prog-bar' }, [
-        el('i', { style: { width: Math.max(0, Math.min(100, pct || 0)) + '%' } })
-      ]));
+      if (!progText) {
+        progText = el('div', { class: 'pack-prog-text' });
+        progBar = el('i');
+        prog.appendChild(progText);
+        prog.appendChild(el('div', { class: 'pack-prog-bar' }, [progBar]));
+        progCancel = el('button', { class: 'btn btn-sm pack-cancel', type: 'button', text: '取消' });
+        progCancel.addEventListener('click', function () {
+          if (cancelling) return;
+          cancelling = true;
+          progCancel.textContent = '正在停止…';
+          progCancel.disabled = true;
+          FS.host.pack('cancel', {}).catch(function () {});
+        });
+        prog.appendChild(progCancel);
+      }
+      progText.textContent = text;
+      progBar.style.width = Math.max(0, Math.min(100, pct || 0)) + '%';
     }
+    function hideCancel() { if (progCancel) progCancel.style.display = 'none'; }
 
     function setButtonsDisabled(dis) {
       Array.prototype.forEach.call(btnRow.querySelectorAll('button'), function (b) { b.disabled = dis; });
@@ -263,17 +267,19 @@ var Packer = (function () {
         title: '保存素材包',
         defaultPath: joinWinPath(App.libraryRoot(), [name]),
         filters: [
-          { name: '素材包', extensions: ['vrcpack'] },
-          { name: '普通 zip（对方没装本程序也能解压）', extensions: ['zip'] }
+          { name: '素材包', extensions: ['vrcpack'] }
         ]
       }).then(function (r) {
         if (!r || r.ok === false) return null;
         var outPath = r.path;
-        if (!/\.(vrcpack|zip)$/i.test(outPath)) outPath += '.vrcpack';
+        // 后端只认 .vrcpack：用户即使手输 .zip，也在调用前改写
+        if (/\.zip$/i.test(outPath)) outPath = outPath.replace(/\.zip$/i, '.vrcpack');
+        else if (!/\.vrcpack$/i.test(outPath)) outPath += '.vrcpack';
 
         setButtonsDisabled(true);
+        missingWarned = false;
 
-        /* 超过 1 GB 就分批：文件名加 -part1 / -part2…，每个包都能单独导入 */
+        /* 超过上限就分批：文件名加 -part1 / -part2，每个包都能单独导入 */
         var chunks = chunkBySize(list, PART_LIMIT);
         var multi = chunks.length > 1;
         var m = outPath.match(/\.(vrcpack|zip)$/i);
@@ -309,21 +315,29 @@ var Packer = (function () {
             results.forEach(function (x, i2) { Toast.info('第 ' + (i2 + 1) + ' 包：' + x.path, 9000); });
           }
           Toast.info('对方收到后，把包直接拖进程序窗口就能导入（也可以双击解压当普通压缩包用）', 9000);
-          /* openPath 是「触发式」的：它内部自己处理失败并给提示，返回 undefined（没有 Promise）——
-           * 这里加 .catch 会直接抛 "Cannot read properties of undefined"。 */
+          /* openPath 是触发式的：自己处理失败并给提示，返回 undefined，附加 .catch 会直接抛错 */
           try { FS.openPath(dirName(results[0].path)); } catch (e) {}
         });
       }).catch(function (e) {
         stopPoll();
+        hideCancel();
         setButtonsDisabled(false);
-        setProg('失败：' + ((e && e.message) || e), 0);
-        Toast.err('导出失败：' + ((e && e.message) || e), 7000);
+        var msg = String((e && e.message) || e);
+        /* 取消不是失败：后端已经把半截包删了，这里不该弹红条吓人 */
+        if (msg.indexOf('取消') >= 0) {
+          setProg('已取消', 0);
+          Toast.info('已取消导出，没有留下半个包', 5000);
+          return;
+        }
+        setProg('失败：' + msg, 0);
+        Toast.err('导出失败：' + msg, 7000);
       });
     }
 
     /** 收集这一批素材的文件与封面，写成一个包（分包由 doExport 决定调用几次） */
     function exportChunk(items, partPath, tag) {
       var entries = [];
+      var missing = 0;
       var chain = Promise.resolve();
       items.forEach(function (a, i) {
         chain = chain.then(function () {
@@ -332,21 +346,21 @@ var Packer = (function () {
             opt.withFiles ? collectFiles(a) : Promise.resolve([]),
             opt.withCovers ? coverData(a) : Promise.resolve(null)
           ]).then(function (r) {
+            if (r[0] && r[0].missing) missing += r[0].missing.length;
             entries.push({
               id: a.id,
               title: a.title, originalTitle: a.originalTitle,
               category: a.category, source: a.source,
               tags: a.tags, avatars: a.avatars,
               itemId: a.itemId, shop: a.shop, author: a.author,
-              /* v6.6：带上商店链接 —— 接收方靠它判重（对方库里同链接的素材能认出来）。
-                 下载直链（downloadLinks）故意不带：那是本人的订单地址，给出去等于把付费内容送人。 */
+              fileId: App.fileIdOf(a),     // 好友导入时先按它认同一份
+              /* 带商店链接方便对方打开商品页；下载直链故意不带——那是本人的订单地址，等于把付费内容送人 */
               links: (a.links || []).slice(),
               isFree: a.isFree, fileSize: a.fileSize,
               note: a.note,
               purchasePrice: a.purchasePrice, purchaseCurrency: a.purchaseCurrency,
               files: r[0],
-              /* v6.1：Tauri 下封面走磁盘路径（后端直接流式写进包），不再转 base64；
-               * Electron 仍走 base64 分支，两边产物完全一致。 */
+              /* 有磁盘路径就走路径，后端直接流式写进包；否则带上 base64，导入端两种都认 */
               coverPath: r[1] && r[1].path ? r[1].path : '',
               coverBase64: r[1] && r[1].b64 ? r[1].b64 : '',
               coverExt: r[1] ? r[1].ext : ''
@@ -355,6 +369,10 @@ var Packer = (function () {
         });
       });
       return chain.then(function () {
+        if (missing && !missingWarned) {
+          missingWarned = true;
+          Toast.warn('有 ' + missing + ' 个存储路径不存在或读不到，包内会缺少对应文件', 8000);
+        }
         setProg((tag ? tag + ' · ' : '') + '正在写入素材包…（大文件请稍候，不要关闭窗口）', 0);
         startPoll(tag);
         return FS.host.pack('export', {
@@ -438,12 +456,11 @@ var Packer = (function () {
   }
 
   /* ------------------------------------------------------------------ */
-  /* 拖拽导入（v4.2.1）                                                   */
+  /* 拖拽导入                                                            */
   /* ------------------------------------------------------------------ */
 
-  /** 把 drop 事件里的 File 换成磁盘路径。
-   *  Electron 32 起 File.path 被移除，必须走 preload 的 webUtils.getPathForFile；
-   *  其它环境（旧壳 / 浏览器）退回 file.path。 */
+  /** 把 drop 里的 File 换成磁盘路径：新版 Electron 已移除 File.path，
+   *  需走 preload 的 webUtils.getPathForFile，取不到再退回 file.path。 */
   function filePathOf(file) {
     try {
       if (window.vrcElectron && typeof window.vrcElectron.getPathForFile === 'function') {
@@ -471,11 +488,8 @@ var Packer = (function () {
   }
 
   /**
-   * v4.4：拖入的文件按「内容」而不是按「扩展名白名单」分流。
-   *   · 单个 .vrcpack        → 素材包预览（原有行为）
-   *   · 单个 .zip            → 先当素材包试读；没有 vrcpack.json 就是普通压缩包 → 通用导入
-   *   · unitypackage / rar / 7z / 文件夹 / 其它 → 通用导入（89b-drop-import.js）
-   * 以前这里只放行 .vrcpack / .zip，拖 unitypackage 或普通 zip 直接报「只支持素材包」。
+   * 拖入的文件按内容分流：.vrcpack 直接预览；单个 .zip 先试读素材包，无清单就当普通压缩包；
+   * unitypackage / rar / 7z / 文件夹走通用导入。
    */
   function routeDropped(items) {
     var paths = items.map(function (it) { return it.path; }).filter(Boolean);
@@ -488,7 +502,7 @@ var Packer = (function () {
     })).then(function (kinds) {
       items.forEach(function (it, i) { it.isDir = kinds[i] === 'dir'; });
 
-      /* 素材包优先：拖进来的只要有 .vrcpack，就按素材包导入（多拖的其它文件只提示） */
+      /* 素材包优先：只要有 .vrcpack 就按素材包走，多拖的其它文件只提示 */
       var packItem = null;
       items.forEach(function (it) { if (!it.isDir && /\.vrcpack$/i.test(it.name)) packItem = packItem || it; });
       if (packItem) {
@@ -517,6 +531,7 @@ var Packer = (function () {
     });
   }
 
+  /** 安装全窗口拖拽：压缩包 / 文件夹走导入，图片拖到缩略图位置则设为封面 */
   function installDropZone() {
     var HINT = '松开即可导入素材（素材包 / zip / unitypackage / 文件夹）';
     var hideTimer = null;
@@ -524,7 +539,7 @@ var Packer = (function () {
     function hasFiles(e) {
       var dt = e && e.dataTransfer;
       if (!dt || !dt.types) return false;
-      /* v5.2：页面内拖出来的图片也会带 Files，但同时带 text/html —— 那不是「拖文件进来」 */
+      /* 页面内拖出的图片也带 Files，但同时带 text/html，那种不算拖文件进来 */
       for (var j = 0; j < dt.types.length; j++) {
         if (dt.types[j] === 'text/html' || dt.types[j] === 'text/uri-list') return false;
       }
@@ -532,7 +547,7 @@ var Packer = (function () {
       return false;
     }
 
-    /* ---- v4.7：把图片拖到缩略图上 = 设为封面（卡片封面 + 详情页大图） ---- */
+    /* ---- 图片拖到缩略图上 = 设为封面（卡片封面 + 详情页大图） ---- */
     var IMG_RE = /\.(png|jpe?g|webp|gif|bmp|tga|tiff?)$/i;
     function coverOf(e) {
       var el = e && e.target;
@@ -598,8 +613,8 @@ var Packer = (function () {
       if (!hasFiles(e)) return;
       e.preventDefault();
 
-      /* v4.7：悬停在缩略图 / 详情页大图上、且拖的全是图片 → 改成「设为封面」的落点提示。
-       * 详情页大图本身就在弹窗里，所以这一条要放行；其它元素仍按「有窗口开着」拦。 */
+      /* 悬停在缩略图上且拖的全是图片时，改提示为「设为封面」；
+       * 详情页大图本身就在弹窗里，所以这一条要放行，其它元素仍按「有窗口开着」拦。 */
       var cvHit = coverOf(e);
       var cv = null;
       if (cvHit) {
@@ -635,7 +650,7 @@ var Packer = (function () {
       var files = e.dataTransfer.files || [];
       if (!files.length) return;
 
-      /* v4.7：拖到某个卡片的缩略图上、且全是图片 → 设为该素材的封面，不进导入流程 */
+      /* 拖到封面位置且全是图片 → 设为封面，不进导入流程 */
       var cvDrop = coverOf(e);
       if (cvDrop && filesOnlyImages(files)) {
         var coverAsset = coverAssetOf(cvDrop);
@@ -678,10 +693,10 @@ var Packer = (function () {
   }
 
   /* ------------------------------------------------------------------ */
-  /* 清单对比（v4.3.0）                                                  */
+  /* 清单对比                                                            */
   /*                                                                     */
-  /* 场景：朋友把「他库里已经有什么」导出成清单发给你，你想知道**自己有什么是他没有的**， */
-  /*       挑出来打包补给他。方向和导入正好相反 —— 这里只读清单、只读本库，不写任何数据。 */
+  /* 对方导出清单发过来，这里算「我有、他没有」的那批，供打包补发。            */
+  /* 只读清单与本地库，不写任何数据，方向和导入正好相反。                    */
   /* ------------------------------------------------------------------ */
 
   function normKey(s) {
@@ -697,8 +712,11 @@ var Packer = (function () {
   function diffAgainst(manifest) {
     var metas = (manifest && Array.isArray(manifest.assets)) ? manifest.assets : [];
     var ids = Object.create(null);
+    var fids = Object.create(null);
     var titles = Object.create(null);
     metas.forEach(function (m) {
+      var fid = Store.fileIdKey(m.fileId);
+      if (fid) fids[fid] = 1;
       var iid = String(m.itemId || '').trim();
       if (iid) ids[iid] = 1;
       var t = normKey(m.title); if (t) titles[t] = 1;
@@ -709,19 +727,20 @@ var Packer = (function () {
     var missing = [];
     var matched = 0;
     mine.forEach(function (a) {
+      var fid = Store.fileIdKey(Store.fileIdOf(a));
       var iid = String(a.itemId || '').trim();
       var t = normKey(a.title);
       var o = normKey(a.originalTitle);
-      var has = (iid && ids[iid]) || (t && titles[t]) || (o && titles[o]);
+      var has = (fid && fids[fid]) || (iid && ids[iid]) || (t && titles[t]) || (o && titles[o]);
       if (has) { matched++; return; }
       missing.push(a);
     });
     return { mineTotal: mine.length, listedTotal: metas.length, matched: matched, missing: missing };
   }
 
-  /* ---------------- 相似项提示（v4.3.1） ----------------
-   * 严格判据（商品 ID / 标题全等）解决不了「同一件东西两边起了不同名字」。这里再给每条差集
-   * 找「对方清单里最像的一条」，命中就标出来交给人判断 —— 只提示，**不改变**有无的判定。 */
+  /* ---------------- 相似项提示 ----------------
+   * 严格判据（商品 ID / 标题全等）认不出「同一件东西两边起了不同名字」，
+   * 这里再给每条差集找最像的一条，只做提示，不改变有无的判定。 */
 
   var SIM_THRESHOLD = 0.45;    // 低于这个值不值得打扰用户
   /* 比较次数上限：实测 1000×1000 约 450ms，再多会让打开窗口明显停顿。
@@ -1052,49 +1071,44 @@ var Packer = (function () {
   }
 
   /* ------------------------------------------------------------------
-   * v4.6：素材包导入预览（逐条选择 + 逐条动作 + 同源 ID 判重）
+   * 素材包导入预览（逐条选择 + 逐条动作 + 判重）
    *
-   * 判重顺序（findExisting2）：同源素材 ID → 商品 ID → 标题。
-   *   同源 ID 只在「对方的库是从您这份复制出去」时才对得上；对不上就照旧回落。
-   * 每条单独一个复选框 + 动作（仅对「已有」的条目）：
-   *   跳过 / 更新元数据 / 更新元数据 + 追加文件 / 新增一条。
-   * 顶部三个单选项是「批量套用」，改一次会把所有条目重置成该策略。
+   * 判重只看素材编号（findExisting2）：改名、挪分类、换链接都不影响判定。
+   * 每条一个复选框 + 动作（仅对「已有」的条目）：跳过 / 更新元数据 / 更新 + 追加文件 / 新增一条。
+   * 顶部单选项是批量套用，改一次会把所有条目重置成该策略。
    * ------------------------------------------------------------------ */
 
+  /** 清单里那条的素材编号：优先自带，老包没有时按同一条规则从商品号推（BOOTH 编号就是商品号）。
+   *  统一大写 —— 编号比较一律大小写不敏感，否则对方包里写小写就会漏判、重复导入一份。 */
+  function metaFileId(meta) {
+    var fid = Store.fileIdKey((meta && meta.fileId) || '');
+    if (fid) return fid;
+    var iid = String((meta && meta.itemId) || '').trim();
+    return /^\d+$/.test(iid) ? iid : '';
+  }
+
+  /** 判重只看素材编号：这一个字段在两边都跟着记录走，改名、挪分类、换链接都不影响。
+   *  包里的条目没有编号（很早的版本导出、又没有商品号）时无从校验，按新素材处理。 */
   function findExisting2(meta, assets) {
-    var id = String(meta.id || '').trim();
-    if (id) {
-      for (var i = 0; i < assets.length; i++) {
-        if (String(assets[i].id) === id) return { asset: assets[i], by: '同源 ID' };
-      }
-    }
-    var iid = String(meta.itemId || '').trim();
-    if (iid) {
-      for (var j = 0; j < assets.length; j++) {
-        if (String(assets[j].itemId || '').trim() === iid) return { asset: assets[j], by: '商品 ID' };
-      }
-    }
-    /* v6.6：商店链接重叠也算同一条（老包没有 links 字段，取到空数组自然跳过）。
-       这一档补的是「对方改过标题、又没有商品 ID」的情况 —— 链接一样就是同一件东西。 */
-    var mLinks = (meta.links || []).map(function (l) {
-      return String((l && l.url) || l || '').trim();
-    }).filter(isHttpUrl);
-    if (mLinks.length) {
-      for (var n = 0; n < assets.length; n++) {
-        var bLinks = ((assets[n] && assets[n].links) || []).map(function (l) {
-          return String((l && l.url) || l || '').trim();
-        });
-        for (var q = 0; q < bLinks.length; q++) {
-          if (bLinks[q] && mLinks.indexOf(bLinks[q]) >= 0) return { asset: assets[n], by: '商店链接' };
-        }
-      }
-    }
-    var t = String(meta.title || '').trim().toLowerCase();
-    if (!t) return null;
-    for (var k = 0; k < assets.length; k++) {
-      if (String(assets[k].title || '').trim().toLowerCase() === t) return { asset: assets[k], by: '标题' };
+    var fid = metaFileId(meta);
+    if (!fid) return null;
+    for (var i = 0; i < assets.length; i++) {
+      if (Store.fileIdKey(Store.fileIdOf(assets[i])) === fid) return { asset: assets[i], by: '素材编号' };
     }
     return null;
+  }
+
+  /** 导入时给「新增一条」定编号。
+   *  同一份素材在两边必须是同一个编号（这才叫身份），所以对方带号、本库又没人用，就照抄；
+   *  本库已有素材占着这个号（典型是选了「全部新增一条」）必须另发新号 ——
+   *  否则两条素材共用编号，下次导入判重会把它们当成同一份，元数据互相覆盖。
+   *  BOOTH 商品号例外：它由商品决定，同一商品天然是同一份，改号反而丢了身份。 */
+  function allocImportFileId(m, taken) {
+    var fid = String((m && m.fileId) || '').trim();
+    var booth = Store.boothIdOf({ itemId: (m && m.itemId), links: (m && m.links), sourceURL: (m && m.sourceURL) });
+    if (booth) return Store.reserveFileId(booth);
+    if (fid && !Store.isFileIdTaken(fid, taken)) return Store.reserveFileId(fid);
+    return Store.newFileId(taken);
   }
 
   var PACK_ACTIONS = [
@@ -1107,18 +1121,12 @@ var Packer = (function () {
   function showPreview(path, res) {
     var mf = res.manifest || {};
     var assets = App.assets || [];
-    /* 包内自查重（v6.6）：对方库里本身就有两条同商品/同链接的记录时，以前会原样建两条。
-       现在后出现的那条标成「包内重复」并默认不勾 —— 要留着自己勾上就行。 */
+    /* 包内自查重：同一包里同商品 / 同链接的记录只默认勾第一条，后出现的标成重复 */
     var seenInPack = Object.create(null);
+    /* 包内自查重同样只看编号：同一个包里两条编号一样，才算是同一份 */
     function packKeys(m) {
-      var keys = [];
-      var iid = String(m.itemId || '').trim();
-      if (iid) keys.push({ key: 'iid:' + iid, by: '商品 ID' });
-      (m.links || []).forEach(function (l) {
-        var u = String((l && l.url) || l || '').trim();
-        if (isHttpUrl(u)) keys.push({ key: 'url:' + u, by: '商店链接' });
-      });
-      return keys;
+      var fid = metaFileId(m);
+      return fid ? [{ key: 'fid:' + fid, by: '素材编号' }] : [];
     }
     var plan = (mf.assets || []).map(function (m) {
       var hit = findExisting2(m, assets);
@@ -1159,14 +1167,30 @@ var Packer = (function () {
       return v || '好友素材包';
     }
 
+    /* 同导出面板：进度结构只建一次，取消按钮固定位置 */
+    var progText = null, progBar = null, progCancel = null, cancelling = false;
     function setProg(text, pct) {
       prog.style.display = '';
-      prog.innerHTML = '';
-      prog.appendChild(el('div', { class: 'pack-prog-text', text: text }));
-      prog.appendChild(el('div', { class: 'pack-prog-bar' }, [
-        el('i', { style: { width: Math.max(0, Math.min(100, pct || 0)) + '%' } })
-      ]));
+      if (!progText) {
+        progText = el('div', { class: 'pack-prog-text' });
+        progBar = el('i');
+        prog.appendChild(progText);
+        prog.appendChild(el('div', { class: 'pack-prog-bar' }, [progBar]));
+        progCancel = el('button', { class: 'btn btn-sm pack-cancel', type: 'button', text: '取消' });
+        progCancel.addEventListener('click', function () {
+          if (cancelling) return;
+          cancelling = true;
+          progCancel.textContent = '正在停止…';
+          progCancel.disabled = true;
+          FS.host.pack('cancel', {}).catch(function () {});
+        });
+        prog.appendChild(progCancel);
+      }
+      progText.textContent = text;
+      progBar.style.width = Math.max(0, Math.min(100, pct || 0)) + '%';
     }
+    function hideCancel() { if (progCancel) progCancel.style.display = 'none'; }
+
     function startPoll() {
       stopPoll();
       pollTimer = setInterval(function () {
@@ -1197,9 +1221,12 @@ var Packer = (function () {
       var c = counts();
       var picked = plan.filter(function (p) { return p.sel; }).length;
       var dupe = plan.filter(function (p) { return p.dupeOf; }).length;
+      /* 判重只看编号，包里没编号的条目认不回来，必须要说清「会新增」而不是让人以为漏判 */
+      var noId = plan.filter(function (p) { return !p.existing && !metaFileId(p.meta); }).length;
       statsLine.textContent = '已勾选 ' + picked + ' 条'
         + ' · 新增 ' + c.add + ' · 更新元数据 ' + c.upd + ' · 更新+文件 ' + c.app + ' · 跳过 ' + c.skip
-        + (dupe ? '（其中 ' + dupe + ' 条包内重复，默认不勾）' : '');
+        + (dupe ? '（其中 ' + dupe + ' 条包内重复，默认不勾）' : '')
+        + (noId ? '（' + noId + ' 条没带素材编号，按新素材处理）' : '');
     }
 
     function applyStrategy(val) {
@@ -1346,7 +1373,13 @@ var Packer = (function () {
       ['title', 'originalTitle', 'category', 'source', 'shop', 'author', 'itemId'].forEach(function (k) {
         if (m[k]) live[k] = m[k];
       });
-      /* v6.6：链接按 url 去重后并入，不覆盖已有的（对方那条可能只是同一商品的另一个页面） */
+      /* 编号只补不改：本地的编号是对外身份，不能被别人的包改掉。
+       * 补的时候也要查占用 —— 抄一个本库别条正用着的号，就变成两条同号了。 */
+      if (!String(live.fileId || '').trim() && m.fileId) {
+        var cand = String(m.fileId).trim();
+        if (!Store.isFileIdTaken(cand, App.fileIdTakenMap(live.id))) live.fileId = Store.reserveFileId(cand);
+      }
+      /* 链接按 url 去重后并入，不覆盖已有的：对方那条可能只是同一商品的另一个页面 */
       if (Array.isArray(m.links) && m.links.length) {
         var have = Object.create(null);
         (live.links || []).forEach(function (l) { if (l && l.url) have[l.url] = 1; });
@@ -1383,6 +1416,9 @@ var Packer = (function () {
 
       var needExtract = !!mf.withFiles && (toCreate.length + toAppend.length) > 0;
       var onlyIds = toCreate.concat(toAppend).map(function (p) { return p.meta.id; });
+      /* 本库已占用的编号快照：批量新建时只算一次；本次刚发出去的号由 Store 内部的
+       * reserved 表兜住，不会因为「还没进 App.assets」而发重。 */
+      var idTaken = App.fileIdTakenMap();
 
       busy = true;
       Array.prototype.forEach.call(btnRow.querySelectorAll('button'), function (b) { b.disabled = true; });
@@ -1441,6 +1477,10 @@ var Packer = (function () {
             tags: (m.tags || []).slice(),
             avatars: (m.avatars || []).slice(),
             itemId: m.itemId || '',
+            /* 保留对方的编号；包里没带（老版本导出的）就现生成一个，别留空 */
+            /* 编号：对方带了、本库又没人用就照抄（两边同一个身份）；被占用就另发新号，
+             * 绝不让两条素材共用一个编号，见 allocImportFileId。 */
+            fileId: allocImportFileId(m, idTaken),
             /* 包里可能是 {url,label}，也可能只有一串 url（别人手改过清单），统一成 {url,label} */
             links: (m.links || []).map(function (l) { return String((l && l.url) || l || '').trim(); })
               .filter(isHttpUrl)
@@ -1474,10 +1514,18 @@ var Packer = (function () {
         });
       }).catch(function (e) {
         stopPoll();
+        hideCancel();
         busy = false;
         Array.prototype.forEach.call(btnRow.querySelectorAll('button'), function (b) { b.disabled = false; });
-        setProg('失败：' + ((e && e.message) || e), 0);
-        Toast.err('导入失败：' + ((e && e.message) || e), 9000);
+        var msg = String((e && e.message) || e);
+        /* 解包取消时已解出的文件是留在盘上的，提示必须说清，否则用户以为白占了空间却找不到 */
+        if (msg.indexOf('取消') >= 0) {
+          setProg('已取消', 0);
+          Toast.warn(msg, 9000);
+          return;
+        }
+        setProg('失败：' + msg, 0);
+        Toast.err('导入失败：' + msg, 9000);
       });
     }
 
@@ -1545,6 +1593,10 @@ var Packer = (function () {
     compareDialog: compareDialog,
     diffAgainst: diffAgainst,
     collectFiles: collectFiles,
+    /* 给自测用：判重规则单独暴露，才能在不开导入界面的情况下验证「按编号认出同一份」 */
+    findExisting: findExisting2,
+    /* 给自测用：导入时的编号分配（新增一条也不能和人共用编号） */
+    allocImportFileId: allocImportFileId,
     /* 给自测用：分包规则单独暴露一份，免得为了测它真去导 1 GB 的包 */
     partLimit: PART_LIMIT,
     chunkBySize: chunkBySize

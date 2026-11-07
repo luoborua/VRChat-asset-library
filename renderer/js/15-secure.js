@@ -1,10 +1,10 @@
-/* ============ 15-secure.js ============ */
-/* =====================================================================
- * 15-secure.js  —  本机加密（仅用于用户手动输入的 Cookie）
- *   · 使用 Web Crypto AES-GCM，密钥为「不可导出」CryptoKey，存于本机 IndexedDB
- *   · 托管对象：站点 Cookie / AI Key / GitHub Token（账号密码一律不存储）
- *   · 非安全上下文 / 无 crypto.subtle 时降级为混淆编码，并在界面明确提示
- * ===================================================================== */
+/*
+ * 15-secure.js —— 凭据加解密：站点 Cookie、AI Key、GitHub Token 存盘前加密。
+ * 交互：密钥经 Store 的键值表保存在本机，对外只暴露 encrypt / decrypt / available / level。
+ * 边界：不管业务字段与落盘位置，也不处理账号密码——那类数据一律不存。
+ * 降级：LocalStorage 模式或非安全上下文拿不到 CryptoKey，只能退回混淆编码，
+ *       此时 level() 报 strong=false，由界面如实提示。
+ */
 
 var Secure = (function () {
   var keyP = null;
@@ -16,7 +16,7 @@ var Secure = (function () {
   function getKey() {
     if (keyP) return keyP;
     keyP = Promise.resolve().then(function () {
-      if (!available() || !Store.isIDB) return null;      // LocalStorage 无法保存 CryptoKey
+      if (!available() || !Store.isIDB) return null;      // 降级到 LocalStorage 存不了 CryptoKey，只能走混淆
       return Store.kvGet('cryptoKey', null).then(function (k) {
         if (k) return k;
         return crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
@@ -53,7 +53,7 @@ var Secure = (function () {
     }).catch(function () { return obfuscate(text); });
   }
 
-  /** 解密（返回 Promise<string>），兼容旧的混淆编码 */
+  /** 解密（返回 Promise<string>）；无 enc: 前缀的按混淆编码读，兼容尚未重加密的存量凭据 */
   function decrypt(payload) {
     var s = String(payload || '');
     if (!s) return Promise.resolve('');

@@ -1,7 +1,0 @@
-{
-  "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "default",
-  "description": "默认能力：核心 API + 原生对话框 + 打开外部链接。开发模式走 vrclibdev 自定义协议，属自家源，不需要 remote 放行。",
-  "windows": ["main"],
-  "permissions": ["core:default", "dialog:default", "opener:default"]
-}

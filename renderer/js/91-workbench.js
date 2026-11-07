@@ -1,18 +1,10 @@
-/* ============ 91-workbench.js ============ */
-/* =====================================================================
- * 91-workbench.js  —  导入与工程（原「改模工作台」，v6.8 改名并成为左侧页签）
- *
- * 这一页只做三件事（对应 docs/改模工作台-逻辑拆分.md）：
- *   1. 登记 Unity 工程、检查准备情况      —— L01~L13
- *   2. 把素材文件夹复制进工程并记账        —— L14~L34
- *   3. 把「没做什么」说清楚               —— 预检、回执、失败原因
- *
- * 真正的改模发生在 Unity 里。这里不假装能自动适配、不假装能判断穿模，
- * 只保证：导入不重复、位置能找到、失败有理由。
- *
- * 磁盘重活全在 Rust（src-tauri/src/host/workbench_api.rs），
- * 这边只负责状态机、话术和界面。
- * ===================================================================== */
+/*
+ * 91-workbench.js —— 导入与工程页：登记 Unity 工程、核对 SDK 依赖、管理导入队列与记录。
+ *   导入从素材库发起（卡片/详情/拖放调 WB.importToUnity），本页只负责「导入到哪个工程」
+ *   与进度回执；与 FS.host.wb / App / Store 协作，改模本身在 Unity 里。
+ *   状态：copying → waiting-unity → completed / failed / cancelled（GUID 冲突标 blocked）；
+ *   终态由后端回执或 Unity 助手推进，这里不判断适配与穿模，也不提供选文件夹导入。
+ */
 
 var WB = (function () {
 
@@ -45,11 +37,13 @@ var WB = (function () {
     opened: false,
     loaded: false,
     root: null,
+    /* 记录文件读不出来时置真：本次运行只读，绝不写回 */
+    readOnly: false,
     /* 上次没跑完的导入队列：{ projectId, projectPath, at, items:[{title, src}] } */
     resume: null
   };
 
-  /* ---------------- 持久化（L31） ---------------- */
+  /* ---------------- 持久化 ---------------- */
 
   function dataFile() {
     /* 与 20-store.js 同一标准：用户选过的数据目录（settings.localDataDir）优先，否则与 settings.json 同目录 */
@@ -69,27 +63,41 @@ var WB = (function () {
 
   function load() {
     var f = dataFile();
-    if (!f) return Promise.resolve();
-    return FS.host.readText(f).then(function (txt) {
-      if (!txt) return;
-      var data = safeJSON(txt, null);
-      if (!data || data.schema !== 1) return;
-      state.projects = Array.isArray(data.projects) ? data.projects.filter(validProjectRecord) : [];
-      state.jobs = Array.isArray(data.jobs) ? data.jobs.slice(0, MAX_JOBS) : [];
-      state.resume = (data.resume && Array.isArray(data.resume.items) && data.resume.items.length)
-        ? data.resume
-        : null;
-      var saved = data.lastProjectId || '';
-      state.projectId = state.projects.some(function (p) { return p.id === saved; }) ? saved : '';
-    }).catch(function () { /* 首次运行没有这个文件，正常 */ }).then(function () {
+    if (!f || !FS.hostAvailable()) return Promise.resolve();   // 浏览器里没有后端：不读也不告警
+    return FS.host.exists(f).then(function (kind) {
+      if (kind === 'missing') { state.readOnly = false; return null; }   // 首次运行：文件确实不存在才允许从空记录起步
+      if (kind !== 'file') return markUnreadable('不是普通文件');
+      return FS.host.readText(f).then(function (txt) {
+        var data = safeJSON(txt, null);
+        if (!data || data.schema !== 1) return markUnreadable('内容无法识别');
+        state.readOnly = false;
+        state.projects = Array.isArray(data.projects) ? data.projects.filter(validProjectRecord) : [];
+        state.jobs = Array.isArray(data.jobs) ? data.jobs.slice(0, MAX_JOBS) : [];
+        state.resume = (data.resume && Array.isArray(data.resume.items) && data.resume.items.length)
+          ? data.resume
+          : null;
+        var saved = data.lastProjectId || '';
+        state.projectId = state.projects.some(function (p) { return p.id === saved; }) ? saved : '';
+      });
+    }).catch(function (e) {
+      return markUnreadable((e && e.message) || String(e));
+    }).then(function () {
       state.loaded = true;
       offerResume();
     });
   }
 
-  /* v6.7（用户要求「工作台不要懒加载」）：启动后由 90-main 的空闲回调调用 preload()，
-     把工程列表 / 导入队列提前读进内存；ensureLoaded 保留幂等语义，
-     供「万一 preload 还没跑完就点了导入」这种情况兜底。 */
+  /* 记录文件存在但读不出来：置只读，避免下一次 save() 把工程登记和导入历史覆盖成空 */
+  function markUnreadable(why) {
+    var first = !state.readOnly;
+    state.readOnly = true;
+    console.warn('[workbench] workbench.json 不可用，已暂停写入：' + why);
+    if (first) Toast.warn('工作台记录文件读不出来（' + why + '）。为避免覆盖原有记录，本次运行不会写入 workbench.json。', 8000);
+    return null;
+  }
+
+  /* 启动后由空闲回调预读，别让用户第一次点开时干等磁盘；
+     ensureLoaded 仍是幂等入口，兜住「预读还没跑完就点了导入」这种情况。 */
   var loadingPromise = null;
   function ensureLoaded() {
     if (state.loaded) return Promise.resolve();
@@ -104,6 +112,7 @@ var WB = (function () {
   }
 
   function save() {
+    if (state.readOnly) return Promise.resolve(false);   // 读过失败：不写，别拿空记录覆盖原文件
     var f = dataFile();
     if (!f) return Promise.resolve();
     var text = JSON.stringify({
@@ -167,8 +176,8 @@ var WB = (function () {
   }
 
   /* =====================================================================
-   * 工程登记（L01~L08）
-   * ===================================================================== */
+   * 工程登记
+ */
 
   function addProject() {
     if (state.busy) return;
@@ -192,7 +201,7 @@ var WB = (function () {
         var key = cmpPath(r.root);
         var exist = state.projects.filter(function (p) { return cmpPath(p.path) === key; })[0];
         if (exist) {
-          // L05：已登记就复用原记录（保留首次添加时间），只是选中它
+          // 已登记就复用原记录，保留首次添加时间
           state.projectId = exist.id;
           Toast.info('这个工程已经在列表里了，已为你选中。');
         } else {
@@ -242,14 +251,17 @@ var WB = (function () {
   }
 
   /* =====================================================================
-   * 准备情况（L09~L13）
-   * ===================================================================== */
+   * 准备情况
+ */
 
   function check() {
     var p = cur();
     if (!p) { state.readiness = null; render(); return Promise.resolve(); }
+    var pid = p.id;
     setBusy(true);
     return wb('probe', { path: p.path }).then(function (r) {
+      /* 用户已经切到别的工程：这次结果属于旧工程，丢掉，别写到新工程头上 */
+      if (state.projectId !== pid) return null;
       if (!r || !r.valid) {
         p.missing = true;
         state.readiness = null;
@@ -274,7 +286,7 @@ var WB = (function () {
 
   /* =====================================================================
    * 安装 Unity 助手（导入桥）
-   * ===================================================================== */
+ */
 
   function helperButtonLabel() {
     var r = state.readiness;
@@ -302,8 +314,8 @@ var WB = (function () {
   }
 
   /* =====================================================================
-   * 打开 Unity（L45~L49）
-   * ===================================================================== */
+   * 打开 Unity
+ */
 
   function openUnity() {
     var p = cur();
@@ -322,325 +334,10 @@ var WB = (function () {
     }).catch(toastErr).then(function () { setBusy(false); });
   }
 
-  /* =====================================================================
-   * 导入（L14~L30）
-   * ===================================================================== */
-
-  function importFlow() {
-    var p = cur();
-    if (!p) { Toast.err('先在上方选一个 Unity 工程，再导入素材'); return; }
-    var h = Modal.open({
-      title: '导入素材',
-      size: 'sm',
-      body: [
-        el('p', { class: 'wb-hint', text: '选择素材的形式。两种都不会改动原素材。' })
-      ],
-      footer: [
-        el('button', { class: 'btn', onclick: function () { Modal.close(h); importFolder(p); } }, '📁 文件夹素材（复制）'),
-        el('button', { class: 'btn btn-primary', onclick: function () { Modal.close(h); importPackage(p); } }, '📦 Unity 素材包（.unitypackage）')
-      ]
-    });
-  }
-
-  function importFolder(p) {
-    FS.host.pickDir().then(function (dir) {
-      if (!dir) return;
-      setBusy(true);
-      var id = uid('job');
-      return wb('plan', { projectRoot: p.path, source: dir, id: id }).then(function (r) {
-        setBusy(false);
-        if (!r) return;
-        showPreview(r, id);
-      });
-    }).catch(toastErr).then(function () { setBusy(false); });
-  }
-
-  function importPackage(p) {
-    FS.host.pickFiles().then(function (files) {
-      if (!files || !files.length) return;      // 用户取消：静默
-      var pkg = files[0];
-      if (files.length > 1) Toast.info('一次只导入一个素材包，已取第一个。');
-      if (!/\.unitypackage$/i.test(pkg)) {
-        Toast.warn('请选择 .unitypackage 文件。');
-        return;
-      }
-      setBusy(true);
-      var id = uid('job');
-      return wb('plan', { projectRoot: p.path, source: pkg, id: id }).then(function (r) {
-        setBusy(false);
-        if (!r) return;
-        showPreview(r, id);
-      });
-    }).catch(toastErr).then(function () { setBusy(false); });
-  }
-
-  function showPreview(plan, jobId) {
-    if (plan.mode === 'unitypackage') return showPackagePreview(plan, jobId);
-    var ready = !!plan.ready;
-    /* B5：冲突全部来自同一素材的上一次导入时，允许「替换旧版本」（旧目录进回收站） */
-    var replaceable = !!plan.replaceDir;
-    var rows = [
-      ['目标工程', plan.projectRoot],
-      ['素材', plan.sourceName + '（' + plan.fileCount + ' 个文件 · ' + fmtMB(plan.bytes) + '）'],
-      ['将放到', plan.destRel]
-    ];
-
-    var body = [
-      el('table', { class: 'wb-table' }, rows.map(function (r) {
-        return el('tr', null, [
-          el('th', { text: r[0] }),
-          el('td', { class: 'wb-mono', text: r[1] })
-        ]);
-      })),
-      el('h3', { class: 'wb-h3', text: '导入前检查' })
-    ];
-
-    // L23：三项结论，角色适配永远只在「未知」，因为程序确实不知道
-    var checks = [
-      ['目标工程', 'pass', '目录存在，含 Assets / Packages / ProjectSettings'],
-      plan.conflicts.length
-        ? (replaceable
-          ? ['文件引用', 'warn', '这些 GUID 来自上次导入的同一素材，可以替换旧版本']
-          : ['文件引用', 'blocked', '发现 ' + plan.conflicts.length + ' 个重复 GUID，禁止导入'])
-        : (replaceable
-          ? ['文件引用', 'warn', '目标目录里已经是这份素材，可以替换成新导入的内容']
-          : ['文件引用', 'pass', '本次复制内容的 GUID 与工程现有文件不冲突']),
-      ['角色适配', 'unknown', '商品支持列表不等于本地包版本；体型与穿模需要你自己在 Unity 里看']
-    ];
-    body.push(el('ul', { class: 'wb-checks' }, checks.map(function (c) {
-      return el('li', { class: 'wb-check wb-check-' + c[1] }, [
-        el('b', { text: c[0] }),
-        el('span', { text: c[2] })
-      ]);
-    })));
-
-    if (plan.conflicts.length) {
-      body.push(el('div', { class: 'wb-warn' }, [
-        el('b', { text: 'GUID 冲突' }),
-        el('ul', null, plan.conflicts.slice(0, 5).map(function (c) {
-          return el('li', { class: 'wb-mono', text: c.sourcePath + ' ↔ ' + c.path });
-        })),
-        el('p', {
-          text: replaceable
-            ? '这些 GUID 全部来自「' + plan.replaceDir + '」，也就是这个素材上一次的导入。替换会把旧目录整体挪到回收站（不会直接删掉），再写入新内容。'
-            : '这是「同一个文件被两份素材各自带进来」的典型情况。覆盖会让 Unity 的引用指向错误的资源，所以这里不提供「强行导入」。'
-        })
-      ]));
-    }
-
-    if (plan.warnings && plan.warnings.length) {
-      body.push(el('div', { class: 'wb-note' }, [
-        el('b', { text: '提示' }),
-        el('ul', null, plan.warnings.map(function (w) { return el('li', { text: w }); }))
-      ]));
-    }
-
-    body.push(el('p', {
-      class: 'wb-hint',
-      text: replaceable
-        ? '点「替换旧版本」之前，程序不会写任何文件。旧目录会进回收站，原素材不动。'
-        : '点「导入到工程」之前，程序不会写任何文件。导入只是复制，不会移动或改动原素材。'
-    }));
-
-    var h = Modal.open({
-      title: '导入预览 · ' + plan.sourceName,
-      size: 'lg',
-      cls: 'wb-modal',
-      body: body,
-      footer: [
-        el('button', { class: 'btn', onclick: function () { Modal.close(h); } }, '取消'),
-        el('button', {
-          class: 'btn btn-primary',
-          disabled: !ready,
-          onclick: function () {
-            Modal.close(h);
-            doImport(plan, jobId, replaceable ? plan.replaceDir : '');
-          }
-        }, !ready ? '有冲突，不能导入' : (replaceable ? '替换旧版本并导入' : '导入到工程'))
-      ]
-    });
-  }
-
-  /* .unitypackage 的预览：不列文件（包是 gzip 的 tar，解包是 Unity 的活），
-   * 只讲清楚「谁来导、导到哪、你要做什么」 */
-  function showPackagePreview(plan, jobId) {
-    var installed = !!plan.bridgeInstalled;
-    var rows = [
-      ['目标工程', plan.projectRoot],
-      ['素材包', plan.sourceName + '（' + fmtMB(plan.bytes) + '）'],
-      ['导入方式', 'Unity 官方导入窗口 —— 请求会先放进工程，Unity 打开后弹窗，你确认后才写入']
-    ];
-    var body = [
-      el('table', { class: 'wb-table' }, rows.map(function (r) {
-        return el('tr', null, [
-          el('th', { text: r[0] }),
-          el('td', { class: 'wb-mono', text: r[1] })
-        ]);
-      })),
-      el('h3', { class: 'wb-h3', text: '导入前检查' })
-    ];
-    var checks = [
-      ['目标工程', 'pass', '目录存在，含 Assets / Packages / ProjectSettings'],
-      installed
-        ? ['Unity 助手', 'pass', '已安装（VrclibImportBridge.cs），Unity 打开后 1 秒内认领请求']
-        : ['Unity 助手', 'blocked', '工程里还没有助手 —— 点下面的按钮安装（会往 Assets/Editor 放一个 .cs 文件）'],
-      ['导入内容', 'unknown', '以 Unity 弹窗列出的清单为准；导入位置由包内结构决定，本程序不指定']
-    ];
-    body.push(el('ul', { class: 'wb-checks' }, checks.map(function (c) {
-      return el('li', { class: 'wb-check wb-check-' + c[1] }, [
-        el('b', { text: c[0] }),
-        el('span', { text: c[2] })
-      ]);
-    })));
-    if (!installed) {
-      body.push(el('div', { class: 'wb-note' }, [
-        el('b', { text: '关于这个助手' }),
-        el('ul', null, [
-          el('li', { text: '它是一个普通的 Unity Editor 脚本，不联网、不执行命令，只盯着工程 Library/VrclibBridge 目录里的导入请求。' }),
-          el('li', { text: '装完后 Unity 会编译一次（右下角转圈），之后每次导入都会弹出 Unity 官方窗口让你确认。' }),
-          el('li', { text: '不想要了直接删掉 Assets/Editor/VrclibImportBridge.cs 即可，没有任何残留。' })
-        ])
-      ]));
-    }
-    body.push(el('p', { class: 'wb-hint', text: '点「发送到 Unity」只会写入一个很小的请求文件；素材包本身不动，导入动作由你在 Unity 弹窗里确认。' }));
-
-    var h = Modal.open({
-      title: '导入预览 · ' + plan.sourceName,
-      size: 'lg',
-      cls: 'wb-modal',
-      body: body,
-      footer: [
-        el('button', { class: 'btn', onclick: function () { Modal.close(h); } }, '取消'),
-        el('button', {
-          class: 'btn btn-primary',
-          onclick: function () {
-            Modal.close(h);
-            if (installed) {
-              doImport(plan, jobId);
-            } else {
-              setBusy(true);
-              wb('installBridge', { projectRoot: plan.projectRoot }).then(function (r) {
-                Toast.ok((r && r.message) || 'Unity 助手已安装。');
-                plan.bridgeInstalled = true;
-                plan.ready = true;
-                doImport(plan, jobId);
-              }).catch(toastErr).then(function () { setBusy(false); });
-            }
-          }
-        }, installed ? '发送到 Unity' : '安装助手并发送')
-      ]
-    });
-  }
-
-  function doImport(plan, jobId, replaceDir) {
-    if (plan.mode === 'unitypackage') return doPackageImport(plan, jobId);
-    var p = cur();
-    if (!p) return;
-    setBusy(true);
-    var job = {
-      id: jobId,
-      projectId: p.id,
-      projectPath: p.path,
-      sourceName: plan.sourceName,
-      // 记录里显示用户选的那个目录；实际复制用的是剥掉 Assets 之后的 sourcePath
-      sourcePath: plan.sourceRoot || plan.sourcePath,
-      mode: 'copy',
-      state: 'copying',
-      fileCount: plan.fileCount,
-      completedFiles: 0,
-      bytes: plan.bytes,
-      signature: plan.signature,
-      destRel: plan.destRel,
-      createdAt: Date.now()
-    };
-    state.jobs.unshift(job);
-    save();
-    render();
-
-    wb('execute', {
-      projectRoot: p.path,
-      source: plan.sourcePath,
-      destRel: plan.destRel,
-      signature: plan.signature,
-      id: jobId,
-      replace: replaceDir || ''
-    }).then(function (r) {
-      job.state = 'completed';
-      job.completedFiles = r.copied || 0;
-      job.copiedBytes = r.bytes || 0;
-      job.skipped = r.skipped || 0;
-      job.finishedAt = Date.now();
-      job.message = (r.skipped ? ('跳过 ' + r.skipped + ' 个同名文件。') : '') +
-        ((r.warnings && r.warnings.length) ? ' ' + r.warnings.join(' ') : '');
-      if (r.replaced) {
-        job.replaced = true;
-        job.trashPath = r.trashPath || '';
-        Toast.ok('已导入 ' + job.completedFiles + ' 个文件，旧版本移到了回收站', 6000);
-      } else {
-        Toast.ok('已导入 ' + job.completedFiles + ' 个文件到 ' + r.destRel);
-      }
-      return save();
-    }).catch(function (e) {
-      job.state = 'failed';
-      job.finishedAt = Date.now();
-      job.message = String((e && e.message) || e);
-      toastErr(e);
-      return save();
-    }).then(function () {
-      setBusy(false);
-      render();
-      startPolling();
-    });
-  }
-
-  /* .unitypackage 的执行：写请求 → 记录进入「等待 Unity」→ 轮询回执 */
-  function doPackageImport(plan, jobId) {
-    var p = cur();
-    if (!p) return;
-    setBusy(true);
-    var job = {
-      id: jobId,
-      projectId: p.id,
-      projectPath: p.path,
-      sourceName: plan.sourceName,
-      sourcePath: plan.sourcePath,
-      mode: 'unitypackage',
-      state: 'waiting-unity',
-      fileCount: 1,
-      bytes: plan.bytes,
-      signature: plan.signature,
-      requestId: '',
-      createdAt: Date.now()
-    };
-    state.jobs.unshift(job);
-    save();
-    render();
-
-    wb('execute', {
-      projectRoot: p.path,
-      source: plan.sourcePath,
-      signature: plan.signature,
-      id: jobId
-    }).then(function (r) {
-      job.requestId = (r && r.requestId) || '';
-      job.message = (r && r.message) || '';
-      return save();
-    }).catch(function (e) {
-      job.state = 'failed';
-      job.finishedAt = Date.now();
-      job.message = String((e && e.message) || e);
-      toastErr(e);
-      return save();
-    }).then(function () {
-      setBusy(false);
-      render();
-      startPolling();
-    });
-  }
-
   /* ---------------- 回执轮询（waiting-unity 的任务） ---------------- */
 
   var pollTimer = null;
+  var pollOffset = 0;
 
   function startPolling() {
     if (pollTimer) return;
@@ -649,8 +346,13 @@ var WB = (function () {
       var pendingImports = state.jobs.filter(function (j) {
         return j.state === 'waiting-unity' && j.requestId;
       });
-      if (!pendingImports.length) { stopPolling(); return; }
-      pendingImports.slice(0, 5).forEach(checkReceipt);
+      if (!pendingImports.length) { stopPolling(); pollOffset = 0; return; }
+      /* 每轮最多查 5 条但起点轮转，队列超过 5 条时靠后的任务也能轮到 */
+      var n = pendingImports.length;
+      var batch = [];
+      for (var i = 0; i < n && batch.length < 5; i += 1) batch.push(pendingImports[(pollOffset + i) % n]);
+      pollOffset = (pollOffset + batch.length) % n;
+      batch.forEach(checkReceipt);
     }, 3000);
   }
   function stopPolling() {
@@ -789,7 +491,7 @@ var WB = (function () {
 
   /* =====================================================================
    * 渲染
-   * ===================================================================== */
+ */
 
   function setBusy(v) {
     state.busy = v;
@@ -801,10 +503,7 @@ var WB = (function () {
     var body = state.root.querySelector('.wb-body');
     body.innerHTML = '';
     body.appendChild(renderProject());
-    if (cur()) {
-      body.appendChild(renderReadiness());
-      body.appendChild(renderImport());
-    }
+    if (cur()) body.appendChild(renderReadiness());
     body.appendChild(renderJobs());
   }
 
@@ -874,20 +573,6 @@ var WB = (function () {
     ]);
   }
 
-  function renderImport() {
-    return el('section', { class: 'wb-card' }, [
-      el('div', { class: 'wb-card-head' }, [
-        el('h2', { text: '导入素材' }),
-        el('small', { text: '文件夹复制进工程，或 .unitypackage 交给 Unity 弹窗确认' })
-      ]),
-      el('div', { class: 'wb-row' }, [
-        el('button', { class: 'btn btn-primary', onclick: importFlow, disabled: state.busy }, '导入素材'),
-        el('button', { class: 'btn', onclick: showLog }, '查看 Unity 日志')
-      ]),
-      el('p', { class: 'wb-hint', text: '文件夹素材会列出「要复制哪些文件、会不会撞 GUID」，确认后复制到 Assets/VRCAL_Imports；Unity 素材包则写一个请求文件，等你在 Unity 的官方弹窗里确认。两种都不会改动原素材。' })
-    ]);
-  }
-
   function renderJobs() {
     var jobs = state.jobs.slice();
     var counts = { all: jobs.length, waiting: 0, attention: 0, completed: 0 };
@@ -914,7 +599,7 @@ var WB = (function () {
       el('div', { class: 'wb-row wb-row-tight' }, [filter]),
       shown.length
         ? el('div', { class: 'wb-jobs' }, shown.map(renderJob))
-        : el('p', { class: 'wb-hint', text: jobs.length ? '当前筛选没有记录。' : '还没有导入过。选一个素材文件夹试试。' })
+        : el('p', { class: 'wb-hint', text: jobs.length ? '当前筛选没有记录。' : '还没有导入过。在素材库的卡片上点「导入到工程」就会出现在这里。' })
     ]);
   }
 
@@ -977,7 +662,7 @@ var WB = (function () {
 
   /* =====================================================================
    * 页面容器
-   * ===================================================================== */
+ */
 
   function open() {
     if (state.opened) return;
@@ -987,7 +672,7 @@ var WB = (function () {
       el('header', { class: 'wb-head' }, [
         el('div', { class: 'wb-head-title' }, [
           el('b', { text: '导入与工程' }),
-          el('small', { text: '选工程 · 看准备情况 · 导入素材 · 记账' })
+          el('small', { text: '选工程 · 看准备情况 · 导入队列 · 记账' })
         ]),
         el('div', { class: 'grow' }),
         /* 导入队列的常驻入口：悬浮窗被收起或拖走了，这里也能点开 */
@@ -996,7 +681,7 @@ var WB = (function () {
           onclick: function () { if (taskPanel) openTaskPanel(); }
         }, '导入队列'),
         el('button', { class: 'btn', onclick: showLog }, 'Unity 日志'),
-        /* v6.8：工作台是页签，这里不再是「关闭」而是「切回素材库」 */
+        /* 页签形态下这里是「切回素材库」，不是关闭页面 */
         el('button', { class: 'icon-btn', title: '回到素材库 (Esc)', onclick: backToLibrary }, ICONS.label('\u2715'))
       ]),
       el('div', { class: 'wb-body' }, [
@@ -1029,8 +714,8 @@ var WB = (function () {
     setTimeout(function () { if (node.parentNode) node.parentNode.removeChild(node); }, 200);
   }
 
-  /* v6.8：页签切换只隐藏，不销毁 —— 回来时不用重建 DOM、也不用重读 workbench.json，
-   * 导入队列的轮询在后台照常跑（切回素材库也能继续收回执）。 */
+  /* 页签切换只隐藏不销毁：回来时不用重建 DOM、也不用重读记录文件，
+   * 回执轮询在后台照常跑，切回素材库也能收结果。 */
   function show() {
     if (!state.opened) { open(); return; }
     if (state.root) state.root.classList.add('in');
@@ -1049,7 +734,7 @@ var WB = (function () {
 
   function boot() {
     initCloseGuard();
-    /* 入口已经挪到左侧页签栏（90-main 的 Tab 模块），这里不再绑顶栏按钮 */
+    /* 入口在左侧页签栏（90-main 的 Tab 模块），这里只管 Esc 回素材库 */
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape' && state.opened && !document.querySelector('.modal-overlay')) backToLibrary();
     });
@@ -1067,10 +752,12 @@ var WB = (function () {
 
   /* ---------------- 关闭窗口：导入没完先问一句 ---------------- */
 
-  /* busy 在后端是「租约」：每 40 秒续一次，2 分钟有效。
-     页面崩了不续期，租约过期后窗口就能正常关掉，不会把用户锁死。 */
+  /* busy 在后端是租约：40 秒续一次、2 分钟有效，页面崩了过期就能关窗，不会把用户锁死；
+     用计数是因为两个导入同时跑时，先结束的那个不该撤掉租约。 */
+  var hostBusyCount = 0;
   function setHostBusy(on) {
-    var busy = !!on;
+    hostBusyCount = Math.max(0, hostBusyCount + (on ? 1 : -1));
+    var busy = hostBusyCount > 0;
     wb('setImportBusy', { busy: busy, keepMs: 120000 }).catch(function () {});
     if (busy) {
       if (!hostBusyTimer) {
@@ -1154,8 +841,7 @@ var WB = (function () {
     if (panel.resumeDismissBtn) panel.resumeDismissBtn.style.display = '';
   }
 
-  /* 素材库 → Unity：支持单张 / 多选，导入前必须选工程。
-     解压期间显示进度弹窗（后端把进度写在 extract-progress.json 里，这里轮询）。 */
+  /* 素材库 → Unity：导入前必须先选工程；解压进度由后端写文件，这里轮询读取 */
   function srcOf(asset) {
     var src = '';
     try {
@@ -1183,7 +869,7 @@ var WB = (function () {
     var added = 0;
     jobs.forEach(function (j) {
       var res = j.result || {};
-      /* 后端现在会把「单个包失败」记成 ok:false 的 job，而不是整批抛错。
+      /* 后端把「单个包失败」记成 ok:false 的 job 而不是整批抛错；
          这种条目不能写成一条正常记录，交给调用方计入失败清单。 */
       if (res.ok === false) return;
       added++;
@@ -1201,6 +887,7 @@ var WB = (function () {
         state: done ? 'completed' : 'waiting-unity',
         requestId: done ? '' : (res.requestId || res.id || ''),
         fileCount: res.files || 0,
+        completedFiles: done ? (res.files || 0) : 0,
         bytes: res.bytes || 0,
         createdAt: Date.now()
       });
@@ -1225,9 +912,8 @@ var WB = (function () {
 
   /* =====================================================================
    * 导入队列悬浮窗
-   * 和右下角的下载面板是同一形态：可拖动、默认贴右边、可以收成一条竖条。
-   * 收起 ≠ 关闭：队列还在跑，竖条一直留着，点一下（或再点「导入到 Unity」）就展开。
-   * ===================================================================== */
+   * 收起 ≠ 关闭：队列还在跑，竖条一直留着，点一下就展开。
+ */
   var taskPanel = null;
   /* 工作台标题栏上的常驻入口：悬浮窗被收起、被拖走的时候，从页面里也能点开 */
   var queueEntry = null;
@@ -1278,9 +964,8 @@ var WB = (function () {
     var badge = el('span', { class: 'wb-task-badge', text: '0' });
     var status = el('div', { class: 'wb-task-line', text: '准备中…' });
     var sub = el('div', { class: 'wb-task-sub', text: '' });
-    /* 收起态整条就是一个 <button>：以前收起后复用的是标题栏，而标题栏上绑着拖动
-       （mousedown 里 preventDefault），点一下会先走拖动判定，看起来就是「点不动」。
-       现在收起时标题栏整个隐藏，露出来的是一条纯按钮。 */
+    /* 收起态整条做成一个纯 <button>：标题栏绑着拖动，点按会先走拖动判定，
+       看起来就是「点不动」，所以收起时把标题栏整个隐藏。 */
     var stripBadge = el('span', { class: 'wb-task-badge', text: '0' });
     var stripArrow = el('span', { class: 'wb-task-strip-arrow', text: '\u2039' });
     var strip = el('button', {
@@ -1309,8 +994,8 @@ var WB = (function () {
         if (f) f();
       }
     }, '继续上次导入');
-    /* 上次的记录可能是「其实已经导完、只是程序没收到回执」（旧版等待逻辑会漏收）。
-       留个「忽略」，不然每次启动都弹一次已完成的任务。 */
+    /* 上次的记录可能是「其实已经导完、只是回执没收到」：留个「忽略」，
+       否则每次启动都会弹一次已经完成的任务。 */
     var resumeDismissBtn = el('button', {
       class: 'btn btn-sm', style: { display: 'none' },
       onclick: function () {
@@ -1322,7 +1007,7 @@ var WB = (function () {
         sub.textContent = '';
       }
     }, '忽略');
-    /* 临时动作位：等回执时如果发现助手是旧版 / 没心跳，这里会出现「更新 Unity 助手」 */
+    /* 临时动作位：等回执时发现助手版本不一致或没心跳，这里会出现「更新 Unity 助手」 */
     var actionBtn = el('button', {
       class: 'btn btn-sm wb-task-resume', style: { display: 'none' }
     }, '');
@@ -1349,7 +1034,7 @@ var WB = (function () {
       refreshQueueEntry();
     }
 
-    /* v6.9：跟下载气泡一样，只贴右边。按住标题栏只剩上下拖，横向锁在右边缘。 */
+    /* 跟下载气泡一样只贴右边：按住标题栏只能上下拖，横向锁在右边缘 */
     var st = { y: null };
     function place() {
       var w = root.offsetWidth || 320;
@@ -1357,9 +1042,8 @@ var WB = (function () {
       var x = Math.max(0, window.innerWidth - w);
       root.style.left = x + 'px';
       if (st.y == null) {
-        /* v6.9：默认贴底 170px（右下角是多选时的浮动动作区，约 133px 高 + 22px 边距）。
-         * 必须用 bottom 而不是算 top —— 折叠成竖条时高度只有 34px，用 top 定位会让面板
-         * 每次展开/收起上下跳 80 多 px，鼠标刚移上去面板就跳走，hover 会来回抖。 */
+        /* 贴底 170px 是给多选浮动动作区让位。定位要用 bottom 不能用 top：
+         * 折叠成竖条时高度只有 34px，用 top 会让面板每次展开 / 收起上下跳，鼠标一移上去就跳走。 */
         root.style.top = 'auto';
         root.style.bottom = '170px';
       } else {
@@ -1369,8 +1053,8 @@ var WB = (function () {
       stripArrow.textContent = '\u2039';
     }
 
-    /* v6.9：与下载面板同一套交互 —— 平时收成 34px 竖条，鼠标移入展开、移出收起。
-       拖动过程中不收起，否则拖到面板外会当场塌成条。 */
+    /* 平时收成 34px 竖条，鼠标移入展开、移出收起；拖动过程中不收起，
+       否则拖到面板外会当场塌成一条。 */
     root.addEventListener('mouseenter', function () {
       if (root.classList.contains('wb-task-dragging')) return;
       taskPanelSetCollapsed(false);
@@ -1380,7 +1064,7 @@ var WB = (function () {
       taskPanelSetCollapsed(true);
     });
 
-    // 按住标题上下拖；贴边方向固定朝右，不再吸附到左边（左边是页签栏）
+    // 按住标题上下拖；只贴右边，左边是页签栏，吸附过去会挡住导航
     head.addEventListener('mousedown', function (ev) {
       if (ev.target && ev.target.tagName === 'BUTTON') return;
       // 收起态标题栏是隐藏的；再兜一层，别让拖动抢走「展开」
@@ -1450,8 +1134,7 @@ var WB = (function () {
     return taskPanel;
   }
 
-  /* v6.9：导入队列常驻 —— 启动就在右下角把面板摆出来，空队列也显示，
-     不用等第一次导入才凭空冒出来一个。导入时 openTaskPanel() 复用它。
+  /* 队列常驻：启动就在右下角摆出来，空队列也显示，不用等第一次导入才凭空冒出来；
      用户点 ✕ 关掉后本次运行不再自动重建（下次导入仍会新建）。 */
   function initIdlePanel() {
     if (taskPanel && document.body.contains(taskPanel.root)) return;
@@ -1467,12 +1150,13 @@ var WB = (function () {
     if (!taskPanel) return;
     // 队列还在跑：只收起，绝不把入口弄丢
     if (taskPanel.running) { taskPanelSetCollapsed(true); return; }
+    window.removeEventListener('resize', taskPanel.place);   // 摘掉监听，别让旧面板被闭包留住
     if (taskPanel.root.parentNode) taskPanel.root.parentNode.removeChild(taskPanel.root);
     taskPanel = null;
     refreshQueueEntry();
   }
 
-  /* 素材库 → Unity：两阶段。先按队列把所有 zip 解压（带进度），
+  /* 素材库 → Unity：两阶段。先把队列里的 zip 逐个解压（带进度），
      再按队列逐个导入；包导入要等 Unity 回执落地才轮到下一个。 */
   function importToUnity(input, opts) {
     var items = (Array.isArray(input) ? input.slice() : [input]).filter(Boolean);
@@ -1483,16 +1167,23 @@ var WB = (function () {
       Toast.ok('已加入导入队列，前面还有任务在跑');
       return;
     }
+    /* 先同步占位：ensureLoaded 是异步的，两次连点会都通过上面那道检查 */
+    importBusy = true;
     ensureLoaded().then(function () {
-      if (!state.projects.length) { Toast.err('先在「导入与工程」里添加 Unity 工程，再回来导入'); return; }
+      if (!state.projects.length) {
+        importBusy = false;
+        Toast.err('先在「导入与工程」里添加 Unity 工程，再回来导入');
+        return;
+      }
       /* 续传：上次用的工程还在，就直接续，不再让用户选一遍 */
       var wantId = (opts && opts.projectId) || '';
       var reuse = wantId ? state.projects.filter(function (p) { return p.id === wantId; })[0] : null;
       if (reuse) { runQueue(reuse); return; }
       openPicker();
-    });
+    }).catch(function () { importBusy = false; });
 
     function openPicker() {
+      var started = false;
       var sel = el('select', { class: 'wb-project-select' }, state.projects.map(function (p) {
         return el('option', { value: p.id }, p.name || p.path);
       }));
@@ -1505,13 +1196,25 @@ var WB = (function () {
           el('p', { class: 'wb-hint', text: '导入分两步：先解压全部压缩包，再按队列逐个导入 Unity。' }),
           sel
         ],
+        /* 取消选择把占位还回去；这期间排进队列的那批要接着问，别悄悄丢掉 */
+        onClose: function () {
+          if (started) return;
+          importBusy = false;
+          if (importPending.length) {
+            var rest = importPending;
+            importPending = [];
+            importToUnity(rest);
+          }
+        },
         footer: [
           el('button', { class: 'btn', onclick: function () { Modal.closeTop(); } }, '取消'),
           el('button', {
             class: 'btn btn-primary',
             onclick: function () {
+              if (started) return;          // 双击第二下别再开一轮队列
               var p = state.projects.filter(function (q) { return q.id === sel.value; })[0];
               if (!p) { Toast.err('先选一个工程'); return; }
+              started = true;
               Modal.closeTop();
               runQueue(p);
             }
@@ -1637,8 +1340,7 @@ var WB = (function () {
         return (n / 1024 / 1024).toFixed(1) + ' MB';
       }
 
-      /* 解压完成后先让用户挑要导入哪几项 */
-      /* 原始素材是文件夹：里面有多项时也让用户挑 */
+      /* 解压结果或原始文件夹里有多项时，先让用户挑要导入哪几项 */
       function chooseFolder(dir, label) {
         wb('listExtract', { dir: dir }).then(function (r) {
           var entries = (r && r.entries) || [];
@@ -1655,9 +1357,8 @@ var WB = (function () {
         wb('discardExtract', { dir: dir }).catch(function () {});
       }
 
-      /* 选择要导入的内容：按层级展开整棵解压目录树。
-         后端 listExtract 返回的是「先序遍历 + depth + path」的扁平列表，
-         这里接成树：父节点靠 path 前缀找，children 顺序与后端一致。 */
+      /* 选择要导入的内容：后端给的是「先序遍历 + depth + path」的扁平列表，
+         这里按 path 前缀还原成树，children 顺序与后端一致。 */
       function chooseExtracted(dir, label, keep) {
         wb('listExtract', { dir: dir }).then(function (r) {
           var entries = (r && r.entries) || [];
@@ -1951,13 +1652,8 @@ var WB = (function () {
         }
       }
       /* 等 Unity 回执。done(status, message)，status ∈ ok | fail | pending。
-         三路同时看，任何一路给出结论就收尾，不再依赖单一通道：
-           1) 本地记录里同一个 requestId 的终态（checkReceipt 的轮询结果）
-           2) Unity 助手写回的回执（最权威，带资源清单核对）
-           3) 看门狗：15 分钟还没有结论就收尾，队列不能永远挂在这里
-         旧实现给回调传的是字符串，而回调按数组用（rs.every）——抛异常后
-         再也没人调 advance()：记录早就显示「已导入 6 个资源」，队列却一直停在
-         「已把包发给 Unity」。这就是「导入完成了队列还在显示」的原因。 */
+         三路同时看，任何一路给出结论就收尾：本地记录的终态、助手写的回执（最权威）、
+         15 分钟看门狗。队列不能永远挂在这里，所以结论必须有人负责。 */
       function waitTerminal(ids, done) {
         var started = Date.now();
         var queuedSince = 0;
@@ -1974,7 +1670,7 @@ var WB = (function () {
           done(status, message || '');
         }
 
-        /* 助手是旧版 / 没心跳时，面板上直接给一个「更新 Unity 助手」，
+        /* 助手版本不一致 / 没心跳时，面板上直接给一个「更新 Unity 助手」，
            不用让用户自己回工作台找按钮。更新完 Unity 会重编译，几秒后心跳就回来了。 */
         function offerAssistUpdate() {
           try {
@@ -2118,10 +1814,9 @@ var WB = (function () {
       }
     }
   }
-  /* 常驻的导入队列面板必须在这里创建 —— boot() 在这份文件的中段就可能跑（DOM 已 ready），
-     那一刻下面的 `var taskPanel = null` 还没执行，创建出来的面板随后会被重置成 null：
-     面板看得见，但关不掉、也折叠不了，下次导入还会再建一个同 id 的。 */
+  /* 常驻队列面板必须在这里创建：boot() 可能在本文件中段就执行，那时下面的
+     var taskPanel 还没初始化，建出来的面板随后会被重置成 null（看得见、关不掉）。 */
   try { initIdlePanel(); } catch (e) {}
   ensureLoaded();
-  return { open: open, close: close, show: show, hide: hide, addProject: addProject, check: check, importFlow: importFlow, importToUnity: importToUnity, preload: preload, initIdlePanel: initIdlePanel };
+  return { open: open, close: close, show: show, hide: hide, addProject: addProject, check: check, importToUnity: importToUnity, preload: preload, initIdlePanel: initIdlePanel };
 })();

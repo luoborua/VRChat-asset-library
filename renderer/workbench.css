@@ -1,26 +1,27 @@
-/* =====================================================================
+/*
  * workbench.css — 改模工作台
  * 全屏页面，层级 400：盖住主界面（topbar 60），低于 Toast（500）和弹窗（900）。
  * 只用 styles.css 里已有的主题变量，深浅色自动跟随。
- * ===================================================================== */
+ * 边界：只做工作台自己的版式，不复用主界面的卡片 / 侧栏规则。
+ */
 
 .wb-page {
   position: fixed; top: var(--topbar-h); left: 0; right: 0; bottom: 0; z-index: 400;
   display: flex; flex-direction: column;
   background: var(--bg);
   opacity: 0; transform: translateY(8px);
-  /* v6.8：页签切换是「藏起来」而不是拆掉，所以不走 .in 时必须彻底不吃鼠标 */
+  /* 页签切换是「藏起来」而不是拆掉，所以不走 .in 时必须彻底不吃鼠标 */
   visibility: hidden; pointer-events: none;
-  /* v6.9：这里不能再给 opacity 过渡 —— 淡出期间这层不透明的背景会整整 0.18s 盖在侧栏上，
-   *       看起来就是「侧栏消失了一下又立刻出现」。切走时直接消失，进入的淡入交给 animation。 */
+  /* 这里不能给 opacity 过渡：淡出期间这层不透明背景会整整 0.18s 盖在侧栏上，
+   * 看起来就是「侧栏消失了一下又立刻出现」。切走时直接消失，进入的淡入交给 animation。 */
 }
 @keyframes wbPageIn {
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: none; }
 }
-/* v6.8：工作台改成左侧第二个页签内容 —— 让出页签栏的宽度，别把导航盖住。
- * v6.9：这条不能挂在 body.tab-workbench 上。切回素材库时类先被移除，浮层的 left
- *       会从 78 瞬间跳回 0，正好压在页签栏上。页签栏是常驻的，所以恒定让位。 */
+/* 让出左侧页签栏的宽度，别把导航盖住。
+ * 不能挂在 body.tab-workbench 上：切回素材库时那个类先被移除，left 会从 78 瞬间跳回 0，
+ * 正好压在页签栏上。页签栏是常驻的，所以这里恒定让位。 */
 .wb-page { left: var(--tabrail-w); }
 .wb-page.in {
   opacity: 1; transform: none; visibility: visible; pointer-events: auto;
@@ -39,8 +40,7 @@ body.wb-open { overflow: hidden; }
   -webkit-app-region: drag;
 }
 .wb-head .btn, .wb-head .icon-btn { -webkit-app-region: no-drag; }
-/* v6.8：头部右侧的按钮（导入队列 / Unity 日志 / 返回）一直贴在标题后面没靠右 ——
- * .grow 只在工具栏、详情页那几处定义过，这里补一条。 */
+/* 头部右侧按钮靠右：.grow 只在工具栏、详情页那几处定义过，这里补一条 */
 .wb-head .grow { flex: 1; }
 .wb-head-title { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .wb-head-title b { font-size: 15px; color: var(--text); }

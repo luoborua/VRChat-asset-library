@@ -1,18 +1,12 @@
-/* ============ 92-p2p.js ============ */
-/* =====================================================================
+/*
  * 92-p2p.js  —  点对点传文件（WebRTC DataChannel）
  *
- * 分工：
- *   Rust 只做磁盘（清单 / 分块读写 / 位图），这里做网络与交互。
- *   之所以把网络放渲染层：WebView2 自带 WebRTC，不需要加任何 Rust 依赖，
- *   exe 体积不变、编译时间不变；代价是最高约 23–30 MB/s（见 .workbuddy/webrtc-test）。
- *
- * 流程：
- *   host  勾选素材 → prepare 出清单 → 建房拿 6 位口令 → 等对端
- *   guest 输口令进房 → 交换 SDP → 收到清单 → 确认 → 落盘
- *   然后 host 从「对端还缺的第一块」开始顺序推，guest 顺序收、顺序写。
- *   中断重连时 guest 重新 open 读回位图，把起始块号告诉 host，只补缺口。
- * ===================================================================== */
+ * 负责：建连、交换 SDP/ICE、推块收块，以及传输面板与对话框。
+ * 与谁交互：清单 / 分块读写 / 位图走 FS.host.p2p，信令是局域网 WS，素材摊平复用 Packer。
+ * 边界：不碰磁盘落地细节，也不做中继 —— 打洞失败直接报错，流量不经过第三方。
+ * 流程：host 出清单建房拿 6 位口令，guest 输口令进房，确认后从对端缺的第一块开始推；
+ *      断线用同一口令重连，位图决定从哪块续。
+ */
 
 var P2P = (function () {
   'use strict';
@@ -22,6 +16,10 @@ var P2P = (function () {
   var HIGH_WATER = 4 * 1024 * 1024;                 // DataChannel 发送队列硬上限 16 MiB，留足余量
   var PREFETCH = 8;                                  // 预读块数：够填满管道，又不至于吃内存
   var SAMPLE_MS = 400;
+
+  /* 这次传输是不是「顺手把本机信令服务起来」的：是的话收尾要自己关掉，
+     手动在设置里开的常驻服务不归这里管。 */
+  var signalAuto = false;
 
   /* 公开 STUN。打洞失败就直接报错，不回落中继 —— 这是产品选择：
    * 中继要按流量付费，而且会让「P2P」名不副实。 */
@@ -118,8 +116,25 @@ var P2P = (function () {
       return st.self;
     }
     var r = await FS.host.p2p('signalStart', {});
+    /* 记一笔：这次信令是为本次传输顺手起来的，用完自己收掉，
+       别在后台白占端口等到空闲超时；手动在设置里开的常驻服务不归这里管。 */
+    signalAuto = true;
     S.base = r.self;
     return r.self;
+  }
+
+  /** 传输结束 / 放弃时收掉「顺手起来」的信令服务 */
+  function stopSignalIfAuto() {
+    if (!signalAuto) return;
+    signalAuto = false;
+    try {
+      FS.host.p2p('signalStop', {}).then(function () {
+        if (typeof App !== 'undefined' && App.settings) {
+          App.settings.p2pSignalAuto = false;
+          if (App.saveSettings) App.saveSettings();
+        }
+      }).catch(function () {});
+    } catch (e) {}
   }
 
   /** 接收方：在局域网里喊一声，谁开着信令服务谁应答。地址只用于这一次连接，不写进设置。 */
@@ -155,6 +170,7 @@ var P2P = (function () {
   }
   function fail(msg) {
     if (S.state === 'failed') return;   // 掉线时 ws.onclose / pc.onconnectionstatechange 会连着报，只留第一条
+    if (S.state === 'idle') return;     // 已经取消/收尾了，迟到的回调不该再把状态翻成「失败」
     S.error = String(msg || '未知错误');
     S.state = 'failed';
     closeLink();
@@ -258,6 +274,14 @@ var P2P = (function () {
 
   /* ---------------- WebRTC ---------------- */
 
+  /** 是否还处在「这次传输真的在跑」的阶段：cancel / 关窗时是我们主动关 pc 与 dc，
+   *  它们的 onclose 晚一步回来，那时不该再判成失败。 */
+  function active() {
+    var st = S.state;
+    return st === 'hosting' || st === 'joining' || st === 'linking' ||
+           st === 'confirming' || st === 'sending' || st === 'receiving';
+  }
+
   function newPC() {
     var pc = new RTCPeerConnection({ iceServers: ICE });
     pc.onicecandidate = function (e) {
@@ -266,7 +290,7 @@ var P2P = (function () {
     pc.onconnectionstatechange = function () {
       if (pc.connectionState === 'failed') {
         /* 打洞没成功或中途断了。这里只报错，不自动重试：用户需要先确认对方还在。 */
-        if (S.state !== 'done') fail('无法建立直连（双方网络可能都不支持打洞）');
+        if (active()) fail('无法建立直连（双方网络可能都不支持打洞）');
       }
     };
     return pc;
@@ -316,7 +340,7 @@ var P2P = (function () {
     dc.bufferedAmountLowThreshold = 1 << 20;
     dc.onopen = function () { onChannelOpen(); };
     dc.onclose = function () {
-      if (S.state !== 'done' && S.state !== 'failed') fail('传输通道已关闭');
+      if (active()) fail('传输通道已关闭');
     };
     dc.onmessage = function (ev) { onData(ev.data); };
   }
@@ -377,6 +401,7 @@ var P2P = (function () {
       S.state = 'done';
       S.speed = 0;
       emit();
+      stopSignalIfAuto();   // 发完了就把顺手起来的信令收掉
     } catch (e) {
       fail(e && e.message || e);
     }
@@ -456,7 +481,7 @@ var P2P = (function () {
 
   /* ---------------- guest：加入 ---------------- */
 
-  async function join(code, dstRoot) {
+  async function join(code, dstRoot, base) {
     if (S.state !== 'idle' && S.state !== 'done' && S.state !== 'failed') {
       throw new Error('已经有一个传输在进行');
     }
@@ -468,7 +493,11 @@ var P2P = (function () {
     if (!S.code || S.code.length !== CODE_LEN) throw new Error('口令是 6 位，检查一下');
     S.pc = newPC();
     S.pc.ondatachannel = function (e) { attachChannel(e.channel); };
-    await findSignal();
+    /* 手动填了地址就直接用，否则去局域网里找：UDP 广播常被防火墙吃掉
+       （尤其第一次运行没勾「专用网络」），手动地址是那情况下的唯一出路。 */
+    var manual = String(base || '').trim().replace(/^http/i, 'ws');
+    if (manual) S.base = manual.replace(/\/+$/, '');
+    else await findSignal();
     S.ws = await openSignal(S.code, 'guest');
     bindSignal(S.ws);
     setState('joining');
@@ -528,6 +557,7 @@ var P2P = (function () {
       S.received = S.total;
       S.speed = 0;
       emit();
+      stopSignalIfAuto();   // 传完了就把顺手起来的信令收掉
       if (typeof Toast !== 'undefined' && Toast.ok) Toast.ok('接收完成：' + r.moved + ' 个文件已放入 ' + (S.dstRoot || '素材目录'));
     } catch (e) {
       fail(e && e.message || e);
@@ -622,9 +652,8 @@ var P2P = (function () {
 
   /* ---------------- 素材 → 清单 ---------------- */
 
-  /** 把素材列表摊平成 [{ abs, rel }]。
-   *  直接复用打包那边的 collectFiles —— 文件 / 解压目录这几种情况它都处理过了，
-   *  这里只负责给每个素材套上一层「素材名/」的目录，避免不同素材的子目录撞名。 */
+  /** 把素材列表摊平成 [{ abs, rel }]：文件与解压目录的差异交给 Packer.collectFiles，
+   *  这里只给每个素材套一层「素材名/」目录，避免不同素材的子目录撞名。 */
   function collectItems(list) {
     var out = [];
     var seen = Object.create(null);
@@ -660,6 +689,7 @@ var P2P = (function () {
     join: join,
     cancel: cancel,
     retry: retry,
+    stopSignalIfAuto: stopSignalIfAuto,
     resumable: resumable,
     collectItems: collectItems,
     newCode: newCode,
@@ -668,10 +698,10 @@ var P2P = (function () {
   };
 })();
 
-/* =====================================================================
+/*
  * P2PUI — 传输面板 + 确认框 + 发起/接收对话框
  * 面板外观完全复用下载面板的 .dl-panel 规则，保证两块悬浮窗是同一套语言。
- * ===================================================================== */
+ */
 var P2PUI = (function () {
   'use strict';
 
@@ -871,11 +901,23 @@ var P2PUI = (function () {
   }
 
   /* ---------- 发起 / 接收对话框 ---------- */
-  var dlg = null, dlgWatch = null;
+  var dlg = null, dlgWatch = null, dlgMode = '';
 
   function closeDialog() {
     if (dlg) dlg.style.display = 'none';
     if (dlgWatch) { dlgWatch(); dlgWatch = null; }
+    /* 关掉「传给好友」窗口时还没连上对端：这个口令就废了（下次发起会新生成一个），
+       顺手把为它起来的信令服务和半成品清单一起收掉，别让端口白占着。 */
+    if (dlgMode === 'send') {
+      var cur = null;
+      try { cur = P2P.state(); } catch (e) {}
+      var stt = cur && cur.state;
+      if (stt === 'hosting' || stt === 'idle' || stt === 'failed') {
+        try { P2P.cancel(); } catch (e) {}
+        try { P2P.stopSignalIfAuto(); } catch (e) {}
+      }
+    }
+    dlgMode = '';
   }
 
   function ensureDlg() {
@@ -889,10 +931,11 @@ var P2PUI = (function () {
   /** 发起：把口令大字显示出来，复制走剪贴板 */
   function openSendDialog(items) {
     ensureDlg();
+    dlgMode = 'send';
     var card = dlg.firstChild;
     card.innerHTML = '';
     card.appendChild(el('h3', { text: '传给好友' }));
-    card.appendChild(el('p', { class: 'dim p2p-hint', text: '把下面这串口令发给对方，让他打开「接收文件」输入。地址会自动找，不用另外填。' }));
+    card.appendChild(el('p', { class: 'dim p2p-hint', text: '把口令发给对方，让他点右上角「接收」输进去。同一个局域网（同一 WiFi，或同一个 Radmin / ZeroTier 房间）里地址会自动找到；万一没找到，把下面其中一行整段发给他。' }));
 
     var codeEl = el('div', { class: 'p2p-bigcode', text: '······' });
     card.appendChild(codeEl);
@@ -906,6 +949,12 @@ var P2PUI = (function () {
     }});
     copyBtn.style.display = 'none';
     btns.appendChild(copyBtn);
+    /* 点错边的人不少：这边顺手给一个「我要接收」的入口，
+       点击会先把本次发起收掉（含信令），再切到接收窗口 */
+    btns.appendChild(el('button', { class: 'btn', text: '我有口令，去接收', onclick: function () {
+      closeDialog();
+      openReceiveDialog();
+    }}));
     btns.appendChild(el('button', { class: 'btn', text: '关闭', onclick: function () { closeDialog(); } }));
     card.appendChild(btns);
     dlg.style.display = '';
@@ -914,9 +963,34 @@ var P2PUI = (function () {
       codeEl.textContent = r.code.slice(0, 3) + '-' + r.code.slice(3);
       copyBtn.style.display = '';
       stat.textContent = '共 ' + r.fileCount + ' 个文件 · ' + sz(r.total) + ' · 等待好友输入口令…';
-      /* 对方接上后状态会变，这里只负责把提示语跟上 */
-      if (dlgWatch) dlgWatch();
-      dlgWatch = P2P.onChange(function (s) {
+      /* 每个网卡的完整地址都列出来：物理 WiFi 与虚拟局域网走的是不同地址，
+         只给人看一个，另一边的人必然连不上。点一行就复制「地址 口令」。 */
+      FS.host.p2p('signalStatus', {}).then(function (st) {
+        var addrs = (st && st.addrs) || [];
+        if (!addrs.length) return;
+        var list = el('div', { class: 'p2p-addr-list' });
+        addrs.forEach(function (a) {
+          var line = a.url + ' ' + r.code.slice(0, 3) + '-' + r.code.slice(3);
+          var item = el('div', { class: 'p2p-addr-item', title: '点击复制这一行' }, [
+            el('span', { class: 'p2p-addr-tag', text: a.virtual ? '虚拟局域网' : '局域网' }),
+            el('b', { text: a.url }),
+            el('span', { class: 'p2p-addr-nic', text: a.virtual ? a.iface : '' })
+          ]);
+          item.addEventListener('click', function () {
+            copyText(line);
+            if (typeof Toast !== 'undefined') Toast.ok('已复制：' + line);
+          });
+          list.appendChild(item);
+        });
+        list.appendChild(el('div', {
+          class: 'p2p-addr-cap',
+          text: '自动发现不到时，让对方把这行整段粘进「接收文件」（地址和口令会自动分开）。走虚拟局域网就用「虚拟局域网」那行。'
+        }));
+        card.insertBefore(list, stat);
+      }).catch(function () {});
+    /* 对方接上后状态会变，这里只负责把提示语跟上 */
+    if (dlgWatch) dlgWatch();
+    dlgWatch = P2P.onChange(function (s) {
         if (s.state === 'confirming') stat.textContent = '好友已连上，等待他确认接收…';
         else if (s.state === 'sending') stat.textContent = '正在传输…';
         else if (s.state === 'done') stat.textContent = '传输完成';
@@ -936,21 +1010,46 @@ var P2PUI = (function () {
   function openReceiveDialog() {
     dstPath = (App.settings && App.settings.p2pDst) || '';
     ensureDlg();
+    dlgMode = 'recv';
     var card = dlg.firstChild;
     card.innerHTML = '';
     card.appendChild(el('h3', { text: '接收文件' }));
-    card.appendChild(el('p', { class: 'dim p2p-hint', text: '输入好友给你的 6 位口令（你们要在同一个 WiFi 下）。连上之后会先问你要不要收，再开始传。' }));
+    card.appendChild(el('p', { class: 'dim p2p-hint', text: '输入好友给你的 6 位口令（你们要在同一个局域网里：同一 WiFi，或同一个 Radmin / ZeroTier 房间）。连上之后会先问你要不要收，再开始传。找不到对方时，把好友那边显示的整行地址+口令粘到下面的口令框，会自动分开填。' }));
+
+    /* 地址留空＝局域网自动发现。填上就直连 —— UDP 广播被防火墙吃掉时（很常见），
+       把对方「接收文件」窗口里那行 ws:// 地址填进来就能连。 */
+    var addrInput = el('input', {
+      class: 'p2p-addr-input', type: 'text',
+      placeholder: '信令地址（留空＝自动发现）', autocomplete: 'off', spellcheck: 'false'
+    });
 
     var input = el('input', {
       class: 'p2p-code-input', type: 'text', maxlength: '7',
       placeholder: 'ABC-123', autocomplete: 'off', spellcheck: 'false'
     });
+    /* 对方发来的常是「地址 + 口令」一整行：地址进地址栏，口令留在口令栏。
+       paste 优先、input 兜底（拖放与部分输入法不触发 paste）。 */
+    function absorb(txt) {
+      if (!txt) return false;
+      var m = String(txt).match(/(?:wss?:\/\/)?(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{2,5}))?/i);
+      if (!m) return false;
+      addrInput.value = 'ws://' + m[1] + ':' + (m[2] || 8787);
+      var code = P2P.normCode(String(txt).replace(m[0], ' ')).slice(0, 6);
+      input.value = code.length > 3 ? code.slice(0, 3) + '-' + code.slice(3) : code;
+      return true;
+    }
     input.addEventListener('input', function () {
+      if (absorb(input.value)) return;
       var v = P2P.normCode(input.value).slice(0, 6);
       input.value = v.length > 3 ? v.slice(0, 3) + '-' + v.slice(3) : v;
     });
-    /* 对方发来的通常是「地址 + 口令」两行，直接粘进来就对 */
+    input.addEventListener('paste', function (e) {
+      var txt = '';
+      try { txt = ((e.clipboardData || window.clipboardData).getData('text') || ''); } catch (err) { return; }
+      if (absorb(txt)) e.preventDefault();
+    });
     card.appendChild(input);
+    card.appendChild(addrInput);
 
     var dst = el('div', { class: 'p2p-dst-row' }, [
       el('span', { class: 'dim', text: '保存到' }),
@@ -977,7 +1076,8 @@ var P2PUI = (function () {
       if (!dstPath) { stat.textContent = '还没选保存目录'; return; }
       go.disabled = true;
       stat.textContent = '正在连接…';
-      P2P.join(code, dstPath).then(function () {
+      var manual = String(addrInput.value || '').trim();
+      P2P.join(code, dstPath, manual).then(function () {
         stat.textContent = '已连上，等待对方建立直连…';
       }).catch(function (e) {
         go.disabled = false;
@@ -1012,10 +1112,11 @@ var P2PUI = (function () {
             }
           })
         ]));
+        var ips = ((st && st.addrs) || []).map(function (a) { return a.ip; });
         box.appendChild(el('p', {
           class: 'p2p-signal-note',
-          text: '同一 WiFi 下的好友打开「接收文件」、输口令就能连上，地址是自动找的。'
-            + (st.lan ? '（本机内网地址 ' + st.lan + '）' : '')
+          text: '同一 WiFi 下的好友点右上角「接收」、输口令就能连上，地址是自动找的。'
+            + (ips.length ? '（本机地址 ' + ips.join(' / ') + '）' : '')
         }));
       } else {
         var btn = el('button', {

@@ -1,12 +1,13 @@
-/* ============ 60-modal.js ============ */
-/* =====================================================================
- * 60-modal.js  —  弹窗基座 + 素材详情 + 新增/编辑表单
- * ===================================================================== */
+/* 模态框基座与通用表单控件：
+ * 负责遮罩栈的开关、Esc / 背景关闭，以及确认框、输入框与 Field.* 控件。
+ * 对外暴露 Modal 与 Field；控件取值依赖 App.settings、Store、FS 等全局服务。
+ * 不承载具体业务表单，也不负责保存，body / footer 由调用方组装。
+ */
 
 var Modal = (function () {
   var stack = [];
-  /** v2.3.27：已关闭但还在等淡出动画结束的遮罩。打开新模态时先把它们立刻摘掉——
-   *  否则 DOM 里会短暂残留"幽灵模态"，任何 document.querySelector('.modal') 都会命中旧的那个。 */
+  /** 已关闭但仍在等淡出动画的遮罩。开新模态前先摘掉，
+   *  否则 DOM 里残留的旧遮罩会被 .modal 选择器命中。 */
   var pending = [];
   function purgePending() {
     while (pending.length) {
@@ -15,14 +16,19 @@ var Modal = (function () {
     }
   }
 
+  /** 打开一层模态并压栈，返回的 handle 供后续关闭使用。 */
   function open(opts) {
     opts = opts || {};
     purgePending();
+    var closable = opts.closable !== false;
+    /* 记下打开前的焦点：关掉弹窗后要还回去，否则键盘用户被丢回页面顶部，
+     * 得重新 Tab 十几下才回到刚才那颗按钮。 */
+    var prevFocus = document.activeElement;
     var overlay = el('div', { class: 'modal-overlay' });
     var box = el('div', { class: 'modal modal-' + (opts.size || 'md') + (opts.cls ? ' ' + opts.cls : '') });
     var head = el('div', { class: 'modal-head' }, [
       el('h2', { class: 'modal-title', text: opts.title || '' }),
-      el('button', { class: 'icon-btn', title: '关闭 (Esc)', onclick: function () { close(handle); } }, ICONS.label('\u2715'))
+      closable ? el('button', { class: 'icon-btn', title: '关闭 (Esc)', onclick: function () { close(handle); } }, ICONS.label('\u2715')) : null
     ]);
     var body = el('div', { class: 'modal-body' });
     if (opts.body) appendChildren(body, opts.body);
@@ -33,17 +39,53 @@ var Modal = (function () {
     if (opts.footer) box.appendChild(foot);
     overlay.appendChild(box);
     overlay.addEventListener('mousedown', function (e) {
-      if (e.target === overlay && opts.closeOnBackdrop !== false) close(handle);
+      if (e.target === overlay && opts.closeOnBackdrop !== false && closable) close(handle);
     });
     $('#modalRoot').appendChild(overlay);
     requestAnimationFrame(function () { overlay.classList.add('in'); });
 
-    var handle = { overlay: overlay, box: box, body: body, foot: foot, opts: opts };
+    var handle = { overlay: overlay, box: box, body: body, foot: foot, opts: opts, closable: closable, prevFocus: prevFocus };
     stack.push(handle);
     document.body.classList.add('modal-open');
+    /* 有时限的弹窗（autoClose: 毫秒）：顶部挂同一条倒计时条，走完自动关闭。
+     * 需要「N 秒后自己消失」的提示框都走这里，别再各写一个 setTimeout。 */
+    if (opts.autoClose > 0) {
+      var acMs = Number(opts.autoClose);
+      box.insertBefore(el('div', { class: 'modal-prog' }, [el('i', { style: { animationDuration: acMs + 'ms' } })]), box.firstChild);
+      setTimeout(function () { close(handle); }, acMs);
+    }
     return handle;
   }
 
+  /** 一个容器里当前能 Tab 到的元素（跳过隐藏与禁用） */
+  var FOCUS_SEL = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]),'
+    + ' select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  function focusables(root) {
+    return Array.prototype.filter.call(root.querySelectorAll(FOCUS_SEL), function (n) {
+      return n.getClientRects().length > 0;
+    });
+  }
+
+  /* Tab 循环：焦点不能跑到遮罩后面去操作看不见的页面。
+   * 监听挂在 document 的捕获阶段，因为刚打开时焦点可能还在 body 上，overlay 收不到 keydown。 */
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Tab' || !stack.length) return;
+    var top = stack[stack.length - 1];
+    var box = top.box;
+    var act = document.activeElement;
+    var f = focusables(box);
+    if (!f.length) {
+      /* 弹窗里没有任何可聚焦元素（纯提示）：拦下来，别让 Tab 把焦点带走 */
+      if (!box.contains(act)) e.preventDefault();
+      return;
+    }
+    var first = f[0], last = f[f.length - 1];
+    if (!box.contains(act)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); return; }
+    if (e.shiftKey && act === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && act === last) { e.preventDefault(); first.focus(); }
+  }, true);
+
+  /** 关闭指定层（缺省栈顶），淡出结束后再摘除节点。 */
   function close(handle) {
     handle = handle || stack[stack.length - 1];
     if (!handle) return;
@@ -57,14 +99,26 @@ var Modal = (function () {
       if (pi >= 0) pending.splice(pi, 1);
     }, 200);
     if (!stack.length) document.body.classList.remove('modal-open');
+    /* 焦点还原要放在 onClose 之前：onClose 里可能又开一层，
+     * 那样新层记下的「上一个焦点」才是原来那颗按钮，而不是被丢掉后的 body。 */
+    if (handle.prevFocus && handle.prevFocus.isConnected && typeof handle.prevFocus.focus === 'function') {
+      try { handle.prevFocus.focus(); } catch (e) {}
+    }
     if (typeof handle.opts.onClose === 'function') handle.opts.onClose();
   }
 
   function closeTop() { if (stack.length) close(stack[stack.length - 1]); }
 
+  /** Esc 关闭：不可关闭的模态不响应 */
+  function closeByEsc() {
+    if (!stack.length) return;
+    if (stack[stack.length - 1].closable === false) return;
+    closeTop();
+  }
+
   /**
-   * 说明：close(h) 会同步触发 opts.onClose，因此必须先「定值」再关闭，
-   * 否则 onClose 里的取消值会抢先兑现 Promise（v1.1.0 的真实缺陷）。
+   * 先定值再关闭：close() 会同步触发 onClose，
+   * 若先关闭，onClose 里的取消值会抢先兑现 Promise。
    */
   function confirm(message, opts) {
     opts = opts || {};
@@ -87,6 +141,7 @@ var Modal = (function () {
     });
   }
 
+  /** 文本输入弹窗：回车确认，取消或 Esc 得到 null。 */
   function prompt(message, defValue, opts) {
     opts = opts || {};
     return new Promise(function (resolve) {
@@ -112,16 +167,16 @@ var Modal = (function () {
     });
   }
 
-  return { open: open, close: close, closeTop: closeTop, confirm: confirm, prompt: prompt, purgePending: purgePending, get stack() { return stack; } };
+  return { open: open, close: close, closeTop: closeTop, closeByEsc: closeByEsc, confirm: confirm, prompt: prompt, purgePending: purgePending, get stack() { return stack; } };
 })();
 
 
-/* =====================================================================
+/*
  * 表单控件小工具
- * ===================================================================== */
+ */
 var Field = {
   row: function (label, control, hint, labelRight) {
-    // v2.3.28：第 4 个参数 labelRight —— 放在标签右侧的右对齐元素（如各处的「AI 翻译…」按钮）
+    // labelRight：标签右侧的右对齐元素（如「AI 翻译…」按钮）
     var labelNode = labelRight
       ? el('label', { class: 'field-label field-label-split' }, [el('span', { text: label }), labelRight])
       : el('label', { class: 'field-label', text: label });
@@ -135,6 +190,8 @@ var Field = {
     opts = opts || {};
     var wrap = el('div', { class: 'multi' });
     var listBox = el('div', { class: 'multi-list' });
+    /* 变更回调：调用方要靠它跟着链接变化重算派生字段（例如素材编号取 BOOTH 商品号） */
+    function fire() { if (typeof opts.onChange === 'function') { try { opts.onChange(); } catch (e) {} } }
     var data = (items || []).map(function (x) {
       return typeof x === 'string' ? { url: x, label: '' } : { url: x.url || x.path || '', label: x.label || x.note || '' };
     });
@@ -144,13 +201,13 @@ var Field = {
       data.forEach(function (it, i) {
         var inp = el('input', {
           class: 'input mono', value: it.url, placeholder: opts.placeholder || '',
-          oninput: function () { it.url = inp.value; }
+          oninput: function () { it.url = inp.value; fire(); }
         });
         var lbl = el('input', {
           class: 'input input-sm', value: it.label, placeholder: opts.labelPlaceholder || '备注',
           oninput: function () { it.label = lbl.value; }
         });
-        // v2.3.29：本地文件路径行把「标识」（存储路径 / 说明）放到路径输入框左侧
+        // 本地路径行把标识放左侧、完整路径放右侧，便于对照
         var rowKids = opts.asPath ? [lbl, inp] : [inp, lbl];
         listBox.appendChild(el('div', { class: 'multi-row' + (opts.asPath ? ' multi-row-path' : '') }, rowKids.concat([
           opts.pickDir ? el('button', {
@@ -165,11 +222,11 @@ var Field = {
                     Toast.ok('已写入完整路径：' + full);
                   } else {
                     it.url = ''; inp.value = '';
-                    inp.placeholder = '请粘贴完整路径，例如 D:\\素材库\\衣装\\戚风';   // v3.0.4：中性示例
+                    inp.placeholder = '请粘贴完整路径，例如 D:\\素材库\\衣装\\戚风';   // 示例用中性路径，避免暗示特定目录
                     Toast.warn('未能获取所选文件夹的完整路径。请在资源管理器地址栏复制完整路径后粘贴到此处（不会保存空路径）。', 6800);
                   }
                 }
-                if (r.path) { write(r.path); return; }   // v3.0.5：后端直给绝对路径
+                if (r.path) { write(r.path); return; }   // 后端能直接给出绝对路径时免去解析
                 Toast.info('正在识别所选文件夹的完整路径 …', 1600);
                 FS.resolveDirectoryPath(r.handle).then(write);
               });
@@ -177,7 +234,7 @@ var Field = {
           }, ICONS.label('\u{1F4C2}')) : null,
           el('button', {
             class: 'btn btn-sm btn-danger-ghost', type: 'button', title: '删除',
-            onclick: function () { data.splice(i, 1); render(); }
+            onclick: function () { data.splice(i, 1); render(); fire(); }
           }, ICONS.label('\u{1F5D1}'))
         ])));
       });
@@ -187,7 +244,7 @@ var Field = {
     wrap.appendChild(listBox);
     var addBtn = el('button', {
       class: 'btn btn-sm btn-ghost', type: 'button',
-      onclick: function () { data.push({ url: '', label: '' }); render(); }
+      onclick: function () { data.push({ url: '', label: '' }); render(); fire(); }
     }, ICONS.label('\u2795 ' + (opts.addText || '添加一项')));
     if (opts.dedupe) {
       wrap.appendChild(el('div', { class: 'btn-row' }, [
@@ -221,7 +278,7 @@ var Field = {
     };
     wrap.setValue = function (arr) {
       data = (arr || []).map(function (x) { return { url: x.url || x.path || '', label: x.label || x.note || '' }; });
-      render();
+      render(); fire();
     };
     return wrap;
   },
@@ -343,14 +400,14 @@ var Field = {
   avatars: function (selected) {
     var wrap = el('div', { class: 'avpick' });
     var data = (selected || []).slice();
-    /* v2.3.28：默认折叠（只显示已选 + 常用的一屏）+ 检索框；原来一次铺开全部角色，几十个芯片糊成一片 */
+    /* 默认折叠成「已选 + 常用」一屏并配检索框：角色多时一次铺开会糊成一片 */
     var q = '', expanded = false, LIMIT = 8;
     var searchIn = el('input', {
       class: 'input input-sm avpick-search', type: 'text',
       placeholder: '搜索角色（中 / 日 / 英 / 别名）…',
       oninput: function () { q = searchIn.value.trim().toLowerCase(); expanded = !!q; render(); }
     });
-    /* v2.3.28：展开/收起做成与角色胶囊同款的蓝色可点胶囊，放在列表最后一位（原来在检索框旁边的小按钮） */
+    /* 展开/收起做成与角色胶囊同款的胶囊并放在列表末尾，与选中状态视觉一致 */
     var moreBtn = el('button', { class: 'chip chip-pick on avpick-more', type: 'button', style: { display: 'none' } });
     var toolbar = el('div', { class: 'avpick-toolbar' }, [searchIn]);
     var box = el('div', { class: 'avpick-list' });

@@ -1,0 +1,24 @@
+[package]
+name = "vrclib-host"
+version = "8.3.0"
+edition = "2021"
+description = "VRChat 素材库 · Rust 边车宿主（给 Electron 壳提供磁盘重活）"
+
+[[bin]]
+name = "vrclib-host"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+# 工作台解压补丁包要它；版本/feature 必须与 src-tauri 保持一致，否则两边行为会漂移
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# 局域网发现要枚举网卡（signal_api.rs 里直接调 IP Helper API）

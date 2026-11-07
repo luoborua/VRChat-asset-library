@@ -1,7 +1,11 @@
-/* ============ 85-tools.js ============ */
-/* =====================================================================
+/*
  * 85-tools.js  —  批量操作 / 整理辅助 / 快捷工具
- * ===================================================================== */
+ *
+ * 负责：多选后的批量改分类、加标签、加角色、隐藏、删除、导出，
+ *       以及目录结构建议、磁盘对账、批量更新商品信息、批量抓订单更新、批量下载缺失文件。
+ * 与谁交互：App / Store / FS.host / DLQueue；落盘一律经后端，不自己写文件。
+ * 边界：只处理选中的素材，不碰库外文件；删除条目时不动磁盘上的内容。
+ */
 
 var Tools = {
 
@@ -9,7 +13,7 @@ var Tools = {
   structurePlan: function () {
     var assets = App.filtered();
     if (!assets.length) { Toast.warn('当前没有可整理的素材'); return; }
-    var rootIn = el('input', { class: 'input mono', value: App.libraryRoot() });   // v3.0.4：默认 = 当前生效的素材库根（推导自应用目录）
+    var rootIn = el('input', { class: 'input mono', value: App.libraryRoot() });   // 默认填当前生效的素材库根
     var pre = el('pre', { class: 'tree-pre' });
     var plan = null;
     function build() {
@@ -38,10 +42,8 @@ var Tools = {
     });
   },
 
-  /** 未关联路径检查 */
-  /* ---------------- v2.5.0（S2）：素材库体检（磁盘对账） ----------------
-   * 旧实现按 a.downloaded 列「未标记下载」——那个字段 UI 已无入口（等于把全部素材都列成未下载）。
-   * 现在真的去扫存储目录，分三类：路径扫不到 / 库里有记录但磁盘缺失 / 磁盘有文件但库里没记录。 */
+  /* ---------------- 素材库体检（磁盘对账） ----------------
+   * 真去扫存储目录，分三类：路径扫不到 / 库里有记录但磁盘缺失 / 磁盘有文件但库里没记录。 */
   pathAudit: function () {
     var logBox = el('div', { class: 'audit-log' });
     var reportBox = el('div', {});
@@ -67,7 +69,7 @@ var Tools = {
       ],
       footer: [
         el('button', { class: 'btn', onclick: function () { Modal.close(h); } }, '关闭'),
-        // v2.5.1（P8）：素材多时串行扫描会很久——给一个可随时停下的取消
+        // 素材多时串行扫描很久，给一个能随时停下的取消
         el('button', { class: 'btn', onclick: function () { if (running) { cancelled = true; Toast.info('已请求停止扫描（当前素材跑完就停）'); } } }, '停止扫描'),
         startBtn
       ]
@@ -111,7 +113,7 @@ var Tools = {
         reportBox.appendChild(el('h3', { text: '磁盘上有文件但库里没登记（' + extra.length + ' 个素材 / ' + extraFiles + ' 个文件）' }));
         if (!extra.length) reportBox.appendChild(el('div', { class: 'multi-empty', text: '无' }));
         else {
-          // v2.5.1（F3）：光发现没用——给每个未登记文件两个动作：「登记」（写进 downloadedFiles）与「删除」（后端 /api/delete，二次确认）
+          // 光发现没用：每个未登记文件给「登记」与「删除」两个动作，删除要二次确认
           var extraBox = el('div', { class: 'audit-list' });
           extra.slice(0, 60).forEach(function (x) {
             x.st.extra.slice(0, 8).forEach(function (nm) {
@@ -155,7 +157,7 @@ var Tools = {
             id: 'as_xxx', title: '自定义标题', originalTitle: '原标题',
             source: 'booth', links: [{ url: 'https://…', label: '商品页' }],
             category: 'clothing', tags: ['连衣裙', '冬季'], avatars: ['chiffon'],
-            paths: [{ path: '<素材库根>\\衣装\\戚风\\冬季毛衣', note: '' }],   // v3.0.4：中性示例
+            paths: [{ path: '<素材库根>\\衣装\\戚风\\冬季毛衣', note: '' }],   // 示例路径，中性写法
             downloaded: true, downloadedAt: '2024-01-01T00:00:00.000Z',
             coverURL: '', note: '备注'
           }]
@@ -167,6 +169,48 @@ var Tools = {
   },
 
   /* ---------------- 批量操作 ---------------- */
+  /** 按分类整理素材目录：先列清单，确认后逐个把库内文件夹搬到对应分类目录 */
+  categoryCleanup: function () {
+    var plan = App.planCategoryCleanup();
+    if (!plan.length) { Toast.info('没有需要整理的素材：库内素材都已经在对应分类目录里', 4200); return; }
+    var rows = [];
+    var shown = plan.slice(0, 200);
+    shown.forEach(function (it) {
+      rows.push(el('div', { class: 'link-row', style: { alignItems: 'flex-start' } }, [
+        el('code', { class: 'path', style: { whiteSpace: 'normal', wordBreak: 'break-all' }, text: it.from + '  →  ' + it.to })
+      ]));
+    });
+    if (plan.length > shown.length) rows.push(el('div', { class: 'field-hint', text: '…… 还有 ' + (plan.length - shown.length) + ' 项，确认后一并处理' }));
+    var tip = el('div', { class: 'field-hint', text: '共 ' + plan.length + ' 项。只处理库内路径，库外登记的素材不碰；目标已有同名文件夹的会跳过并列出来。' });
+    var running = false;
+    var runBtn = el('button', { class: 'btn btn-primary', onclick: function () {
+      if (running) return;
+      running = true;
+      runBtn.disabled = true;
+      ICONS.apply(runBtn, '\u23F3 整理中 …');
+      App.runCategoryCleanup(plan, function (i, n) { ICONS.apply(runBtn, '\u23F3 整理中 ' + i + '/' + n); }).then(function (res) {
+        Modal.close(mh);
+        UI.renderAll();
+        if (res.failed.length) {
+          Toast.warn('已移动 ' + res.moved + ' 项，' + res.failed.length + ' 项没搬成（多为目标同名或后端未就绪）：' + res.failed.slice(0, 3).map(function (f) { return f.name; }).join('、'), 8200);
+        } else {
+          Toast.ok('已整理 ' + res.moved + ' 项素材目录', 5200);
+        }
+      }).catch(function (e) {
+        runBtn.disabled = false;
+        ICONS.apply(runBtn, '\u{1F5C2} 开始整理');
+        Toast.err('整理失败：' + ((e && e.message) || e), 7200);
+      });
+    } }, ICONS.label('\u{1F5C2} 开始整理'));
+    var mh = Modal.open({
+      title: '按分类整理素材目录（' + plan.length + ' 项）', size: 'lg',
+      body: [el('div', { class: 'detail-stack' }, [tip].concat(rows))],
+      footer: [
+        el('button', { class: 'btn', onclick: function () { Modal.close(mh); } }, '取消'),
+        runBtn
+      ]
+    });
+  },
   bulkSetCategory: function () {
     var ids = App.selectedIds();
     if (!ids.length) { Toast.warn('请先选择素材'); return; }
@@ -180,8 +224,14 @@ var Tools = {
         el('button', { class: 'btn', onclick: function () { Modal.close(h); } }, '取消'),
         el('button', { class: 'btn btn-primary', onclick: function () {
           var list = App.assets.filter(function (a) { return ids.indexOf(a.id) >= 0; });
+          var oldCats = list.map(function (a) { return a.category; });
           list.forEach(function (a) { a.category = sel.value; });
-          Store.putAssets(list).then(function () { Modal.close(h); UI.renderAll(); Toast.ok('已更新 ' + list.length + ' 项'); });
+          Store.putAssets(list).then(function () {
+            /* 库内文件夹跟着搬到新分类目录 */
+            var chain = Promise.resolve();
+            list.forEach(function (a, i) { chain = chain.then(function () { return App.relocateToCategory(a, oldCats[i]).catch(function () {}); }); });
+            return chain;
+          }).then(function () { Modal.close(h); UI.renderAll(); Toast.ok('已更新 ' + list.length + ' 项'); });
         } }, '应用')
       ]
     });
@@ -227,15 +277,13 @@ var Tools = {
     Store.putAssets(list).then(function () { UI.renderAll(); Toast.ok('已标记 ' + list.length + ' 项为' + (flag ? '已下载' : '未下载')); });
   },
 
-  /** v2.5.1（P5）：原「标记已下载」只写一个 UI 已无入口的 downloaded 字段（点了界面毫无变化）。
-   *  现在改为「重新扫描磁盘状态」：对选中素材跑磁盘对账，汇报 正常 / 缺文件 / 路径失效 / 仅远端。 */
+  /** 重新扫描磁盘状态：对选中素材跑磁盘对账，汇报正常 / 缺文件 / 路径失效 / 仅远端。 */
   rescanDiskState: function () {
     var ids = App.selectedIds();
     if (!ids.length) { Toast.warn('请先选择素材'); return; }
     var list = App.assets.filter(function (a) { return ids.indexOf(a.id) >= 0; });
-    /* v3.0.3（用户要求「断开后端也能验证是否已下载」· Lead 2026-10-04 批准）：
-     * 本入口是**只读对账**，后端不可用时不再早退 —— App.localFileAudit 会降级到浏览器库根句柄（FSA）枚举；
-     * 只有「后端离线 且 没有可用的库目录句柄」这一档才如实说明"拿不到数字"，且**不用「（未校验）」这类标注**（不可判定 ≠ 没有文件）。 */
+    /* 只读对账：后端不可用也不该早退 —— App.localFileAudit 会降级到库根句柄（FSA）枚举。
+     * 只有「后端离线且没有可用句柄」才如实说拿不到数字，不可判定不等于没有文件。 */
     FS.hostEnsure().then(function (hostOk) {
       var okN = 0, missN = 0, missFiles = 0, badN = 0, fsaN = 0, unverifiedN = 0;
       var chain = Promise.resolve();
@@ -273,14 +321,13 @@ var Tools = {
   bulkDelete: function () {
     var ids = App.selectedIds();
     if (!ids.length) { Toast.warn('请先选择素材'); return; }
-    /* v2.5.2（G2）：批量删除只说「选中的 N 项」太含糊——把到底要删哪些列出来（前 10 个），
-     * 并提示有多少项不在当前筛选结果里（选中状态不会随筛选变化清空，这一点最容易误删）。 */
+    /* 批量删除要列清对象：选中状态不随筛选变化清空，最容易误删到屏幕外的项。 */
     var list = App.assets.filter(function (a) { return ids.indexOf(a.id) >= 0; });
     var visible = Object.create(null);
     try { App.filtered().forEach(function (a) { visible[a.id] = 1; }); } catch (e) {}
     var offScreen = list.filter(function (a) { return !visible[a.id]; }).length;
     var names = list.slice(0, 10).map(function (a) { return '· ' + (a.title || a.originalTitle || '(未命名)'); }).join('\n');
-    var msg = '确定删除选中的 ' + ids.length + ' 项素材吗？此操作不可撤销。\n\n' + names
+    var msg = '确定删除选中的 ' + ids.length + ' 项素材吗？删掉的记录会进回收站，48 小时内可以找回。\n\n' + names
       + (list.length > 10 ? '\n… 另有 ' + (list.length - 10) + ' 项' : '')
       + (offScreen ? '\n\n⚠ 其中 ' + offScreen + ' 项不在当前筛选结果里（可能是选完又改了筛选/翻页）' : '');
     Modal.confirm(msg, { okText: '删除' }).then(function (ok) {
@@ -288,7 +335,8 @@ var Tools = {
       var chain = Promise.resolve();
       ids.forEach(function (id) { chain = chain.then(function () { return App.remove(id); }); });
       chain.then(function () {
-        App.clearSelection(); UI.renderAll(); Toast.ok('已删除 ' + ids.length + ' 项');
+        App.clearSelection(); UI.renderAll();
+        App.deletedToast(list);      // 一批只弹一个提示，撤回一次全回来
       });
     });
   },
@@ -358,10 +406,8 @@ var Tools = {
               a.itemId = info.itemId || '';
               a.description = info.description || '';
               a.images = (info.images || []).slice();
-              /* v2.5.5 修复：不再把**商品价**写进 price/priceValue/isFree——
-               * ① v2.5.2 起 price* 已不记录（保存时被清空），写了也是死字段；
-               * ② 更要紧的是它会经 deriveAssetIsFree(a.price) 把「商品价」当成「免费与否」的依据，
-               *    于是买了但商品页标了免费变体的素材会被误判成「免费」。现在留空，交给变体价/购买价现算。 */
+              /* 不把商品价写进 price / priceValue / isFree：它会被当成「是否免费」的依据，
+               * 把买了但商品页标了免费变体的素材误判成免费。留空，交给变体价 / 购买价现算。 */
               a.rawTags = uniq((info.tags || []).map(String));
               a.tags = App.settings.autoTranslateTags ? Smart.translateTags(a.rawTags) : a.rawTags.slice();
               a.category = Smart.guessCategory(info);
@@ -370,7 +416,7 @@ var Tools = {
               if (info.sourceId) a.source = info.sourceId;
               log('\u2714 [' + (i + 1) + '] ' + (a.originalTitle || '(无标题)'));
               if (App.settings.autoFetchCover && App.isGitHubSource(a) && (info.images || []).length) {
-                // v2.3.23：GitHub 素材抓取即把 README 图片下载到本地（封面 + 图集）
+                // GitHub 素材抓取时就把 README 图片下载到本地（封面 + 图集）
                 return App.ghLocalizeImages(a, info, { log: log }).catch(function () {}).then(function () { return App.save(a); });
               }
               if (App.settings.autoFetchCover && a.coverURL) {
@@ -411,14 +457,14 @@ var Tools = {
     Modals.detail(a.id);
   },
 
-  /** v2.5.0（S3）：批量获取更新——把所有「有订单链接的已购版本」的订单页重解析一遍，刷新下载文件 */
+  /** 批量获取更新：把所有「有订单链接的已购版本」的订单页重解析一遍，刷新下载文件列表。 */
   bulkOrderUpdate: function () {
     var targets = App.assets.filter(function (a) {
       return (a.versions || []).some(function (v) { return v.orderUrl && String(v.orderUrl).trim() && !v.special; });
     });
     var logBox = el('div', { class: 'audit-log' });
     var startBtn = el('button', { class: 'btn btn-primary' }, ICONS.label('\u{1F504} 开始获取更新'));
-    var running = false, cancelled = false;   // v2.5.1（F6）：可随时停下
+    var running = false, cancelled = false;   // 可随时停下
     function log(t) { logBox.appendChild(el('div', { class: 'field-hint', text: t })); logBox.scrollTop = logBox.scrollHeight; }
     var h = Modal.open({
       title: '批量获取更新（订单文件）', size: 'md',
@@ -490,7 +536,214 @@ var Tools = {
     };
   },
 
-  /** v2.5.0（S4）：批量下载缺失文件——把「库里有记录但磁盘上没有」的文件全部入队 */
+  /* ---------------- 批量更新商品信息 ----------------
+   * 与「批量获取更新（订单文件）」分工：那边只碰版本 / 下载文件，这边只碰商品页上的信息。
+   * 两者都不动自定义标题、本地文件、购买价与备注。 */
+
+  /** 挑一个「商品页」链接来抓：优先 /items/<id>、/l/<code> 这种商品页；
+   *  其次第一条 http 链接；都没有则用 BOOTH 商品号拼一个。返回空串表示这条没得抓。 */
+  shopLinkOf: function (a) {
+    var urls = (a.links || []).map(function (l) { return String((l && l.url) || l || '').trim(); }).filter(isHttpUrl);
+    var itemPage = urls.filter(function (u) { return /\/items\/\d+|\/l\/[A-Za-z0-9]+/i.test(u); })[0];
+    if (itemPage) return itemPage;
+    if (urls[0]) return urls[0];
+    var iid = String(a.itemId || '').trim();
+    return /^\d+$/.test(iid) ? 'https://booth.pm/ja/items/' + iid : '';
+  },
+
+  /** 把一次商品页抓取结果并进素材，返回 { changed: [字段名], skipped: [字段名] }。
+   *  规则：
+   *  - 字段级锁定沿用表单那套：a.userEdited[k] 为真时不动（force 时放开）；
+   *  - 自定义标题、角色三语名永不覆盖（自定义标题仅在空着时用原标题兜底）；
+   *  - 标签 / 图集只增不减：用户自己补的内容不能被商店侧覆盖掉；
+   *  - 分类只在当前是「其他」时按商店分类补上，不抢用户分好的类。 */
+  applyShopInfo: function (a, info, force) {
+    var changed = [], skipped = [];
+    a.autoFilled = a.autoFilled || {};
+    a.userEdited = a.userEdited || {};
+    function hit(k, label) {
+      a.autoFilled[k] = true;
+      if (changed.indexOf(label) < 0) changed.push(label);
+    }
+    function miss(label) { if (skipped.indexOf(label) < 0) skipped.push(label); }
+    function locked(k) { return !force && !!a.userEdited[k]; }
+
+    var title = String(info.originalTitle || info.title || '').trim();
+    if (title) {
+      if (locked('titleOrig')) miss('原标题');
+      else if (String(a.originalTitle || '').trim() !== title) { a.originalTitle = title; hit('titleOrig', '原标题'); }
+      /* 自定义标题只做兜底：空着时用商店标题填上，用户起过名字的一律不动 */
+      if (!String(a.title || '').trim()) {
+        a.title = title.slice(0, 60); hit('title', '自定义标题（原为空）');
+      }
+    }
+    var shopUrlNow = String(info.shopUrl || a.shopUrl || '');
+    var author = Store.cleanShopField(info.author || info.shop || '', shopUrlNow);
+    if (author && !locked('author') && author !== String(a.author || '')) { a.author = author; hit('author', '作者'); }
+    var shop = Store.cleanShopField(info.shop || '', shopUrlNow);
+    if (shop && !locked('shop') && shop !== String(a.shop || '')) { a.shop = shop; hit('shop', '店铺'); }
+    if (info.itemId && String(info.itemId) !== String(a.itemId || '')) {
+      if (locked('itemId')) miss('商品 ID');
+      else { a.itemId = String(info.itemId); hit('itemId', '商品 ID'); }
+    }
+    if (info.shopUrl && String(info.shopUrl) !== String(a.shopUrl || '')) {
+      if (locked('shopUrl')) miss('店铺链接');
+      else { a.shopUrl = String(info.shopUrl); hit('shopUrl', '店铺链接'); }
+    }
+    if (info.description) {
+      var desc = Smart.pickChinese(info.description);
+      if (desc && desc !== String(a.description || '')) {
+        if (locked('desc')) miss('商品简介');
+        else { a.description = desc; hit('desc', '商品简介'); }
+      }
+    }
+    if (info.tags && info.tags.length) {
+      var rawNew = uniq(info.tags.map(String)).filter(Boolean);
+      var rawAll = uniq((a.rawTags || []).concat(rawNew)).filter(Boolean);
+      var zhNew = Smart.purgeAvatarTags((App.settings && App.settings.autoTranslateTags && Smart.translateTags)
+        ? Smart.translateTags(rawNew.slice()) : rawNew.slice());
+      var tagAll = uniq((a.tags || []).concat(zhNew)).filter(Boolean);
+      var addTag = tagAll.length - (a.tags || []).length;
+      if (addTag > 0) {
+        a.tags = tagAll; a.rawTags = rawAll;
+        hit('tags', '标签 +' + addTag); a.autoFilled.raws = true;
+      }
+    }
+    if (info.images && info.images.length) {
+      var imgs = uniq((a.images || []).concat(info.images.map(String))).filter(Boolean);
+      var addImg = imgs.length - (a.images || []).length;
+      if (addImg > 0) { a.images = imgs; hit('images', '图集 +' + addImg); }
+    }
+    /* 封面外链只补空：有本地封面或用户清过封面的，一律不碰 */
+    if (info.coverURL && !a.hasCover && !a.coverCleared && String(info.coverURL) !== String(a.coverURL || '')) {
+      a.coverURL = String(info.coverURL); hit('cover', '封面外链');
+    }
+    if (info.publishedAt && String(info.publishedAt) !== String(a.publishedAt || '')) {
+      if (locked('publishedAt')) miss('上架日期');
+      else { a.publishedAt = String(info.publishedAt); hit('publishedAt', '上架日期'); }
+    }
+    if (info.shopUpdatedAt && String(info.shopUpdatedAt) !== String(a.shopUpdatedAt || '')) {
+      if (locked('shopUpdatedAt')) miss('商品更新日期');
+      else { a.shopUpdatedAt = String(info.shopUpdatedAt); hit('shopUpdatedAt', '商品更新日期'); }
+    }
+    if (String(a.category || 'other') === 'other') {
+      var guess = Smart.guessCategory(info);
+      if (guess && guess !== 'other') { a.category = guess; hit('category', '分类'); }
+    }
+    if (App.settings && App.settings.autoDetectAvatar && a.category !== 'avatar') {
+      var avs = Smart.detectAvatars(info) || [];
+      var avAll = uniq((a.avatars || []).concat(avs)).filter(Boolean);
+      var addAv = avAll.length - (a.avatars || []).length;
+      if (addAv > 0) { a.avatars = avAll; hit('avatars', '支持角色 +' + addAv); }
+    }
+    /* 下架状态跟着抓取结果走：404/410 标记、能抓到就清除（与编辑页手动联网的行为一致） */
+    if (info.delisted) {
+      if (!a.delisted) { a.delisted = true; changed.push('标记「已下架」'); }
+    } else if (a.delisted) {
+      a.delisted = false; changed.push('清除「已下架」');
+    }
+    return { changed: changed, skipped: skipped };
+  },
+
+  /** 多选浮动区「更新商品信息」：对选中素材逐个重抓商品页（手动触发，不走缓存） */
+  bulkRefreshInfo: function () {
+    var ids = App.selectedIds();
+    if (!ids.length) { Toast.warn('先勾选要更新信息的素材'); return; }
+    var list = (App.assets || []).filter(function (a) { return ids.indexOf(a.id) >= 0; });
+    var targets = [], noLink = 0;
+    list.forEach(function (a) {
+      var url = Tools.shopLinkOf(a);
+      if (url) targets.push({ a: a, url: url }); else noLink++;
+    });
+
+    var logBox = el('div', { class: 'fetch-log', style: { display: 'none' } });
+    function log(t) { logBox.style.display = ''; logBox.appendChild(el('div', { class: 'log-line', text: t })); logBox.scrollTop = logBox.scrollHeight; }
+    var forceCk = el('input', { type: 'checkbox' });
+    var runBtn = null;
+    var running = false, cancelled = false;
+    var netOk = (typeof Net !== 'undefined' && Net.networkAllowed());
+
+    var h = Modal.open({
+      title: '更新商品信息（重新抓取商品页）', size: 'md',
+      body: [
+        el('div', { class: 'field-hint', text: '对选中的素材重新请求一次商品页，把商店侧的最新信息刷进来；每个素材只请求一次，并顺手刷新本地解析缓存。' }),
+        el('div', { class: 'notice' + (netOk ? '' : ' notice-warn') }, [
+          el('p', { text: '会刷新的字段：原标题、作者 / 店铺、商品简介、标签（只增不减）、图集（只增不减）、封面外链（仅无本地封面时）、上架 / 更新时间、分类（仅当前为「其他」时）、支持角色（按标签识别）、已下架标记。' }),
+          el('p', { text: '不会改动：自定义标题、角色名、本地文件与路径、购买价、备注、版本与下载文件 —— 那部分请用「批量获取更新（订单文件）」。' }),
+          el('p', { text: netOk ? '当前为内置联网模式。'
+            : '当前是「手动粘贴源码」模式：点「开始」仍会按你这次点击联网抓取一次，不会在后台自己发请求。' })
+        ]),
+        el('div', { class: 'field-hint', text: '已选 ' + list.length + ' 项：' + targets.length + ' 项能定位到商品链接'
+          + (noLink ? '；' + noLink + ' 项没有链接（跳过，可先在编辑页补上链接）' : '') + '。' }),
+        el('label', { class: 'check check-row' }, [forceCk,
+          el('span', { text: '覆盖我手动改过的字段（原标题、作者、简介、标签、日期等；自定义标题与角色名始终保留）' })]),
+        logBox
+      ],
+      footer: [
+        el('button', { class: 'btn', onclick: function () { Modal.close(h); } }, '关闭'),
+        el('button', { class: 'btn', onclick: function () { if (running) { cancelled = true; log('已请求停止（当前素材跑完就停）'); } } }, '停止'),
+        (runBtn = el('button', { class: 'btn btn-primary', onclick: run }, ICONS.label('\u{1F504} 开始更新')))
+      ]
+    });
+
+    function run() {
+      if (running) return;
+      if (!targets.length) { Toast.warn('选中的素材都没有可抓的商品链接'); return; }
+      running = true; cancelled = false;
+      runBtn.disabled = true; ICONS.apply(runBtn, ('\u23F3 更新中 …'));
+      var force = !!forceCk.checked;
+      var okN = 0, chgN = 0, failN = 0, done = 0;
+      log('共 ' + targets.length + ' 个素材待更新，开始逐个抓取 …');
+      var chain = Promise.resolve();
+      targets.forEach(function (t, i) {
+        chain = chain.then(function () {
+          if (cancelled) return null;
+          var a = t.a;
+          var name = a.title || a.originalTitle || a.id;
+          return Fetchers.fetchInfo(t.url, { forceNetwork: true, noCache: true, onLog: function () {} }).then(function (info) {
+            done++;
+            if (!info || info.__failed) {
+              failN++;
+              var why = info && (info.reason === 'no-channel' ? '程序后端未就绪' : (info.reason
+                || (info.tried && info.tried[0] && info.tried[0].error))) || '抓取失败';
+              log('\u2716 [' + done + '/' + targets.length + '] ' + name + '：' + why);
+              if (Fetchers.looksDelisted(info) && !a.delisted) {
+                a.delisted = true;
+                log('   └ 返回 404 / 410，已标记「已下架」');
+                return App.save(a);
+              }
+              return null;
+            }
+            var res = Tools.applyShopInfo(a, info, force);
+            if (!res.changed.length) { okN++; log('\u00B7 [' + done + '/' + targets.length + '] ' + name + '：无变化'); return null; }
+            return App.save(a).then(function () {
+              okN++; chgN++;
+              var head = res.changed.slice(0, 7).join('、');
+              log('\u2714 [' + done + '/' + targets.length + '] ' + name + '：' + head
+                + (res.changed.length > 7 ? ' 等 ' + res.changed.length + ' 项' : '')
+                + (res.skipped.length ? '（跳过 ' + res.skipped.join('、') + '）' : ''));
+            });
+          }).catch(function (e) {
+            failN++;
+            log('\u2716 ' + name + '：' + ((e && e.message) || e));
+          });
+        }).then(function () {
+          /* 串行 + 220ms 间隔：一次刷几十个商品页时不至于把站点打急 */
+          if (!cancelled && i < targets.length - 1) return new Promise(function (r) { setTimeout(r, 220); });
+        });
+      });
+      chain.then(function () {
+        log('—— ' + (cancelled ? '已停止：' : '完成：') + '成功 ' + okN + ' 个（其中 ' + chgN + ' 个有更新），失败 ' + failN + ' 个。 ——');
+        if (chgN) App.reload().then(function () { UI.renderAll(); });
+        running = false; runBtn.disabled = false; ICONS.apply(runBtn, ('\u{1F504} 再次更新'));
+      }).catch(function (e) {
+        log('\u2716 中断：' + ((e && e.message) || e));
+        running = false; runBtn.disabled = false; ICONS.apply(runBtn, ('\u{1F504} 再次更新'));
+      });
+    }
+  },
+
+  /** 批量下载缺失文件：把「库里有记录但磁盘上没有」的文件全部入队 */
   bulkDownloadMissing: function () {
     var ids = App.selectedIds();
     if (!ids.length) { Toast.warn('请先选择素材'); return; }

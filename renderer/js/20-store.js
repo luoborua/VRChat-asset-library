@@ -1,13 +1,14 @@
-/* ============ 20-store.js ============ */
-/* =====================================================================
- * 20-store.js  —  数据持久化层
- *   数据本体在 <HTML 同目录>\vrclib-data\（见下方 Store.local）；IndexedDB 为缓存副本（素材 / 封面二进制 / 目录句柄 / 设置）
- *   不可用时自动降级到 LocalStorage（封面转 DataURL 存储）
- * ===================================================================== */
+/*
+ * 20-store.js —— 素材主库：素材、封面 Blob、目录句柄与设置的读写。
+ *   真源是数据目录下的 library.db 与 settings.json，经 FS.host 读写；
+ *   IndexedDB 只是缓存，再不可用则降级 LocalStorage（封面转 DataURL）。
+ * 边界：只管存取与字段规范化，不做业务判断；写库后通知 App 同步到文件。
+ */
 
 var Store = (function () {
   var db = null;
   var useIDB = true;
+  var assetsReadBroken = false;   // 主库读取有异常时为真：进入只读保护，禁止整库覆盖写
 
   /** 店铺字段清洗：不应是 URL / 站名 */
   function cleanShopField(v, shopUrl) {
@@ -53,13 +54,13 @@ var Store = (function () {
   }
   function normalizeVersion(v) {
     v = v || {};
-    // 兼容旧字段：单文件信息迁移到 files[]
+    // 单文件字段（fileName / url / path）一并折进 files[]，读盘时只认一种形状
     var files = Array.isArray(v.files) ? v.files.map(normalizeFile)
       : ((v.fileName || v.url || v.path) ? [normalizeFile({ name: v.fileName, url: v.url, size: v.size, path: v.path })] : []);
     var first = files[0] || {};
     return {
       id:       v.id || uid('ver'),
-      name:     v.name || '',          // 版本名 / 变体名（如「ダウンロード版」「v1.2」）
+      name:     v.name || '',          // 版本名 / 变体名（如「ダウンロード版」「通常版」）
       fileName: v.fileName || first.name || '',
       size:     v.size || files.reduce(function (s, f) { return s + (f.size || 0); }, 0),
       url:      v.url || first.url || '',
@@ -77,8 +78,7 @@ var Store = (function () {
     };
   }
 
-  /** v2.3.10：「免费 / 付费」判定 —— 价格文本优先，其次商品价（BOOTH 变体价 / 商店价）；都未知返回 null（卡片不显示斜丝带） */
-  /** v2.5.2：图集去重——同一张图的「/c/WxH/ 路径缩略版」与「原图」视为一张，优先保留原图 */
+  /** 图集去重：同一张图的 /c/WxH/ 缩略版与原图视为一张，保留原图 */
   function dedupeImages(list) {
     function key(u) {
       var s = String(u || '').split('#')[0].split('?')[0].replace(/\/c\/\d+x\d+\//, '/');
@@ -97,22 +97,23 @@ var Store = (function () {
     return order.map(function (k) { return best[k]; });
   }
 
-  /** v2.5.11（用户批复 C）：变体名标示「停售 / 售罄 / 下架」→ 不参与计价与免费判定（仍照常列出、可下载） */
+  /** 变体名写着停售 / 售罄 / 下架 → 不参与计价与免费判定，但仍照常列出、可下载 */
   function isDeadVariantName(name) {
     return /販売停止|販売終了|贩售停止|停止销售|销售结束|已停售|売り切れ|売切|完売|品切れ|sold\s*out|discontinued|unavailable/i.test(String(name || ''));
   }
 
+  /** 免费判定：价格文本优先，其次变体价，再次商店价；拿不到任何价格证据时返回 null（界面不显示丝带） */
   function deriveAssetIsFree(a, isBooth, shopPriceValue) {
     var d = derivePrice(a.price);
     if (typeof d.isFree === 'boolean') return d.isFree;
-    // v2.5.2：商品价不再记录 → 免费与否按**变体价**判定（有变体价且全为 0 = 免费）
-    // v2.5.11（用户批复 C）：**停售 / 售罄**的变体不参与判定——作者常拿占位价（如 9,999,999）标它们，
-    // 否则一条只剩免费变体的素材会被判成「付费」（真实库实测：Project Zero 那条就是这个坑）。
+    // 免费与否按变体价判定：有变体价且全为 0 才算免费。
+    // 停售 / 售罄变体不参与判定——作者常用 9,999,999 这类占位价，
+    // 否则只剩免费变体的素材会被判成「付费」。
     var vers = (a.versions || []).filter(function (v) {
       if (!v) return false;
-      // 停售且**没买过**（无订单链接）→ 不算价格证据；买过的停售变体照常算（用户 2026-10-01 修正）
+      // 停售且没买过（无订单链接）不算价格证据；买过的照常算
       if (isDeadVariantName(v.name) && !(v.orderUrl && String(v.orderUrl).trim())) return false;
-      return true;   // 含免费/特价变体（special）：它们同样是「是否免费」的证据
+      return true;   // 免费 / 特价变体（special）同样是「是否免费」的证据
     });
     var seen = false, allZero = true;
     vers.forEach(function (v) {
@@ -130,9 +131,9 @@ var Store = (function () {
   function normalizeAsset(a) {
     a = a || {};
     var isBooth = (a.source === 'booth') || (Array.isArray(a.sources) && a.sources.some(function (s) { return s && s.source === 'booth'; }));
-    // v2.1 价格模型：purchasePrice/Currency = 用户手填购买价（所有来源都可填）；
-    // shopPrice/Value/Currency = 只读商品价（BOOTH 用变体计算价，其他来源为抓取到的商店价）。
-    // 存量迁移：BOOTH 旧 price 视为商品价；其他来源旧 price 视为购买价。
+    // 价格模型：purchasePrice / Currency 是用户手填的购买价（所有来源都可填）；
+    // shopPrice / Value / Currency 是只读商品价（BOOTH 按变体算，其他来源取抓到的商店价）。
+    // 早期数据只有 price 一个字段：BOOTH 视为商品价，其余来源视为购买价。
     var purchasePrice = (a.purchasePrice != null && isFinite(Number(a.purchasePrice))) ? Number(a.purchasePrice) : null;
     var purchaseCurrency = a.purchaseCurrency || '';
     var shopPrice = a.shopPrice || '';
@@ -161,21 +162,21 @@ var Store = (function () {
       sources:       Array.isArray(a.sources) ? a.sources.map(normalizeSource) : [],  // 全部来源（好友分享/闲鱼等可与商店来源并存）
       links:         Array.isArray(a.links) ? a.links.slice() : [],          // 商店链接（多个）
       downloadLinks: Array.isArray(a.downloadLinks) ? a.downloadLinks.slice() : [], // 下载直链
-      cloudUrl:      typeof a.cloudUrl === 'string' ? a.cloudUrl : '',              // v2.2.12 网盘路径或分享链接
-      downloadedFiles: Array.isArray(a.downloadedFiles) ? a.downloadedFiles.slice() : [],  // v2.3.2 成功下载过的文件名（后端离线、且浏览器目录句柄也不可用时，作为乐观兜底保留原按钮状态）
+      cloudUrl:      typeof a.cloudUrl === 'string' ? a.cloudUrl : '',              // 网盘路径或分享链接
+      downloadedFiles: Array.isArray(a.downloadedFiles) ? a.downloadedFiles.slice() : [],  // 成功下载过的文件名：后端与目录句柄都不可用时用来兜底按钮状态
       versions:      Array.isArray(a.versions) ? a.versions.map(normalizeVersion) : [],       // 版本 / 变体
-      activeVersion: a.activeVersion || '',                                                   // 兼容旧字段：已购买版本 id
+      activeVersion: a.activeVersion || '',                                                   // 单个已购版本 id（多版本用 activeVersions）
       activeVersions: Array.isArray(a.activeVersions) ? uniq(a.activeVersions)
         : (a.activeVersion ? [a.activeVersion] : []),                                        // 已购买版本 id 集合（由 orderUrl 自动派生，保存时重算）
       category:      a.category || 'other',
       tags:          Array.isArray(a.tags) ? uniq(a.tags) : [],
       rawTags:       Array.isArray(a.rawTags) ? uniq(a.rawTags) : [],        // 原始（未翻译）标签
       description:   a.description || '',           // 商品简介（抓取所得，纯文本；界面上叫「商品简介」）
-      // v2.5.2：商品图集——按「店铺/商品/文件名」归一，同一张图的 /c/WxH/ 缩略路径与原图只留一张（优先原图）
+      // 图集按「店铺 / 商品 / 文件名」归一：同一张图的缩略路径与原图只留一张
       images:        dedupeImages(Array.isArray(a.images) ? a.images : []),
       coverURL:      a.coverURL || '',              // 外链封面（无本地封面时使用）
       hasCover:      !!a.hasCover,                  // 是否存在本地封面 Blob
-      coverCleared:  !!a.coverCleared,              // v2.3.7 用户主动清除过封面：不再按商品ID 从素材文件夹自动认领
+      coverCleared:  !!a.coverCleared,              // 用户主动清除过封面：不再按商品 ID 从素材文件夹自动认领
       avatars:       Array.isArray(a.avatars) ? uniq(a.avatars) : [],        // 支持角色
       charNameZh:    a.charNameZh || '',          // 该素材作为角色模型时的中文角色名
       charNameJa:    a.charNameJa || '',
@@ -183,13 +184,11 @@ var Store = (function () {
       paths:         Array.isArray(a.paths) ? a.paths.slice() : [],          // 本地文件路径（多个）
       note:          a.note || '',
       author:        Store.cleanShopField(a.author, a.shopUrl),
-      /* v2.5.2（用户批准）：商品价不再记录——price / shopPrice* 一律丢弃（保存即清理旧数据）；
-       * 价格一律由**变体价**现算（见 App.effectivePrice），购买价 purchasePrice 继续保留。 */
+      /* 商品价不入库：price / shopPrice* 一律清空，价格改由变体价现算，
+       * 购买价 purchasePrice 继续保留。 */
       price: '', priceValue: null, currency: '', shopPrice: '', shopPriceValue: null, shopPriceCurrency: '',
-      /* v2.5.3（用户批复）：isFree 改为**以变体价现算为准**。原实现「一旦是布尔值就永不重算」，
-       * 而 v2.5.2 起价格口径改成变体价现算 → 两者会长期不一致（真实库实测 21 条素材显示「免费」
-       * 却算得出 ¥100~¥1000 且确实有非 0 变体价，卡片还因此隐藏价格）。
-       * 只有拿不到任何价格证据（derived === null）时才沿用已存值。 */
+      /* isFree 以变体价现算为准：若直接沿用存值，价格口径一变就会长期不一致，
+       * 出现「标着免费却算得出非 0 价」的情况。只有拿不到任何价格证据时才沿用已存值。 */
       isFree:        (function () { var derived = deriveAssetIsFree(a, isBooth, null); return derived !== null ? derived : ((typeof a.isFree === 'boolean') ? a.isFree : null); })(),
       purchasePrice: purchasePrice,                 // 手填购买价（数值，所有来源）
       purchaseCurrency: purchaseCurrency,           // 购买价币种：CNY/JPY/USD/EUR
@@ -200,7 +199,9 @@ var Store = (function () {
       shop:          Store.cleanShopField(a.shop, a.shopUrl),
       shopUrl:       a.shopUrl || '',
       itemId:        a.itemId || '',                // 站点商品 ID（BOOTH/Gumroad）
+      fileId:        String(a.fileId || '').trim().toUpperCase(),  // 素材编号：好友导出/导入判「同一份」用，见 fileIdOf；统一大写，比较时不会因大小写漏判
       hidden:        !!a.hidden,                    // 隐藏标记（不在默认列表中显示）
+      trashAt:       Number(a.trashAt) || 0,         // 进回收站的时间戳：>0 表示已删除、只剩标记
       downloaded:    !!a.downloaded,
       downloadedAt:  a.downloadedAt || '',
       favorite:      !!a.favorite,
@@ -232,9 +233,9 @@ var Store = (function () {
         }
         if (!d.objectStoreNames.contains('covers')) d.createObjectStore('covers', { keyPath: 'id' });
         if (!d.objectStoreNames.contains('kv'))     d.createObjectStore('kv', { keyPath: 'k' });
-        // v2：抓取结果缓存（同一商品链接不重复请求 / 重复解析）
+        // 抓取结果缓存：同一商品链接不重复请求与解析
         if (!d.objectStoreNames.contains('fetchCache')) d.createObjectStore('fetchCache', { keyPath: 'url' });
-        // v3：图集缓存表（v2.3.6 起图集本体落盘 vrclib-data\gallery\，这里只剩后端离线时的兜底与迁移来源）
+        // 图集缓存：本体已落盘到数据目录的 gallery\，这里只留后端离线时的兜底
         if (!d.objectStoreNames.contains('gallery')) d.createObjectStore('gallery', { keyPath: 'id' });
       };
       req.onsuccess = function () { db = req.result; useIDB = true; resolve(true); };
@@ -268,11 +269,9 @@ var Store = (function () {
     });
   }
 
-  /** v2.5.1（真 bug 修复）：任何写库动作都必须镜像到**文件主库**（vrclib-data\assets.json）。
-   *  文件是启动时的数据源，只写 IndexedDB 的改动会在下次启动被文件里的旧数据覆盖回来——
-   *  「删除素材后刷新又出现」就是这么来的（App.remove 只删了 IDB）。以前只有 App.save 会 scheduleFileSync，
-   *  直接调 Store.putAssets / deleteAsset / clearAll 的地方（批量操作、标签全局改名、备份导入、清空素材库…）全都漏了。
-   *  放在 store 层做，一次覆盖所有调用点，以后新增调用也不会再漏。 */
+  /** 所有写库动作都要顺手标脏，让文件主库跟着重写。
+   *  文件是启动时的数据源，只改 IndexedDB 的改动会在下次启动被文件里的数据盖回去
+   *  （「删除素材后刷新又出现」就是这样）。放在 store 层做，调用点再多也不会漏。 */
   function markFileDirty() {
     try {
       if (typeof App !== 'undefined' && App && typeof App.scheduleFileSync === 'function') App.scheduleFileSync('assets');
@@ -286,7 +285,8 @@ var Store = (function () {
       var d = lsRead();
       var i = d.assets.findIndex(function (x) { return x.id === a.id; });
       if (i >= 0) d.assets[i] = a; else d.assets.push(a);
-      lsWrite(d); markFileDirty(); return Promise.resolve(a);
+      if (!lsWrite(d)) return Promise.reject(new Error('本地存储写入失败（空间不足）'));
+      markFileDirty(); return Promise.resolve(a);
     }
     var t = tx('assets', 'readwrite');
     return reqP(t.objectStore('assets').put(a)).then(function () { markFileDirty(); return a; });
@@ -300,7 +300,8 @@ var Store = (function () {
         var i = d.assets.findIndex(function (x) { return x.id === a.id; });
         if (i >= 0) d.assets[i] = a; else d.assets.push(a);
       });
-      lsWrite(d); markFileDirty(); return Promise.resolve(list.length);
+      if (!lsWrite(d)) return Promise.reject(new Error('本地存储写入失败（空间不足）'));
+      markFileDirty(); return Promise.resolve(list.length);
     }
     var t = tx('assets', 'readwrite'), s = t.objectStore('assets');
     list.forEach(function (raw) { s.put(normalizeAsset(raw)); });
@@ -320,8 +321,17 @@ var Store = (function () {
     var t = tx(['assets', 'covers'], 'readwrite');
     t.objectStore('assets').delete(id);
     t.objectStore('covers').delete(id);
-    // ← 这里以前没有标脏：删完只写进 IDB，文件里还在 → 刷新后素材"复活"
-    return new Promise(function (res) { t.oncomplete = function () { markFileDirty(); res(); }; t.onerror = res; });
+    return new Promise(function (res, rej) {
+      var settled = false;
+      function fail(e) {
+        if (settled) return; settled = true;
+        Toast.err('删除素材失败，主库未更新：' + ((e && e.message) || '事务被中止'), 6000);
+        rej(e || new Error('删除素材失败'));
+      }
+      t.oncomplete = function () { if (settled) return; settled = true; markFileDirty(); res(); };
+      t.onerror = function () { fail(t.error); };
+      t.onabort = function () { fail(t.error); };
+    });
   }
 
   function clearAll() {
@@ -329,14 +339,26 @@ var Store = (function () {
     var t = tx(['assets', 'covers'], 'readwrite');
     t.objectStore('assets').clear();
     t.objectStore('covers').clear();
-    return new Promise(function (res) { t.oncomplete = function () { markFileDirty(); res(); }; t.onerror = res; });
+    return new Promise(function (res, rej) {
+      var settled = false;
+      function fail(e) {
+        if (settled) return; settled = true;
+        Toast.err('清空素材库失败，主库未更新：' + ((e && e.message) || '事务被中止'), 6000);
+        rej(e || new Error('清空素材库失败'));
+      }
+      t.oncomplete = function () { if (settled) return; settled = true; markFileDirty(); res(); };
+      t.onerror = function () { fail(t.error); };
+      t.onabort = function () { fail(t.error); };
+    });
   }
 
   /* ---------------- 封面（Blob / DataURL） ---------------- */
   function putCover(id, blob) {
     if (!useIDB) {
       return fileToDataURL(blob).then(function (durl) {
-        var d = lsRead(); d.covers[id] = durl; lsWrite(d); return true;
+        var d = lsRead(); d.covers[id] = durl;
+        if (!lsWrite(d)) throw new Error('本地存储写入失败（空间不足）');
+        return true;
       });
     }
     var t = tx('covers', 'readwrite');
@@ -361,6 +383,229 @@ var Store = (function () {
       return Promise.resolve(Object.keys(d.covers).map(function (k) { return { id: k, dataURL: d.covers[k] }; }));
     }
     return reqP(tx('covers').objectStore('covers').getAll()).then(function (r) { return r || []; });
+  }
+
+  /* ---------------- 素材编号（好友导出 / 导入靠它认「是不是同一份」） ----------------
+   * BOOTH 商品直接取商品编号（纯数字）；其余素材给「V + 8 位」，字母开头。
+   * 两类不可能撞车（一个纯数字、一个字母打头），所以不必加前缀区分来源。
+   * 编号生成后不再变，只有填了 BOOTH 链接才会被商品编号接管 —— 见 fileIdOf。 */
+  var FILE_ID_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';   // 去掉 0/O/1/I/L：人工抄写不会认错
+  var FILE_ID_LEN = 8;
+
+  /* 本进程里已经发出去、但可能还没落盘的编号。
+   * 调用方传进来的 taken 是「库里已有」的快照：一次导入几十条、连着新建几条时，
+   * 先发的号还在内存里没进列表，taken 里查不到，光靠随机不撞只能叫「概率高」。
+   * 发过的号先在这里占位，才谈得上确保不重复。进程重启即清空，不影响落盘数据。 */
+  var fileIdReserved = Object.create(null);
+  var fileIdSeq = 0;
+
+  /** 比较用的归一化键：大小写不敏感（历史数据里可能被手改成小写） */
+  function fileIdKey(id) { return String(id == null ? '' : id).trim().toUpperCase(); }
+
+  /** 这个编号是否已经被占用：reserved（本进程已发）+ taken（外部传入的已占用表） */
+  function isFileIdTaken(id, taken) {
+    var k = fileIdKey(id);
+    if (!k) return false;
+    if (fileIdReserved[k]) return true;
+    if (!taken) return false;
+    if (taken[k]) return true;
+    return !!(taken[String(id).trim()] || taken[k.toLowerCase()]);   // 兼容调用方传小写/带空格的键
+  }
+
+  /** 占位：外部带进来的编号（导入时沿用对方的号）也要登记，后续发号才不会撞它 */
+  function reserveFileId(id) {
+    var k = fileIdKey(id);
+    if (k) fileIdReserved[k] = 1;
+    return k;
+  }
+
+  /** 把数字按 alphabet 编成定长 FILE_ID_LEN 位（低位在右） */
+  function encodeFileId(num) {
+    var A = FILE_ID_ALPHABET, L = A.length, x = Math.abs(Math.floor(num)) || 0;
+    var s = '';
+    for (var i = 0; i < FILE_ID_LEN; i++) { s = A.charAt(x % L) + s; x = Math.floor(x / L); }
+    return s;
+  }
+
+  /** 生成一个没被占用的编号；taken 是「已占用编号」表，可省略。
+   *  两段式：先随机试 128 次（空间 32^8 ≈ 1.1e12，正常第一次就中）；
+   *  万一连着撞（说明随机源异常或 taken 几乎满），改走「时间戳 + 自增序号」派生，
+   *  逐号往上找空位 —— 这条兜底路径同样逐个查重，且仍是 V + 8 位定长，不再退化成不定长时间戳串。 */
+  function newFileId(taken) {
+    for (var n = 0; n < 128; n++) {
+      var s = 'V';
+      for (var i = 0; i < FILE_ID_LEN; i++) {
+        s += FILE_ID_ALPHABET.charAt(Math.floor(Math.random() * FILE_ID_ALPHABET.length));
+      }
+      if (!isFileIdTaken(s, taken)) { fileIdReserved[s] = 1; return s; }
+    }
+    var salt = Date.now();
+    for (var k = 0; k < 100000; k++) {
+      fileIdSeq++;
+      var cand = 'V' + encodeFileId(salt + fileIdSeq * 7919 + k * 104729);
+      if (!isFileIdTaken(cand, taken)) { fileIdReserved[cand] = 1; return cand; }
+    }
+    /* 走到这里等于 32^8 个号全被占了，实际不可能；返回空让调用方按「无编号」处理，
+     * 也绝不返回一个可能撞车的号去覆盖别人。 */
+    return '';
+  }
+
+  /** 从 itemId / 链接里取 BOOTH 商品编号；没有就返回空串。
+   *  链接要认 /ja/items/123、/zh-cn/items/123 这几种带语言段的写法。 */
+  function boothIdOf(a) {
+    if (!a) return '';
+    var iid = String(a.itemId || '').trim();
+    if (/^\d+$/.test(iid)) return iid;
+    var urls = [];
+    (a.links || []).forEach(function (l) { urls.push(String((l && l.url) || l || '')); });
+    if (a.sourceURL) urls.push(String(a.sourceURL));
+    if (a.shopUrl) urls.push(String(a.shopUrl));
+    for (var i = 0; i < urls.length; i++) {
+      var m = urls[i].match(/booth\.pm\/(?:[a-z-]+\/)?items\/(\d+)/i);
+      if (m) return m[1];
+    }
+    return '';
+  }
+
+  /** 生效编号：有 BOOTH 商品编号就以它为准，否则用存下来的 fileId */
+  function fileIdOf(a) {
+    var booth = boothIdOf(a);
+    if (booth) return booth;
+    return String((a && a.fileId) || '').trim();
+  }
+
+  /** 给缺编号的记录补一个，并把「两条素材撞同一个编号」修掉；返回补过/改过的记录。
+   *  返回值的 dups / boothDups 是这次的修正统计，供调用方决定要不要提示。 */
+  function ensureFileIds(list) {
+    var taken = Object.create(null);
+    var fixed = [], dups = 0, boothDups = 0;
+    (list || []).forEach(function (a) {
+      if (!a) return;
+      var eff = fileIdOf(a);
+      var k = fileIdKey(eff);
+      if (!k) {
+        /* 完全没编号（既没 fileId 也没 BOOTH 商品号）：现发一个 */
+        var f0 = newFileId(taken);
+        if (!f0) return;
+        taken[fileIdKey(f0)] = 1;
+        a.fileId = f0;
+        fixed.push(a);
+        return;
+      }
+      if (!taken[k]) {
+        taken[k] = 1;
+        /* BOOTH 商品号也落一份到 fileId：日后把商品链接删掉了，身份还是它，不会重新随机 */
+        if (!a.fileId) { a.fileId = eff; fixed.push(a); }
+        return;
+      }
+      /* 撞号：两条不同素材共用一个编号。导入判重只看编号，这种情况会把后一条当成前一条，
+       * 元数据互相覆盖 —— 所以先出现的保留，后面的重新发号。
+       * 例外是 BOOTH 商品号：两条都是同一商品（用户选过「全部新增一条」），
+       * 商品号是对外身份不能改，只记数交给调用方提示。 */
+      if (boothIdOf(a)) { boothDups++; return; }
+      var f = newFileId(taken);
+      if (!f) return;                       // 号池异常（实际到不了）：保持原样，下次启动再修
+      taken[fileIdKey(f)] = 1;
+      a.fileId = f;
+      fixed.push(a);
+      dups++;
+    });
+    fixed.dups = dups;
+    fixed.boothDups = boothDups;
+    return fixed;
+  }
+
+  /* ---------------- 回收站（记录上打标记，48 小时后清） ----------------
+   * 不另建一张表：删除只是给记录盖上 trashAt，记录仍留在主库里，
+   * 因此重启、换数据目录、导出备份都不会把它弄丢。
+   * 清理是「只扫标记过的记录 + 分批删」，见 trashPurge。 */
+  var TRASH_TTL = 48 * 3600 * 1000;
+
+  function isTrashed(a) { return !!(a && a.trashAt > 0); }
+
+  function trashMarkMany(list) {
+    var at = Date.now();
+    var marked = (list || []).filter(function (a) { return a && a.id; }).map(function (a) {
+      var n = normalizeAsset(a);
+      n.trashAt = at;
+      return n;
+    });
+    if (!marked.length) return Promise.resolve([]);
+    return putAssets(marked).then(function () { return marked; });
+  }
+
+  function trashMark(asset) {
+    if (!asset || !asset.id) return Promise.reject(new Error('没有可回收的素材'));
+    return trashMarkMany([asset]).then(function (l) { return l[0]; });
+  }
+
+  function trashList() {
+    return allAssets().then(function (list) {
+      return list.filter(isTrashed).sort(function (a, b) { return (b.trashAt || 0) - (a.trashAt || 0); });
+    });
+  }
+
+  function trashRestoreMany(ids) {
+    var want = {}, out = [];
+    (ids || []).forEach(function (id) { want[String(id)] = 1; });
+    return allAssets().then(function (list) {
+      var picked = list.filter(function (a) { return want[a.id] && isTrashed(a); });
+      if (!picked.length) return [];
+      picked.forEach(function (a) { delete a.trashAt; out.push(a); });
+      return putAssets(picked).then(function () { return out; });
+    });
+  }
+
+  function trashRestore(id) {
+    return trashRestoreMany([id]).then(function (l) { return l[0] || null; });
+  }
+
+  /** 立刻彻底删掉一条（覆盖层里的「立刻删除」） */
+  function trashDrop(id) { return deleteAsset(id).then(function () { return true; }); }
+
+  /** 清空回收站：先列出来再分批删，避免一次事务塞太多 */
+  function trashClear(opts) {
+    opts = opts || {};
+    var batch = Math.max(1, opts.batch || 30);
+    var gap = opts.gap == null ? 30 : opts.gap;
+    return trashList().then(function (list) {
+      var ids = list.map(function (a) { return a.id; });
+      var done = 0;
+      function step(i) {
+        if (i >= ids.length) return Promise.resolve(done);
+        var slice = ids.slice(i, i + batch);
+        return Promise.all(slice.map(function (id) {
+          return deleteAsset(id).catch(function () {});
+        })).then(function () {
+          done += slice.length;
+          return new Promise(function (r) { setTimeout(r, gap); }).then(function () { return step(i + batch); });
+        });
+      }
+      return step(0);
+    });
+  }
+
+  /** 过期清理：只检查标记过的记录，每批 batch 条、批间让出主线程，避免长任务卡界面 */
+  function trashPurge(opts) {
+    opts = opts || {};
+    var batch = Math.max(1, opts.batch || 20);
+    var gap = opts.gap == null ? 40 : opts.gap;
+    var now = Date.now();
+    var removed = 0;
+    return allAssets().then(function (list) {
+      var expired = list.filter(function (a) { return isTrashed(a) && (now - a.trashAt) > TRASH_TTL; });
+      function step(i) {
+        if (i >= expired.length) return Promise.resolve(removed);
+        var slice = expired.slice(i, i + batch);
+        return Promise.all(slice.map(function (a) {
+          return deleteAsset(a.id).catch(function () {});
+        })).then(function () {
+          removed += slice.length;
+          return new Promise(function (r) { setTimeout(r, gap); }).then(function () { return step(i + batch); });
+        });
+      }
+      return step(0);
+    });
   }
 
   /* ---------------- 键值（设置 / 目录句柄） ---------------- */
@@ -404,7 +649,7 @@ var Store = (function () {
     var t = tx('gallery', 'readwrite');
     return reqP(t.objectStore('gallery').delete(id));
   }
-  /** 全部图集缓存记录（v2.3.6 迁移到磁盘时遍历用） */
+  /** 全部图集缓存记录：把缓存搬到磁盘目录时逐条遍历用 */
   function galleryAll() {
     if (!useIDB) {
       var d = lsRead(), out = [];
@@ -414,7 +659,7 @@ var Store = (function () {
     return reqP(tx('gallery').objectStore('gallery').getAll()).then(function (rs) { return rs || []; }).catch(function () { return []; });
   }
 
-  /* ---------------- 图集磁盘缓存（v2.3.6：vrclib-data\gallery\<商品ID>\，PNG） ---------------- */
+  /* ---------------- 图集磁盘缓存：<数据目录>\gallery\<商品ID>\ ---------------- */
   function safeSeg(s) { return String(s == null ? '' : s).replace(/[\\/:*?"<>|]/g, '_').trim(); }
   function galleryDir(itemId, settings) {
     var d = dataDir(settings);
@@ -486,7 +731,7 @@ var Store = (function () {
     if (!useIDB) {
       var d = lsRead(); var hit = (d.kv['cache_' + url]);
       if (!hit) return Promise.resolve(null);
-      // v2.5.3：过期顺手删掉（原来只「读不到」不删除，IDB/localStorage 的抓取缓存只增不减）
+      // 过期顺手删掉：只判读不到而不删，抓取缓存会只增不减
       if (Date.now() - hit.at > ttl) { delete d.kv['cache_' + url]; lsWrite(d); return Promise.resolve(null); }
       return Promise.resolve(hit.info);
     }
@@ -535,12 +780,8 @@ var Store = (function () {
     return Promise.resolve(null);
   }
 
-  /**
-   * 图标本地化：优先 IndexedDB 中的 Blob，没有则下载一次并缓存。
-   * 返回可安全给 <img> 使用的 URL（本地 objectURL 或原始 URL 兜底）。
-   */
-  /** v2.5.3：Blob → dataURL。图标是长生命周期缓存（App.iconCache 全程不清空），
-   *  原来返回 objectURL 却从不 revoke ⇒ 每张图标一份常驻 blob；dataURL 不需要回收。 */
+  /** Blob → dataURL：图标缓存全程不清空，用 dataURL 才不必回收 objectURL，
+   *  否则每张图标都会常驻一份 blob。 */
   function blobToDataURL(blob) {
     return new Promise(function (res) {
       try {
@@ -551,6 +792,7 @@ var Store = (function () {
       } catch (e) { res(''); }
     });
   }
+  /** 图标本地化：优先用缓存过的 Blob，没有再下载一次并缓存；返回可安全给 <img> 用的 URL */
   function iconURL(url) {
     if (!url || !/^https?:\/\//i.test(url)) return Promise.resolve(url);
     var key = 'icon_' + url;
@@ -567,21 +809,18 @@ var Store = (function () {
     }).catch(function () { return url; });
   }
 
-  /* ================= 文件主库（v2.3.0） =================
-   * 位置：<HTML 同目录>\vrclib-data\{assets.json, settings.json, covers\<id>.<ext>}
-   * 语义：文件为准，IndexedDB 降为缓存；后端离线时 App 走只读缓存。
-   * settings.json 刻意排除凭据类字段（Cookie / AI Key），
-   * 这些只留在 IndexedDB 的加密存储里，不落旁路明文文件。
+  /* ================= 文件主库 =================
+   * 位置：<数据目录>\{library.db | assets.json, settings.json, covers\<id>.<ext>}
+   * 语义：文件为准，IndexedDB 降为缓存；后端离线时上层只能读缓存。
+   * settings.json 刻意排除凭据类字段：Cookie / AI Key 只留在加密的键值存储里，不落明文。
    */
   var DATA_DIRNAME = 'vrclib-data';
-  // 只排除【凭据类】与【环境相关】字段；fuzzyDict 是普通词表，必须落盘（v2.3.1 修正）
-  var SETTINGS_SKIP = ['credentials', 'ai', 'githubToken'];   // v2.3.25：Token 只留浏览器本机库
+  // 只排除凭据类字段；fuzzyDict 是普通词表，必须落盘
+  var SETTINGS_SKIP = ['credentials', 'ai', 'githubToken'];   // Token 只留本机库
 
   function htmlDir() {
     try {
-      /* 桌面壳（Electron / Tauri）由主进程直接给根目录 —— Tauri 的页面地址是
-       * http://tauri.localhost，从 location 推不出文件系统路径。
-       * 数据目录仍固定在 <程序根>\vrclib-data，与旧版完全一致，不会让老库「消失」。 */
+      /* 桌面壳由主进程直接给程序根目录：页面地址不是 file://，从 location 推不出文件系统路径。 */
       if (window.vrcElectron && window.vrcElectron.appRoot) return String(window.vrcElectron.appRoot);
       if (String(location.protocol) !== 'file:') return '';
       if (/[?&]nolocal=1\b/.test(String(location.search || ''))) return '';   // 冒烟/测试用：不在产物目录写 vrclib-data
@@ -604,7 +843,7 @@ var Store = (function () {
     var d = settingsDir();
     return d ? joinWinPath(d, ['settings.json']) : '';
   }
-  /** 数据根：用户选过目录就用它（v6.2），否则默认与配置同目录 */
+  /** 数据根：用户选过目录就用它，否则与配置同目录 */
   function dataDir(settings) {
     var custom = normalizeWinPath((settings || App.settings || {}).localDataDir || '');
     if (custom) return custom;
@@ -620,15 +859,11 @@ var Store = (function () {
     return btoa(out);
   }
   function b64OfText(s) { return b64OfBytes(new TextEncoder().encode(String(s))); }
-  /* v3.0.0（D9 · 容量悬崖）：后端 /api/writeFile 的上限 = **请求体 64 MB**（tools/vrclib-host.mjs readBody：
-   * len > 64*1024*1024 → req.destroy()，连 HTTP 响应都不给）。base64 膨胀 4/3 ⇒ 原始 JSON 超过约 48 MiB
-   * 就必然写不进去；而页面侧只看到「请求失败」，与后端离线无法区分 —— 于是提示说错原因、还白重试 15 次
-   * （约 5 分钟）。这里在**发送之前**按体积判死，并把结构化原因（too-large / host-offline / host-error）
-   * 留给上层说话。
-   * ⚠ 联动：HOST_BODY_LIMIT 必须与后端 readBody 的上限**同步改**（后端侧：tools/vrclib-host.mjs，
-   *   v3.0.0 起 = 64 MB = 67108864 B）。这是前端唯一一处常数，改一处即可；Store.local.hostBodyLimit()
-   *   把它连同推导出的悬崖值暴露出来，供探针/测试钉住这个联动。 */
-  var HOST_BODY_LIMIT = 67108864;     // = 64 MB，与 tools/vrclib-host.mjs readBody 上限一致
+  /* 后端写文件接口的请求体上限是 64 MB，base64 膨胀 4/3，原始 JSON 超过约 48 MiB 必然写不进去；
+   * 而页面只看到「请求失败」，与后端离线无法区分，既说错原因又会白等一轮重试。
+   * 所以在发送之前先按体积判死，并把结构化原因（too-large / host-offline / host-error）留给上层。
+   * ⚠ HOST_BODY_LIMIT 必须与后端 readBody 的上限同步修改，前端只有这一处常数。 */
+  var HOST_BODY_LIMIT = 67108864;     // 64 MB，与后端 readBody 的上限一致
   var BODY_WRAP = 256;                // JSON({path, dataBase64}) 的包装余量
   var lastWriteFail = null;
   function noteWriteFail(kind, info) { lastWriteFail = Object.assign({ kind: kind, at: Date.now() }, info || {}); }
@@ -645,9 +880,8 @@ var Store = (function () {
     });
   }
   function hostReady() { return (typeof FS !== 'undefined' && FS.hostEnsure) ? FS.hostEnsure() : Promise.resolve(false); }
-  /** errBox：文件「存在但读不出来」时记录原因（缺文件不记）。
-   *  v2.3.11：这条信息是防止「读失败被当成首次运行 → 启动链把空列表写回去」的关键，
-   *  起因是后端 /api/readText 有 2MB 上限（v2.3.11 前；现 64MB），而用户 assets.json 已 2.8MB。 */
+  /** 读 JSON：失败时把原因塞进 errBox，缺文件不记。
+   *  这条信息决定了「读不出来」能否与「首次运行」区分开——分不开，启动链就会把空列表写回主库。 */
   function readJsonFile(path, errBox) {
     if (!path) return Promise.resolve(null);
     return hostReady().then(function (ok) {
@@ -663,8 +897,8 @@ var Store = (function () {
   function writeTextFile(path, text) {
     if (!path) return Promise.resolve(false);
     var bytes = new TextEncoder().encode(String(text));
-    /* v6.1：Tauri 下直接写字节。没有 base64 膨胀 ⇒ 也就没有「原始 JSON 超过约 48MB 必写不进去」
-     * 这个悬崖，下面的体积预检只是给 Electron/浏览器兜底。 */
+    /* 能直接写字节就不绕 base64：没有膨胀，也就没有那条约 48 MiB 的体积悬崖；
+     *  下面的预检只给只能走 base64 的载体兜底。 */
     if (bytesMode()) {
       return hostReady().then(function (ok) {
         if (!ok) { noteWriteFail('host-offline', { path: path }); return false; }
@@ -676,7 +910,7 @@ var Store = (function () {
     var bodyBytes = 4 * Math.ceil(bytes.length / 3) + BODY_WRAP;      // base64 后 + JSON 包装
     if (bodyBytes > HOST_BODY_LIMIT) {
       noteWriteFail('too-large', { path: path, rawBytes: bytes.length, bodyBytes: bodyBytes, limitBytes: HOST_BODY_LIMIT });
-      return Promise.resolve(false);        // 体积超限是确定性失败：绝不重试（重试只会白等 5 分钟）
+      return Promise.resolve(false);        // 体积超限是确定性失败，绝不重试：重试只会白等一轮超时
     }
     var b64 = b64OfBytes(bytes);
     return hostReady().then(function (ok) {
@@ -692,19 +926,18 @@ var Store = (function () {
     var s = {}, src = settings || App.settings || {};
     Object.keys(src).forEach(function (k) {
       if (SETTINGS_SKIP.indexOf(k) >= 0) return;
-      if (k === 'v' || k === 'at' || k === 'settings') return;   // v2.3.18：settings.json 的外壳键绝不能进 payload
+      if (k === 'v' || k === 'at' || k === 'settings') return;   // 外壳键不能再套一层写回去
       s[k] = src[k];
     });
     return s;
   }
-  /** 加载文件主库 → {dir, assets, settings, ok}
-   *  v6.0：Tauri 载体下素材主库改为 SQLite（vrclib-data\library.db），
-   *        settings.json 仍是文件。返回结构与读 assets.json 时完全一致，
-   *        上层 App.bootLocalData 的时间戳比较、只读保护逻辑全部照旧。 */
+  /** 加载文件主库 → {dir, assets, settings, ok, readErrors}。
+   *  SQLite 模式下素材由 db 接口给出，返回结构与读 assets.json 时一致，
+   *  上层的时间戳比较与只读保护因此不必区分载体。 */
   function dbMode() {
     try { return !!(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke); } catch (e) { return false; }
   }
-  /** v6.1：能不能直接读写原始字节（Tauri 可以；Electron / 浏览器退回 base64 通道） */
+  /** 后端能否直接读写原始字节；不能就只能走 base64 通道 */
   function bytesMode() {
     try { return !!(typeof FS !== 'undefined' && FS.host && FS.host.bytesSupported && FS.host.bytesSupported()); } catch (e) { return false; }
   }
@@ -715,7 +948,7 @@ var Store = (function () {
     }
     return Promise.resolve(null);
   }
-  /** v6.2：封面一落盘就顺手生成 400px 缩略图（失败不影响封面本身） */
+  /** 封面一落盘就顺手生成缩略图；失败不影响封面本身 */
   function makeThumb(dir, coverPath, id) {
     try {
       if (!FS.host || !FS.host.thumb) return;
@@ -727,6 +960,8 @@ var Store = (function () {
   }
   function loadAll(settings) {
     var dir = dataDir(settings);
+    assetsReadBroken = false;   // 每次重读都重新判定，读干净了就解除只读
+    try { if (typeof App !== 'undefined' && App) App.assetsReadBroken = false; } catch (e) {}
     if (!dir) return Promise.resolve({ dir: '', ok: false, assets: null, settings: null, readErrors: [] });
     var errs = [];
     if (dbMode()) {
@@ -736,8 +971,16 @@ var Store = (function () {
       ]).then(function (r) {
         var db = r[0] || {};
         var count = Number(db.count) || 0;
-        /* count=0 → 当作首次运行（assets=null），让启动链保持原来的「首次运行」分支 */
+        /* count=0 当作首次运行（assets=null），让启动链走首次运行分支，而不是拿空列表回写主库 */
         var assetsFile = count > 0 ? { v: 1, at: db.at || '', assets: db.assets || [] } : null;
+        var skipped = Number(db.skipped) || 0, warning = String(db.warning || '');
+        if (warning || skipped > 0) {
+          assetsReadBroken = true;
+          try { if (typeof App !== 'undefined' && App) App.assetsReadBroken = true; } catch (e) {}
+          var why = warning || (skipped + ' 条记录无法解析');
+          errs.push('素材主库：' + why);
+          Toast.err('素材主库读取异常，已暂停写入以防覆盖：' + why + '。请先导出备份再处理', 9000);
+        }
         return { dir: dir, assets: assetsFile, settings: r[1], ok: !!(assetsFile || r[1]), readErrors: errs };
       }).catch(function (e) {
         errs.push('素材库数据库：' + ((e && e.message) || e));
@@ -752,6 +995,10 @@ var Store = (function () {
     });
   }
   function saveAssets(list, settings) {
+    if (assetsReadBroken) {   // 只读保护：主库读不干净时绝不整库覆盖写
+      noteWriteFail('db-error', { error: '素材主库读取异常，已暂停整库写入' });
+      return Promise.resolve(false);
+    }
     if (dbMode()) {
       return FS.host.db('save', { assets: list || [], at: nowISO() })
         .then(function () { lastWriteFail = null; return true; })
@@ -797,7 +1044,7 @@ var Store = (function () {
       });
     }).catch(function () { return false; });
   }
-  /** v2.3.4 下载队列落盘（vrclib-data\download-queue.json） */
+  /** 下载队列落盘：<数据目录>\download-queue.json */
   function saveQueue(list) {
     return writeTextFile(jsonPath('download-queue.json'), JSON.stringify({ v: 1, at: nowISO(), tasks: list || [] }));
   }
@@ -861,8 +1108,14 @@ var Store = (function () {
     get isIDB() { return useIDB; },
     normalizeAsset: normalizeAsset, normalizeVersion: normalizeVersion, normalizeSource: normalizeSource,
     cleanShopField: cleanShopField,
+    newFileId: newFileId, fileIdOf: fileIdOf, boothIdOf: boothIdOf, ensureFileIds: ensureFileIds,
+    isFileIdTaken: isFileIdTaken, reserveFileId: reserveFileId, fileIdKey: fileIdKey,
     allAssets: allAssets, putAsset: putAsset, putAssets: putAssets,
     deleteAsset: deleteAsset, clearAll: clearAll,
+    TRASH_TTL: TRASH_TTL, isTrashed: isTrashed,
+    trashMark: trashMark, trashMarkMany: trashMarkMany, trashList: trashList,
+    trashRestore: trashRestore, trashRestoreMany: trashRestoreMany,
+    trashDrop: trashDrop, trashClear: trashClear, trashPurge: trashPurge,
     putCover: function (id, blob) {
       return putCover(id, blob).then(function (r) { try { saveCoverFile(id, blob, App.settings); } catch (e) {} return r; });
     },
@@ -883,8 +1136,8 @@ var Store = (function () {
       loadAll: loadAll, saveAssets: saveAssets, saveSettings: saveSettings,
       saveCoverFile: saveCoverFile, loadCoverFile: loadCoverFile, coverExistsOnDisk: coverExistsOnDisk, settingsPayload: settingsPayload,
       saveQueue: saveQueue, loadQueue: loadQueue,
-      lastWriteFail: lastWriteFailInfo,   // v3.0.0（D9）：最近一次写盘失败的结构化原因（too-large / host-offline / host-error）
-      hostBodyLimit: hostBodyLimitInfo,   // v3.0.0（D9）：{limitBytes, wrap, cliffRawBytes} —— 前端护栏与后端上限的联动锚点
+      lastWriteFail: lastWriteFailInfo,   // 最近一次写盘失败的结构化原因，供上层区分超限与离线
+      hostBodyLimit: hostBodyLimitInfo,   // {limitBytes, wrap, cliffRawBytes}：前端护栏与后端上限的联动锚点
       galleryDir: galleryDir, saveGalleryFile: saveGalleryFile, listGalleryFiles: listGalleryFiles, loadGalleryFile: loadGalleryFile
     }
   };

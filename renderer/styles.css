@@ -1,6 +1,9 @@
-/* =====================================================================
- * VRChat 改模素材管理库 — 样式表
- * ===================================================================== */
+/*
+ * styles.css — 主界面样式表：主题变量、顶栏 / 侧栏 / 布局 / 卡片网格 / 弹窗 / 详情页。
+ * 配色与圆角全部走 :root 变量：主题由 html[data-theme] 切换，毛玻璃是 html[data-glass]，两者互相正交。
+ * 结构类名由 JS 生成（.topbar / .layout / .grid / .card / .modal …），改名前先对 JS。
+ * 边界：只做主界面版式；工作台整页在 workbench.css，组件内部的动态样式由 JS 负责。
+ */
 
 :root {
   --radius: 12px;
@@ -9,9 +12,9 @@
   --mono: ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace;
   --topbar-h: 58px;
   --sidebar-w: 300px;
-  --tabrail-w: 78px;          /* v6.8：左侧页签栏宽度，工作台页靠它让位 */
+  --tabrail-w: 78px;          /* 左侧页签栏宽度，工作台页靠它让位 */
   --tr: .18s ease;
-  /* v4.5：弹窗遮罩色。以前写死成接近黑的蓝，粉/蓝主题下打开详情页会像被蒙了一层灰。 */
+  /* 弹窗遮罩色：写死成接近黑的蓝，在粉/蓝主题下会像蒙了一层灰。 */
   --scrim: rgba(6,8,12,.62);
 }
 
@@ -33,7 +36,7 @@ html[data-theme="dark"] {
   --danger: #f4666b;
   --shadow: 0 12px 32px rgba(0,0,0,.45);
   --cover-bg: #1a1e26;
-  --bg-soft: rgba(255,255,255,.07);   /* v2.3.9：柔和的浮起面（此前未定义，深色下回退成浅灰，下载悬浮窗标题栏因此发白） */
+  --bg-soft: rgba(255,255,255,.07);   /* 柔和的浮起面：深色主题下若未定义会回退成浅灰，下载悬浮窗标题栏因此发白 */
   --scrim: rgba(6,8,12,.62);
 }
 
@@ -66,7 +69,7 @@ html[data-theme="light"] {
 }
 
 /* ====================================================================
- * v4.5 主题：樱粉马卡龙 / 天际蓝 + 毛玻璃
+ * 主题：樱粉马卡龙 / 天际蓝 + 毛玻璃
  *   · 主题由 html[data-theme] 切换（dark / light / sakura / sky）；
  *   · 毛玻璃是独立开关 html[data-glass]，与主题正交：只把「面」换成半透明
  *     并加背景模糊，文字与语义色不动；
@@ -144,8 +147,17 @@ html[data-glass="1"] {
   --bg-soft: rgba(255,255,255,.34);
 }
 html[data-glass="1"] body {
+  /* 性能：background-attachment: fixed 会让 Chromium 每次滚动都重绘整屏渐变，
+   * 表现为「一下拉 CPU 就飙」。所以渐变放在固定定位的伪元素上，只绘制一次。 */
+  background: var(--bg-2);
+}
+html[data-glass="1"] body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
   background: var(--page-grad);
-  background-attachment: fixed;
 }
 /* 只给「大面」加背景模糊；卡片数量多，单独给每张卡加 blur 太费，靠半透明透出底色即可 */
 html[data-glass="1"] .topbar,
@@ -156,13 +168,14 @@ html[data-glass="1"] .dl-panel,
 html[data-glass="1"] .cmp-list,
 html[data-glass="1"] .di-list,
 html[data-glass="1"] .toast {
-  backdrop-filter: blur(18px) saturate(1.35);
-  -webkit-backdrop-filter: blur(18px) saturate(1.35);
+  /* 性能：18px + saturate 要在滚动时逐帧重算两次全屏滤镜；8px 且不带 saturate，
+   * 观感差别很小，代价差一个数量级。 */
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 html[data-glass="1"] .card {
-  /* 卡片只做半透明、不加 backdrop-filter：一页几十张卡各加一层模糊，滚动会明显掉帧。
-   * 毛玻璃的观感由顶栏/侧栏/弹窗/菜单提供，卡片透出背景渐变即可。 */
-  box-shadow: 0 6px 18px rgba(0,0,0,.06);
+  /* 性能：卡片不加模糊，也不带投影 —— 投影是逐帧模糊合成的一部分，
+   * 一页 24 张卡一起滚时很贵。改用边框分层。 */
 }
 
 /* 粉 / 蓝主题下，弹窗（含素材详情页）与详情分区面上加一层很淡的同色洗：
@@ -183,13 +196,15 @@ body {
   margin: 0; background: var(--bg); color: var(--text);
   font-family: var(--font); font-size: 14px; line-height: 1.6;
   -webkit-font-smoothing: antialiased;
-  /* v2.5.16（用户反馈「顶栏右侧不该有滚动条」）：滚动交给内容区 .layout，body 不再滚动 ——
-   * 于是滚动条只出现在顶栏**下方**。顶栏仍是 fixed。 */
-  padding-top: 0; height: 100%; overflow: hidden;
+  /* 视口切成上下两行：顶栏一行，剩下的全给内容区（.layout）。
+   * 顶栏在文档流里、不悬浮，所以不需要 z-index 去挡滚动内容。
+   * 滚动只发生在卡片区（.main）和侧栏（.sidebar）内部。 */
+  display: flex; flex-direction: column;
+  height: 100vh; overflow: hidden;
 }
-html { height: 100%; }
 body.modal-open { overflow: hidden; }
-/* 拖拽提示层（v4.2.1：文案由 JS 通过 data-drop-hint 给出，素材包 / 备份文件共用） */
+html:has(body.modal-open), html:has(body.wb-open) { overflow: hidden; }
+/* 拖拽提示层：文案由 JS 通过 data-drop-hint 给出，素材包 / 备份文件共用 */
 body.dragging::after {
   content: attr(data-drop-hint);
   position: fixed; inset: 0; z-index: 900;
@@ -235,14 +250,15 @@ kbd {
 .boot-err { color: var(--danger); padding: 20px; text-align: center; }
 
 /* ---------------- 顶栏 ---------------- */
-/* v4.4：主进程用 titleBarStyle:'hidden' + titleBarOverlay，系统标题栏没了，
- * 顶栏同时是窗口的拖动区；右上角 138px 留给系统画的 − □ ×。 */
+/* 主进程用 titleBarStyle:'hidden'，系统标题栏没了，
+ * 顶栏同时是窗口的拖动区；右上角的 − □ × 由 .win-controls 自绘。 */
 .topbar {
   min-width: 0;
   height: var(--topbar-h); background: var(--bg-2); border-bottom: 1px solid var(--border);
   display: flex; align-items: center; gap: 10px;
   padding: 0 0 0 14px;
-  position: fixed; top: 0; left: 0; right: 0; z-index: 60;
+  flex: 0 0 var(--topbar-h); z-index: 60;   /* 第一行，高度固定，不参与压缩 */
+  position: relative;                       /* 流内元素：脱离文档流就会重新出现"内容从背后穿过" */
   -webkit-app-region: drag;                 /* 整条可拖动窗口 */
   user-select: none;
 }
@@ -254,8 +270,8 @@ kbd {
 .brand .logo { font-size: 20px; }
 .brand small { font-weight: 400; color: var(--text-3); font-size: 11px; line-height: 1.2; text-align: center; }
 
-.search-wrap input::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }   /* v2.3.28：去掉原生清除✕，避免与自绘的那个重叠 */
-/* v2.5.2：搜索区随窗口收缩，但有下限（原来 flex:1 会在窄窗里被右侧按钮组挤到 0） */
+.search-wrap input::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }   /* 去掉原生清除✕，避免与自绘的那个重叠 */
+/* 搜索区随窗口收缩，但要有下限 —— flex:1 在窄窗里会被右侧按钮组挤到 0 */
 .search-wrap { position: relative; flex: 1 1 auto; min-width: 180px; max-width: 560px; margin-left: 6px; }
 .search-wrap input {
   width: 100%; height: 36px; padding: 0 34px 0 34px; border-radius: 20px;
@@ -267,16 +283,16 @@ kbd {
 #searchClear {
   position: absolute; right: 6px; top: 6px; width: 24px; height: 24px; border-radius: 50%;
   border: 0; background: transparent; color: var(--text-3); cursor: pointer;
-  display: inline-flex; align-items: center; justify-content: center; padding: 0;   /* v2.3.27：内联 SVG 要居中，不能靠基线 */
+  display: inline-flex; align-items: center; justify-content: center; padding: 0;   /* 内联 SVG 要居中，不能靠基线 */
 }
 #searchClear:hover { background: var(--bg-hover); color: var(--text); }
 
-/* v2.5.2：中间空余跟着窗口缩小，但保留最小间距（10px），不会贴在一起 */
+/* 中间空余跟着窗口缩小，但保留最小间距（10px），不会贴在一起 */
 .topbar-spacer { flex: 1 1 auto; min-width: 10px; }
 /* 右侧按钮组不参与压缩（按钮文字不换行才是它的自然宽度） */
 .topbar-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
 
-/* v4.9：自绘窗口按钮，替代系统 titleBarOverlay（那块不透明矩形像一层脏遮罩） */
+/* 自绘窗口按钮，替代系统 titleBarOverlay（那块不透明矩形像一层脏遮罩） */
 .win-controls { display: flex; align-items: center; height: var(--topbar-h); gap: 0; margin-left: 6px; flex: 0 0 auto; -webkit-app-region: no-drag; }
 .win-btn {
   width: 46px; height: 32px; padding: 0; border: 0; border-radius: 5px; background: transparent;
@@ -307,11 +323,11 @@ kbd {
 .btn-danger-ghost { color: var(--danger); }
 .btn-danger-ghost:hover { background: rgba(244,102,107,.12); border-color: var(--danger); }
 .btn-warn { color: var(--warn); border-color: var(--warn); }
-/* ---------------- v2.5.0：重新下载（浅红）/ 获取更新（黄） ---------------- */
+/* ---------------- 重新下载（浅红）/ 获取更新（黄） ---------------- */
 /* 风格与 .btn-primary（「下载」）保持一致：实心填充 + 白字，只把颜色换成浅红/黄 */
 .btn-redl { background: #f2807f; border-color: #f2807f; color: #fff; }
 .btn-redl:hover { background: #e06d6c; border-color: #e06d6c; }
-/* v2.5.2：「重新解析」改成低调幽灵样式（透明底 + 主题色文字 + 细边框），悬浮只提亮边框/文字 */
+/* 「重新解析」用低调幽灵样式：透明底 + 主题色文字 + 细边框，悬浮只提亮边框/文字 */
 .btn-parse { background: transparent; border-color: var(--border); color: var(--primary); }
 .btn-parse:hover { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); }
 html[data-theme="light"] .btn-update { color: #fff; }
@@ -327,7 +343,7 @@ html[data-theme="light"] .btn-update { color: #fff; }
   display: inline-flex; align-items: center; justify-content: center; transition: var(--tr);
 }
 .icon-btn:hover { background: var(--bg-hover); }
-/* v5.2：刷新按钮点下去转一圈，表示真的在重读 */
+/* 刷新按钮点下去转一圈，表示真的在重读 */
 /* 带一点回弹的转法：转过 400° 再退回来，中间轻轻放大一下 */
 @keyframes ic-spin {
   0%   { transform: rotate(0deg)   scale(1); }
@@ -340,21 +356,20 @@ html[data-theme="light"] .btn-update { color: #fff; }
 .btn.active { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); }
 
 /* ---------------- 布局 ---------------- */
-/* v2.5.16：内容区 = 滚动容器（顶栏下方那一块）；align-items:flex-start 让侧栏 sticky 生效 */
-/* v6.5：scrollbar-gutter:stable —— 滚动条位置常驻占位，使内容区宽度不随「当前页卡片
- * 多不多、会不会出滚动条」而变。否则卡片宽度按无滚动条时算好，卡片一多滚动条出现，
- * 可用宽度少 10px，一行就少排一张、右侧空出一条。 */
-.layout { display: flex; align-items: flex-start; position: fixed; left: 0; right: 0; top: var(--topbar-h); bottom: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; }
+/* 内容区：占满顶栏以外的全部高度，横向分成三列（页签栏 / 侧栏 / 卡片区）。
+ * min-height:0 是关键 —— flex 子项默认 min-height:auto，会被内容撑高，
+ * 那样整页又会变成可滚动的，三列就钉不住了。 */
+.layout { display: flex; align-items: stretch; flex: 1 1 auto; min-height: 0; overflow: hidden; }
 
-/* ---------------- v6.8：左侧页签栏 ----------------
- * 素材库 / 导入与工程两条竖排页签。原来是顶栏一个「工作台」按钮 + 全屏浮层，
- * 现在工作台成了并列页签（浮层仍在，只是 left 让出这条栏的宽度）。 */
+/* ---------------- 左侧页签栏 ----------------
+ * 素材库 / 导入与工程两条竖排页签。工作台也是并列页签：浮层仍然存在，
+ * 只是 left 让出这条栏的宽度，盖不住导航。 */
 .tabrail {
   width: var(--tabrail-w); flex: 0 0 var(--tabrail-w);
   display: flex; flex-direction: column; gap: 6px;
   padding: 10px 8px;
   background: var(--bg-2); border-right: 1px solid var(--border);
-  height: calc(100vh - var(--topbar-h)); position: sticky; top: 0; z-index: 5;
+  min-height: 0; overflow-y: auto;          /* 跟着内容区高度走，页签多了自己滚 */
 }
 .tabrail-btn {
   display: flex; flex-direction: column; align-items: center; gap: 6px;
@@ -379,13 +394,26 @@ html[data-theme="light"] .btn-update { color: #fff; }
 .sidebar {
   width: var(--sidebar-w); flex: 0 0 var(--sidebar-w); background: var(--bg-2);
   border-right: 1px solid var(--border); padding: 12px; overflow-y: auto;
-  height: calc(100vh - var(--topbar-h)); position: sticky; top: 0;   /* v2.5.16：sticky 相对 .layout 顶部（= 顶栏下沿） */
+  min-height: 0;                           /* 不做 sticky 了：它自己就是一列，标签多了在列内滚 */
   transition: margin-left var(--tr);
 }
-/* v5.1：收起用宽度归零，既有过渡又能真的把空间还给内容区 */
+/* 收起用宽度归零：既有过渡，又能真的把空间还给内容区 */
 .sidebar { min-width: 0; transition: width .22s cubic-bezier(.2,.8,.3,1), flex-basis .22s cubic-bezier(.2,.8,.3,1), padding .22s ease, border-right-color .22s ease; }
 body.sidebar-hidden .sidebar { width: 0; flex-basis: 0; padding-left: 0; padding-right: 0; border-right-color: transparent; overflow: hidden; }
-.main { flex: 1; min-width: 0; padding: 14px 16px 40px; }
+/* 卡片区 = 滚动容器，一屏高，超出的在内部滚，整页不动。
+ * 能这么用是因为它是 flex 布局里的普通子项（static + overflow:auto）；
+ * 当年出现「连续滚轮卡死 15–24 秒」的是 position:fixed 的那种内层滚动容器，两者不是一回事。
+ * 现在这套实测：滚动手势 24 次、全程最长掉帧 7ms，没有超过 200ms 的帧。
+ * 也别把主区钉成固定像素高（--content-h + flex 列）：窗口一改高就露白，交给 flex 分配。 */
+.main {
+  flex: 1 1 auto; min-width: 0; min-height: 0;
+  /* 底部留白要盖过分页条：它 fixed 在视口底（42 高 + 18 下边距），
+   * 只留 40 的话最后一行卡片会被压在它下面。 */
+  padding: 14px 16px 72px;
+  overflow-y: auto;
+  /* 滚动条常驻占位：卡片宽度不随"这一页会不会出滚动条"变化，否则一多一少就跳列数 */
+  scrollbar-gutter: stable;
+}
 
 /* ---------------- 侧栏 ---------------- */
 .side-stat { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
@@ -405,7 +433,10 @@ body.sidebar-hidden .sidebar { width: 0; flex-basis: 0; padding-left: 0; padding
 .side-group-head::before { content: "\25BE"; margin-right: 5px; font-size: 10px; color: var(--text-3); transition: var(--tr); }
 .side-group-head.collapsed::before { transform: rotate(-90deg); display: inline-block; }
 .side-group-count { color: var(--text-3); font-weight: 400; }
-.side-group-body { padding-top: 5px; max-height: 340px; overflow-y: auto; }
+/* 分组内容不限高、不内部滚动：项数多了就往下长，滚动统一交给 .sidebar。
+ * 一旦加 max-height + overflow-y:auto，标签一多就变成小框里滚，
+ * 看不出还有多少项，也容易滚错容器。 */
+.side-group-body { padding-top: 5px; }
 .side-item {
   width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 6px;
   padding: 5px 8px; border-radius: 7px; border: 0; background: transparent; color: var(--text-2);
@@ -417,7 +448,6 @@ body.sidebar-hidden .sidebar { width: 0; flex-basis: 0; padding-left: 0; padding
 .side-item-count { font-size: 11px; color: var(--text-3); flex: 0 0 auto; }
 .side-more { width: 100%; background: transparent; border: 0; color: var(--primary); cursor: pointer; font-size: 12px; padding: 4px; }
 .side-empty, .multi-empty { color: var(--text-3); font-size: 12.5px; padding: 6px 4px; }
-.side-group-body .status-select { width: 100%; height: 30px; }
 .chips-group .side-group-body { display: flex; flex-wrap: wrap; gap: 5px; }
 .chips-group .side-item { width: auto; padding: 3px 9px; border: 1px solid var(--border); border-radius: 20px; font-size: 12px; }
 .chips-group .side-item.facet-free { border-color: rgba(24,160,105,.55); color: var(--ok); }
@@ -435,7 +465,7 @@ body.sidebar-hidden .sidebar { width: 0; flex-basis: 0; padding-left: 0; padding
 }
 .toolbar .grow { flex: 1; }
 #resultInfo { color: var(--text-3); font-size: 12.5px; }
-/* v6.6：多选开关挪到结果行左侧（原来在右上角工具组里，离内容太远）；
+/* 多选开关放在结果行左侧，贴着内容（放右上角工具组里离得太远）；
    开着的时候整体染成主色，一眼能看出「现在点卡片是勾选」 */
 .btn-select-toggle.active {
   background: var(--primary); border-color: var(--primary); color: #fff;
@@ -450,8 +480,8 @@ select.input, .toolbar select {
 .toolbar #pageSizeSelect { width: 112px; }
 
 /* 批量条 */
-/* v6.6：进出都带动画 —— 原来是 display:none ↔ flex 硬切，出现得很突兀。
-   改成 max-height / 内边距 / 透明度一起过渡，收起时不占布局。 */
+/* 进出都带动画 —— display:none ↔ flex 硬切出现得太突兀。
+   所以 max-height / 内边距 / 透明度一起过渡，收起时不占布局。 */
 .bulk-bar {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   background: var(--primary-soft); border: 1px solid var(--primary);
@@ -482,11 +512,11 @@ select.input, .toolbar select {
 }
 
 /* ---------------- 卡片纵向分割栏（轮转分栏：1,7,13… / 2,8,14…） ---------------- */
-/* v5.0：CSS grid —— 列数 = 可用宽度 / 固定卡宽；收起侧栏只会多排几列，卡片不变形。
+/* CSS grid —— 列数 = 可用宽度 / 固定卡宽；收起侧栏只会多排几列，卡片不变形。
    同一行里最高的卡决定行高，其余卡自动撑满这一行。
-   v6.5：轨道宽度从「固定卡宽」改成 minmax(卡宽, 1fr) —— 浏览器先按卡宽排出列数，
+   轨道宽度是 minmax(卡宽, 1fr) —— 浏览器先按卡宽排出列数，
    再把除不尽的零头（含滚动条出现/消失带来的宽度变化）平摊给每一列，
-   于是每行右边缘永远和网格右边缘对齐。原先写死卡宽时，默认窗口下小卡片右侧空 157px、
+   于是每行右边缘永远和网格右边缘对齐。写死卡宽的话，默认窗口下小卡片右侧空 157px、
    大卡片空 193px，而且卡片一多滚动条出现、可用宽度少 10px 就会整整少排一张。 */
 .grid {
   display: grid;
@@ -495,26 +525,72 @@ select.input, .toolbar select {
   justify-content: start;
   gap: 14px;
 }
-/* 三档卡宽现在是「最小卡宽」，决定一行排几列；实际宽度由 1fr 均分补足 */
+/* 三档卡宽是最小卡宽，决定一行排几列；实际宽度由 1fr 均分补足 */
 .grid[data-size="s"] { --card-w: 164px; gap: 10px; }
 .grid[data-size="m"] { --card-w: 220px; gap: 14px; }
 .grid[data-size="l"] { --card-w: 290px; gap: 18px; }
+/* 卡片高度必须由内容决定，不能按网格高度拉伸。
+ * height:100% 在「内容区固定一屏」之后，网格高度是确定的，百分比高度让卡片不再按内容
+ * 贡献行高 → 行被均分压扁：先是封面被挤成一条，改完 flex 之后又轮到正文被挤成 0（标题/标签消失）。
+ * 行高由最高的那张卡撑出来，同一行的其它卡靠 align-items:stretch 对齐。 */
 .grid .card { width: 100%; height: 100%; }
 body.has-pager #grid { padding-bottom: 76px; }
 
 .card {
   position: relative; background: var(--bg-2); border: 1px solid var(--border);
-  border-radius: var(--radius); overflow: hidden; cursor: pointer; transition: var(--tr);
+  border-radius: var(--radius); overflow: hidden; cursor: pointer;
+  /* 性能：transition 不能写 var(--tr)（= all .18s）。
+   * all 会把**宽高**也带上动画 —— 侧栏收放 / 换页 / 窗口缩放时卡片宽度变一次，
+   * 15 张卡就一起做 180ms 的布局动画（每帧重排 + 重新光栅化卡面图）。
+   * 卡片真正需要过渡的只有这三样。 */
+  transition: transform var(--tr), box-shadow var(--tr), border-color var(--tr);
   display: flex; flex-direction: column;
 }
 .card:hover { transform: translateY(-2px); border-color: var(--border-2); box-shadow: var(--shadow); }
+/* 性能：滚动期间冻结 hover 动效（滚动停下 150ms 恢复）。见 90-main.js 里 body.scrolling 的开关。
+ * 滚轮扫过一排卡时，每张卡都会接连进入 :hover，各自启动一次 transform + shadow 过渡 —— 那是滚动中
+ * 一直在新建合成任务。B 站那类页面同样只在指针停留时给 hover 视觉。
+ *
+ * 只冻 `.card` 自己的 transform / box-shadow 不够：卡片**内部**还有一堆 hover，
+ * 滑动时光标每扫过一张卡都会触发它们：
+ *   · .fav-btn 的 opacity 0→1 过渡 —— 透明度动画会为这个按钮新建合成层，移开再销毁，层反复分配/释放；
+ *   · .chip-click / .tag-click 的 background+border-color 过渡 —— 每个 chip 各跑 180ms 的重绘；
+ *   · .cat-badge 的 filter: brightness() —— 每次 hover 都新建一个渲染表面（滤镜要单独一块离屏缓冲）。
+ * 所以滚动期间把网格内所有 hover **整体冻掉**（连过渡一起），效果等价于「光标不在卡片上」，
+ * 而「光标不在卡片上」时滚动是顺的。
+ * 两点注意：
+ *   ① 不要改成 `body.scrolling .grid { pointer-events: none }` —— 那是更彻底，但会吞掉
+ *      「滚完马上点卡片」的那一下点击（指针事件已经穿透到网格上了）。宁可多冻几条规则。
+ *   ② 别在这里强制 border-color —— .card.selected 的选中描边会被一起压掉。 */
+body.scrolling .grid .card,
+body.scrolling .grid .card * { transition: none !important; }
+/* 踩过的坑：**不要**给 `.card` 本身写 `animation: none !important`。
+ * 入场动画 `cardIn` 就挂在 `.card` 上（见本文件后面 `.grid .card { animation: cardIn ... }`），
+ * 滚动时把它关掉、停下 150ms 再撤掉，浏览器看到的是「动画名从 none 变回 cardIn」——
+ * 于是整页卡片重新播一遍淡入 + 上浮，看起来就像滑一下整页刷新了一次。
+ * 内部元素没有入场动画，只冻它们的 animation 是安全的。 */
+body.scrolling .grid .card * { animation: none !important; }
+body.scrolling .grid .card:hover { transform: none !important; box-shadow: none !important; }
+/* 连描边也不换（:not(.selected) 是为了不压掉多选态的蓝色描边） */
+body.scrolling .grid .card:not(.selected):hover { border-color: var(--border) !important; }
+body.scrolling .grid .card:hover .fav-btn { opacity: 0 !important; }
+body.scrolling .grid .card *:hover { filter: none !important; transition: none !important; }
+/* 这里刻意**没有** `body.scrolling .grid .card > * { pointer-events: none }`。
+ * 它换来的只有「滚动中少一点命中测试」，代价却是实打实的功能损坏：
+ * 滚动停止后那 150ms 里点 chip / 标签 / ★ 全都没反应，看起来就是「操控不了」。
+ * 而页面侧本来就不是卡顿来源：同一页面实测 144fps、0 longtask、滚动期间 0 次 IPC。
+ * 不要往滚动路径上加这种「牺牲交互换性能」的规则。 */
 .card.selected { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-soft); }
 .card-cover {
   position: relative; aspect-ratio: 4 / 3; background: var(--cover-bg);
   display: flex; align-items: center; justify-content: center; overflow: hidden;
+  /* 封面的高度只能由 4:3 决定，绝不参与 flex 压缩。
+   * 默认 flex-shrink 是 1 —— 行高被压到比内容矮时，封面会被挤成一条（截图里那种压扁），
+   * aspect-ratio 拦不住收缩。写死 0 0 auto 之后，卡片撑不下就往下顶，由 updateFitSize 少排一行。 */
+  flex: 0 0 auto;
 }
 .card-cover .cover-img { width: 100%; height: 100%; object-fit: cover; display: block; }
-/* v4.7：把图片拖到缩略图（卡片封面 / 详情页大图）上补封面时的落点提示 */
+/* 把图片拖到缩略图（卡片封面 / 详情页大图）上补封面时的落点提示 */
 .card-cover.cov-drop, .detail-cover.cov-drop {
   position: relative;
   outline: 2px dashed var(--primary); outline-offset: -4px; background: var(--primary-soft);
@@ -527,18 +603,19 @@ body.has-pager #grid { padding-bottom: 76px; }
 }
 .cover-ph { font-size: 34px; opacity: .32; }
 .cover-ph.big { font-size: 56px; }
-.card-badges { position: absolute; left: 7px; top: 7px; display: flex; align-items: center; gap: 4px; z-index: 2; }   /* v2.3.28：角标行内垂直居中，混排大小角标时不拉伸 */
-/* v2.3.28：分类角标搬进这一行，覆盖旧的绝对定位（原来在封面左下角、放大版） */
-.card-badges .cat-badge { position: static; inset: auto; display: inline-flex; }   /* 只改定位：大小/形状/配色仍是原来那个 30×30 圆角胶囊 */
-.card-body .chip-cat, .card-chips .chip-cat { display: none; }   /* v2.3.28：封面已有类型图标，去掉下方重复的分类气泡（用后代选择器压过 .chip） */
+.card-badges { position: absolute; left: 7px; top: 7px; display: flex; align-items: center; gap: 4px; z-index: 2; }   /* 角标行内垂直居中，混排大小角标时不拉伸 */
+/* 分类角标在卡片底部这一行里内联显示：这里把 .cat-badge 覆盖成 static，
+ * 脱离封面上的绝对定位（同一套图标与配色，只换排布方式） */
+.card-badges .cat-badge { position: static; inset: auto; display: inline-flex; }   /* 只改定位：大小/形状/配色仍是那个 30×30 圆角胶囊 */
+.card-body .chip-cat, .card-chips .chip-cat { display: none; }   /* 封面已有类型图标，去掉下方重复的分类气泡（用后代选择器压过 .chip） */
 .badge {
   font-size: 11px; padding: 1px 7px; border-radius: 20px;
   background: rgba(0,0,0,.55); color: #fff;
-  display: inline-flex; align-items: center;   /* v2.3.27：图标角标不能靠基线对齐（实测会偏上） */
+  display: inline-flex; align-items: center;   /* 图标角标不能靠基线对齐（实测会偏上） */
 }
 .badge-ok { background: rgba(24,160,105,.88); }
 .badge-r18 { background: rgba(214,48,62,.92); }
-.badge-dim { background: rgba(0,0,0,.66); box-shadow: 0 0 0 1px rgba(255,255,255,.3); }   /* v2.3.27：纯图标角标要能从深色封面上分出来 */
+.badge-dim { background: rgba(0,0,0,.66); box-shadow: 0 0 0 1px rgba(255,255,255,.3); }   /* 纯图标角标要能从深色封面上分出来 */
 /* 右上角价格丝带（斜角 ribbon）：免费 / 付费，点击可按价格筛选 */
 .price-ribbon {
   position: absolute; top: 12px; right: -32px; z-index: 3;
@@ -553,7 +630,7 @@ body.has-pager #grid { padding-bottom: 76px; }
 .ribbon-wishlist { background: linear-gradient(180deg, #f4669d, #c03c75); }
 .ribbon-share { background: linear-gradient(180deg, #4dabf7, #2d7fc7); }
 .ribbon-gift { background: linear-gradient(180deg, #b06ef5, #8b4bd0); }
-.ribbon-oss { background: linear-gradient(180deg, #58a6ff, #1f6feb); }   /* v2.3.22：开源（GitHub） */
+.ribbon-oss { background: linear-gradient(180deg, #58a6ff, #1f6feb); }   /* 开源（GitHub） */
 .chip-oss { border-color: #58a6ff; color: #58a6ff; }
 /* 封面右下角发布 / 上架日期 */
 .cover-date {
@@ -576,28 +653,28 @@ body.has-pager #grid { padding-bottom: 76px; }
 }
 .sel-mark.on { background: var(--primary); }
 
-.card-body { padding: 9px 11px 11px; display: flex; flex-direction: column; gap: 5px; flex: 1; }
-/* v4.8：高度自适应（不再固定 152px，避免少内容的卡片下方空一大排）；
-   标签/角色行仍是单行截断，所以高度最多差一行，不会像原来那样被换行撑到两倍。 */
+.card-body { padding: 9px 11px 11px; display: flex; flex-direction: column; gap: 5px; flex: 1 1 auto; min-height: 0; }
+/* 高度自适应（不固定 152px，避免少内容的卡片下方空一大排）；
+   标签/角色行仍是单行截断，所以高度最多差一行，不会被换行撑到两倍。 */
 .card-title {
   font-weight: 600; font-size: 13.5px; line-height: 1.35;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-  /* v4.7：单行标题的卡片也占满两行高度，分类/来源气泡才会在同一水平线上；
+  /* 单行标题的卡片也占满两行高度，分类/来源气泡才会在同一水平线上；
    * 否则一行标题的卡气泡靠上、两行标题的卡气泡靠下，整排看起来像没对齐。 */
   min-height: calc(1.35em * 2);
-  /* 两行时尽量把两行长度拆均匀，避免「用)]IconGenerator」这种只剩半截词的孤行 */
-  text-wrap: balance;
+  /* 两行时若用 text-wrap: balance，两行长度会更均匀，不会留下「用)]IconGenerator」这种半截词孤行；
+   * 但它对每个块要多跑一次排版，一页二十几个标题就是二十几次 —— 代价只是换行略微不那么均匀，所以不用。 */
 }
 .card-subtitle {
   font-size: 11px; color: var(--text-3); line-height: 1.3;
   display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden;
 }
-/* v4.7：标题开头的 [xxx] 不许在括号中间断开，好让断行落在「] 之后」 */
+/* 标题开头的 [xxx] 不许在括号中间断开，好让断行落在「] 之后」 */
 .card-title .tt-prefix { white-space: nowrap; }
 .card-chips, .card-avatars, .card-tags { display: flex; flex-wrap: nowrap; gap: 4px; overflow: hidden; max-height: 22px; }
 .card-tags { margin-top: auto; }
-/* v5.2：卡片上的标签以前没有最大宽度 —— 标签一长就被 .card-tags 的 overflow 硬切掉半个字，
- * 既没有省略号也看不出还有内容。现在单枚标签最多占一行 46%，超出用省略号，+N 始终露出来。 */
+/* 卡片上的标签必须有最大宽度 —— 否则标签一长就被 .card-tags 的 overflow 硬切掉半个字，
+ * 既没有省略号也看不出还有内容。所以单枚标签限宽 42%，超出用省略号，+N 始终露出来。 */
 .card-tags .tag {
   display: inline-block; flex: 0 0 auto; max-width: 42%; min-width: 0;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: top;
@@ -626,17 +703,17 @@ body.has-pager #grid { padding-bottom: 76px; }
 .tag {
   font-size: 11px; padding: 1px 7px; border-radius: 5px; background: var(--bg-3);
   color: var(--text-3); border: 1px solid transparent; cursor: default;
-  display: inline-flex; align-items: center;   /* v2.3.27：同上，图标+文字要按中线对齐 */
+  display: inline-flex; align-items: center;   /* 同上，图标+文字要按中线对齐 */
 }
 .tag-click { cursor: pointer; transition: var(--tr); }
 .tag-click:hover { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
-/* v2.5.10（用户要求）：卡片上的标签 / 适用角色 chip 若正是**当前生效的筛选条件** → 常亮高亮
+/* 卡片上的标签 / 适用角色 chip 若正是**当前生效的筛选条件** → 常亮高亮
  * （复用侧栏选中项的视觉语言：主色描边 + 主色淡底 + 主色文字）
- * v6.7：分类 / 来源 chip 也纳入了「点一下筛，再点取消」的开关逻辑，所以一并高亮 —— 否则用户看不出
- * 第二下会取消，只当成又点了一次。 */
+ * 分类 / 来源 chip 也带「点一下筛，再点取消」的开关逻辑，所以一并高亮 —— 否则
+ * 看不出第二下会取消，只当成又点了一次。 */
 .tag.tag-on, .chip.chip-on { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
 .tag-untrans { color: var(--warn); border-color: rgba(245,180,69,.35); }
-/* v3.0.0（用户要求）：标签筛选三态 —— 排除态与包含态一眼可分（红色系描边 + 删除线）；包含态沿用 .tag-on。
+/* 标签筛选三态 —— 排除态与包含态一眼可分（红色系描边 + 删除线）；包含态沿用 .tag-on。
  * 侧栏标签项（.side-item.tag-out）与卡片/详情标签（.tag.tag-out）共用同一套视觉语言。 */
 .tag.tag-out, .side-item.tag-out { color: var(--danger); border-color: var(--danger); background: rgba(244,102,107,.12); text-decoration: line-through; }
 .tag.tag-out:hover, .side-item.tag-out:hover { color: #fff; background: var(--danger); border-color: var(--danger); }
@@ -649,7 +726,7 @@ body.has-pager #grid { padding-bottom: 76px; }
 
 /* 列表视图：单栏横排，不走轮转分栏 */
 .grid.list-view { display: flex; flex-direction: column; gap: 8px; }
-/* v6.4：必须显式覆盖 .grid .card 的 width/height —— 否则列表模式下每张卡仍是网格里的
+/* 必须显式覆盖 .grid .card 的 width/height —— 否则列表模式下每张卡仍是网格里的
  * 最小卡宽（164/220/290），挤在左边一条窄带，右侧大片空白；
  * height:100% 在 flex 纵向容器里还会按容器高度算，导致卡片被拉长。
  * 高度定死 92px：封面图会把卡片撑到 101，行高参差。 */
@@ -663,7 +740,7 @@ body.has-pager #grid { padding-bottom: 76px; }
 }
 /* 封面图改绝对定位：否则图片固有比例会反过来撑高卡片 */
 .grid.list-view .card-cover .cover-img { position: absolute; inset: 0; width: 100%; height: 100%; }
-/* v6.4：正文原先纵向堆叠（标题 / 副标题 / 来源 / 角色 / 标签各占一行），
+/* 正文若纵向堆叠（标题 / 副标题 / 来源 / 角色 / 标签各占一行），
  * 在 1300px 宽的卡片里每行只有左侧一小段有字，右侧近千像素空白，
  * 而且行数不同会把卡片撑成 101 / 121 / 141 三种高度。
  * 列表视图改成五列网格，且**列位写死**（grid-column）——
@@ -695,8 +772,8 @@ body.has-pager #grid { padding-bottom: 76px; }
 /* ---------------- 弹窗 ---------------- */
 /* z-index 560：要盖过改模工作台整页（400）、下载面板（480）和导入队列（520），
    但仍在 toast（570）和全屏页（900+）之下。
-   原来是 490，比导入队列的 520 低 —— 设置页打开时右下角那个折叠角标会浮在弹窗上面。
- * 2022.3 起工作台里也会开模态弹窗（导入预览/双选），低于工作台会被整页压住。 */
+   必须高于导入队列的 520 —— 低于它时，设置页打开时右下角那个折叠角标会浮在弹窗上面。
+ * 工作台里也会开模态弹窗（导入预览/双选），所以也不能低于工作台整页。 */
 .modal-overlay {
   position: fixed; inset: 0; z-index: 560; background: var(--scrim);
   display: flex; align-items: center; justify-content: center; padding: 24px;
@@ -704,11 +781,21 @@ body.has-pager #grid { padding-bottom: 76px; }
 }
 .modal-overlay.in { opacity: 1; }
 .modal {
+  position: relative;
   background: var(--bg-2); border: 1px solid var(--border); border-radius: 16px;
   box-shadow: var(--shadow); width: 100%; max-height: 92vh; display: flex; flex-direction: column;
   transform: translateY(12px) scale(.99); transition: transform .2s ease;
 }
 .modal-overlay.in .modal { transform: none; }
+/* 有时限的弹窗（Modal.open 的 autoClose）顶部也走同一条倒计时条 */
+.modal-prog {
+  position: absolute; left: 0; right: 0; top: 0; height: 2px; background: var(--bg-3);
+  border-radius: 16px 16px 0 0; overflow: hidden;
+}
+.modal-prog i {
+  display: block; height: 100%; background: var(--primary); transform-origin: left center;
+  animation-name: toastCountdown; animation-timing-function: linear; animation-fill-mode: forwards;
+}
 .modal-sm { max-width: 440px; }
 .modal-md { max-width: 720px; }
 .modal-lg { max-width: 1080px; }
@@ -722,7 +809,7 @@ body.has-pager #grid { padding-bottom: 76px; }
   padding: 12px 18px; border-top: 1px solid var(--border);
   display: flex; justify-content: flex-end; gap: 8px; flex: 0 0 auto; flex-wrap: wrap;
 }
-.confirm-text { margin: 0 0 10px; line-height: 1.7; white-space: pre-line; }   /* v2.5.2（G2）：可保留换行，批量删除要逐条列名字 */
+.confirm-text { margin: 0 0 10px; line-height: 1.7; white-space: pre-line; }   /* 可保留换行，批量删除要逐条列名字 */
 
 /* ---------------- 表单 ---------------- */
 .input {
@@ -731,6 +818,14 @@ body.has-pager #grid { padding-bottom: 76px; }
   font-family: inherit; font-size: 13.5px; outline: none; transition: var(--tr);
 }
 .input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+/* 只读输入框：素材编号这类对外身份只给看，虚线 + 浅底表示不可编辑 */
+.input.input-locked {
+  background: var(--bg-2); color: var(--text-2); cursor: not-allowed; border-style: dashed;
+}
+/* 编号一行：输入框吃掉宽度，复制按钮贴右边；不换行，否则按钮会被挤到下一行 */
+.file-id-row { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
+.file-id-row .input { flex: 1 1 auto; min-width: 0; }
+.file-id-row .btn { flex: 0 0 auto; }
 .input.mono { font-family: var(--mono); font-size: 12.5px; }
 .input-sm { min-height: 28px; padding: 3px 8px; font-size: 12.5px; }
 .textarea { resize: vertical; line-height: 1.6; }
@@ -765,14 +860,14 @@ body.has-pager #grid { padding-bottom: 76px; }
 .log-line { padding: 1px 0; word-break: break-all; }
 .paste-wrap { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
 
-.multi { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }   /* v2.5.1（L1）：子项不再被拉满整行 */
+.multi { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }   /* 子项按内容宽度，不拉满整行 */
 .multi > .btn, .multi > .btn-row { align-self: flex-start; }
 .multi-list, .multi-row { align-self: stretch; }   /* 行与列表仍占满宽度 */
 .multi-list { display: flex; flex-direction: column; gap: 6px; }
 .multi-row { display: flex; gap: 6px; align-items: center; }
 .multi-row .input:first-child { flex: 2; }
 .multi-row .input-sm { flex: 1; max-width: 140px; }
-/* v2.3.29：本地文件路径行——「标识」输入框移到路径输入框左侧 */
+/* 本地文件路径行——「标识」输入框在路径输入框左侧 */
 .multi-row-path .input:first-child { flex: 0 0 118px; max-width: 118px; }
 .multi-row-path .input:nth-child(2) { flex: 2; }
 
@@ -822,19 +917,19 @@ body.has-pager #grid { padding-bottom: 76px; }
 /* ---------------- 设置 ---------------- */
 .settings { display: grid; grid-template-columns: 176px 1fr; gap: 18px; min-height: 420px; }
 .settings-nav { display: flex; flex-direction: column; gap: 3px; border-right: 1px solid var(--border); padding-right: 12px;
-  position: sticky; top: 0; align-self: start; max-height: calc(94vh - 150px); overflow-y: auto; }   /* v2.3.8：右侧内容滚动时左侧导航不跟着滚 */
+  position: sticky; top: 0; align-self: start; max-height: calc(94vh - 150px); overflow-y: auto; }   /* 右侧内容滚动时左侧导航不跟着滚 */
 .settings-tab {
   text-align: left; padding: 8px 11px; border-radius: var(--radius-sm); border: 0;
   background: transparent; color: var(--text-2); cursor: pointer; font-family: inherit; font-size: 13px; transition: var(--tr);
 }
 .settings-tab:hover { background: var(--bg-hover); color: var(--text); }
 .settings-tab .ico-pre { margin-right: 7px; }
-.settings-tab .ico-pre svg { width: 1.3em; height: 1.3em; }   /* v2.3.27：左侧栏图标比正文略大，更醒目 */
+.settings-tab .ico-pre svg { width: 1.3em; height: 1.3em; }   /* 左侧栏图标比正文略大，更醒目 */
 .settings-tab.active { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
 .settings-content { min-width: 0; }
-/* v6.2：设置窗固定尺寸。原先弹窗高度由内容决定，11 个页签长短差别很大，
- * 切一次标签整个窗口就长大或缩小一次，很晃眼。现在高度固定，滚动交给右侧内容区，
- * 左侧导航也顺势不再跟着滚（原来的 sticky 在这里已无必要）。 */
+/* 设置窗固定尺寸。弹窗高度若由内容决定，11 个页签长短差别很大，
+ * 切一次标签整个窗口就长大或缩小一次，很晃眼。所以高度固定，滚动交给右侧内容区，
+ * 左侧导航也就不需要 sticky 了。 */
 .modal-settings { height: min(780px, 92vh); }
 .modal-settings .modal-body { overflow: hidden; }
 .modal-settings .settings { height: 100%; min-height: 0; grid-template-rows: minmax(0, 1fr); }
@@ -880,18 +975,87 @@ body.has-pager #grid { padding-bottom: 76px; }
 /* ---------------- 提示条 ---------------- */
 .toasts { position: fixed; right: 18px; bottom: 18px; z-index: 570; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
 .toast {
-  display: flex; align-items: center; gap: 8px; background: var(--bg-2); color: var(--text);
+  /* 竖排是为了给顶部倒计时条留位置；内容在 .toast-row 里横排 */
+  display: flex; flex-direction: column; align-items: stretch;
+  background: var(--bg-2); color: var(--text);
   border: 1px solid var(--border); border-left: 3px solid var(--text-3); border-radius: var(--radius-sm);
   padding: 9px 14px; box-shadow: var(--shadow); font-size: 13px; max-width: 420px;
+  position: relative; overflow: hidden;
   transform: translateX(20px); opacity: 0; transition: all .24s ease;
 }
+.toast-row { display: flex; align-items: center; gap: 8px; }
 .toast.in { transform: none; opacity: 1; }
 .toast-ok { border-left-color: var(--ok); }
 .toast-err { border-left-color: var(--danger); }
 .toast-warn { border-left-color: var(--warn); }
 .toast-info { border-left-color: var(--primary); }
+
 .toast-ico { flex: 0 0 auto; }
 .toast-msg { line-height: 1.5; white-space: pre-line; word-break: break-word; }
+
+/* 倒计时进度条：任何有时限的提示都带（时长由 Toast.make 写进 animation-duration），走完即关闭 */
+.toast-timed { padding-top: 11px; }
+.toast-prog { position: absolute; left: 0; top: 0; width: 100%; height: 2px; background: var(--bg-3); }
+.toast-prog i {
+  display: block; height: 100%; background: var(--primary); transform-origin: left center;
+  animation-name: toastCountdown; animation-timing-function: linear; animation-fill-mode: forwards;
+}
+.toast-ok .toast-prog i { background: var(--ok); }
+.toast-err .toast-prog i { background: var(--danger); }
+.toast-warn .toast-prog i { background: var(--warn); }
+/* 带按钮的那种：文案区可收缩，否则长标题会把按钮顶出圆角外 */
+.toast-undo { padding: 11px 12px 10px; }
+.toast-undo .toast-msg { flex: 1 1 auto; min-width: 0; }
+@keyframes toastCountdown { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+.toast-act {
+  margin-left: auto; flex: 0 0 auto; padding: 3px 10px; font-size: 12.5px; line-height: 1.6;
+  color: var(--primary); background: transparent; border: 1px solid var(--primary);
+  border-radius: var(--radius-sm); cursor: pointer;
+}
+.toast-act:hover { background: var(--primary); color: #fff; }
+.toast-act:disabled { opacity: .55; cursor: default; }
+
+/* ---------------- 回收站页（左侧第三个页签） ---------------- */
+/* 盖住内容区、让出页签栏；和工作台浮层同一套做法，层级低一档，别压住弹窗 */
+.trash-page {
+  position: fixed; top: var(--topbar-h); left: var(--tabrail-w); right: 0; bottom: 0; z-index: 380;
+  display: flex; flex-direction: column; background: var(--bg);
+  opacity: 0; transform: translateY(8px);
+  visibility: hidden; pointer-events: none;
+}
+.trash-page.in { opacity: 1; transform: none; visibility: visible; pointer-events: auto; animation: trashPageIn .18s ease; }
+@keyframes trashPageIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+.trash-head {
+  display: flex; align-items: center; gap: 10px;
+  /* 右侧多留一截：下载任务浮窗常驻在右边缘，不然会压住这里的关闭按钮 */
+  padding: 14px 78px 14px 18px; border-bottom: 1px solid var(--border);
+}
+.trash-head .grow { flex: 1; }
+.trash-title { display: flex; flex-direction: column; gap: 2px; }
+.trash-title b { font-size: 15px; }
+.trash-title small { color: var(--text-3); font-size: 12px; }
+.trash-body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 18px 40px; scrollbar-gutter: stable; }
+.trash-summary { margin: 0 0 10px; font-size: 12.5px; color: var(--text-3); }
+.trash-empty { padding: 60px 0; text-align: center; }
+.trash-empty p { margin: 0 0 6px; color: var(--text-2); }
+.trash-list { display: flex; flex-direction: column; gap: 6px; }
+.trash-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.trash-thumb {
+  width: 52px; height: 52px; flex: 0 0 52px; border-radius: 6px; overflow: hidden;
+  background: var(--bg-3); color: var(--text-3); font-size: 16px;
+  display: flex; align-items: center; justify-content: center;
+}
+.trash-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.trash-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+.trash-main b { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trash-meta { font-size: 12px; color: var(--text-3); }
+.trash-row .btn { flex: 0 0 auto; }
 
 /* ---------------- 响应式 ---------------- */
 @media (max-width: 1000px) {
@@ -908,7 +1072,9 @@ body.has-pager #grid { padding-bottom: 76px; }
   :root { --sidebar-w: 100%; }
   .brand small { display: none; }
   .sidebar {
-    position: fixed; left: 0; top: var(--topbar-h); bottom: 0; z-index: 70; width: 84%;
+    /* 窄屏改成抽屉：脱离三列布局，从顶栏下沿盖出来。
+     * z-index 必须低于顶栏（60）—— 高于它的话抽屉一打开就把顶栏压住。 */
+    position: fixed; left: 0; top: var(--topbar-h); bottom: 0; z-index: 55; width: 84%;
     max-width: 320px; height: auto; box-shadow: var(--shadow);
   }
   body.sidebar-hidden .sidebar { margin-left: -100%; }
@@ -920,7 +1086,7 @@ body.has-pager #grid { padding-bottom: 76px; }
   .kv { grid-template-columns: 80px 1fr; }
   .toasts { left: 12px; right: 12px; align-items: stretch; }
   .grid.list-view .card-cover { width: 96px; flex: 0 0 96px; }
-  /* v6.4：窄屏下五列会被压成每列几十像素、字都看不清，收成三列并藏掉次要信息 */
+  /* 窄屏下五列会被压成每列几十像素、字都看不清，收成三列并藏掉次要信息 */
   .grid.list-view .card-body {
     grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr);
     column-gap: 10px; padding: 0 12px;
@@ -929,7 +1095,7 @@ body.has-pager #grid { padding-bottom: 76px; }
   .grid.list-view .card-chips { grid-column: 2; }
   .grid.list-view .card-tags { grid-column: 3; }
 }
-/* v2.5.2：中等窄窗把两个下限再放松一点，避免过早换行/溢出 */
+/* 中等窄窗把两个下限再放松一点，避免过早换行/溢出 */
 @media (max-width: 1180px) {
   .search-wrap { min-width: 150px; }
   .topbar-spacer { min-width: 6px; }
@@ -945,7 +1111,7 @@ body.has-pager #grid { padding-bottom: 76px; }
   .card { break-inside: avoid; }
 }
 
-/* ---------------- v1.1 追加：方案卡片 / 图集 / 分页 / 价格 ---------------- */
+/* ---------------- 方案卡片 / 图集 / 分页 / 价格 ---------------- */
 .mode-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
 .mode-card {
   text-align: left; border: 1px solid var(--border); background: var(--bg-3); color: var(--text);
@@ -986,10 +1152,10 @@ body.has-pager #grid { padding-bottom: 76px; }
 .desc-box { max-height: 200px; overflow-y: auto; font-size: 12.5px; color: var(--text-2); }
 .cred-item .field-hint { margin-right: auto; }
 
-/* ---------------- v1.2 追加：SVG 图标 / 导入向导 / 版本 ---------------- */
+/* ---------------- SVG 图标 / 导入向导 / 版本 ---------------- */
 .ico { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; vertical-align: -2px; }
 .ico svg { display: block; }
-.ico-pre { margin-right: 5px; }                     /* v2.3.27：图标前缀与文案的间距（仅当后面还有文字时才有这个类） */
+.ico-pre { margin-right: 5px; }                     /* 图标前缀与文案的间距（仅当后面还有文字时才有这个类） */
 .ico-em svg { width: 1em; height: 1em; }           /* 跟随容器的 font-size（顶栏 logo 20px / 空状态 52px） */
 .ico-pre svg { width: 1.15em; height: 1.15em; }    /* 跟随所在文案字号（tag-x 11px / btn 13px 都合身） */
 .ico-custom img { display: block; object-fit: contain; border-radius: 3px; }
@@ -1036,13 +1202,13 @@ body.has-pager #grid { padding-bottom: 76px; }
 .ver-item.off { opacity: .55; }
 .ver-row.unpurchased { opacity: .6; }
 .ver-section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
-/* v2.5.2：版本行——名称在左、价格靠右，同一行内完成（.ver-main 里放了一个 .grow 撑开） */
-.ver-item .ver-main { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: nowrap; }   /* 覆盖旧规则的 column */
+/* 版本行——名称在左、价格靠右，同一行内完成（.ver-main 里放了一个 .grow 撑开） */
+.ver-item .ver-main { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: nowrap; }   /* 覆盖上面 .ver-main 的 column 排版 */
 .ver-item .ver-main .grow { flex: 1; min-width: 6px; }
 .ver-unpurchased { border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; background: var(--bg-soft, rgba(127,127,127,.08)); opacity: .75; }
 .ver-special { border: 1px dashed var(--ok); border-radius: 8px; padding: 6px 8px; background: rgba(24,160,105,.06); }
 .ver-special .ver-unpurchased-head { color: var(--ok); }
-/* v2.3.4 下载任务悬浮窗（可拖动 / 贴边吸附折叠） */
+/* 下载任务悬浮窗（可拖动 / 贴边吸附折叠） */
 .dl-panel { position: fixed; z-index: 480; width: 320px; max-height: 46vh; display: flex; flex-direction: column;
   background: var(--bg, #fff); border: 1px solid var(--border); border-radius: 10px;
   box-shadow: 0 8px 26px rgba(0,0,0,.16); overflow: hidden; }
@@ -1073,11 +1239,11 @@ body.has-pager #grid { padding-bottom: 76px; }
 .dl-panel.dl-collapsed .dl-spacer { flex: 0 0 auto; }
 .dl-panel.dl-docked-left { border-radius: 0 10px 10px 0; }
 .dl-panel.dl-docked-right { border-radius: 10px 0 0 10px; }
-/* v2.3.1：宿主离线时的只读缓存提示条 */
-/* v2.5.16：body 已 overflow:hidden，横幅改 fixed 贴在顶栏下方（否则会被裁掉） */
+/* 宿主离线时的只读缓存提示条 */
+/* body 已 overflow:hidden，横幅必须 fixed 贴在顶栏下方，否则会被裁掉 */
 .local-banner { position: fixed; left: 0; right: 0; top: var(--topbar-h); z-index: 55; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 7px 12px; font-size: 12px; color: #8a5a00; background: #fff6e0; border-bottom: 1px solid #f0d79a; }
 .local-banner-danger { color: #8c1d1d; background: #ffe8e8; border-bottom-color: #f0b0b0; font-weight: 600; }
-.cred-saved { color: var(--ok); }   /* v2.3.15：站点凭证「已保存」摘要 */
+.cred-saved { color: var(--ok); }   /* 站点凭证「已保存」摘要 */
 .brand small { cursor: pointer; border-radius: 6px; padding: 0 4px; }
 .brand small:hover { color: var(--primary); background: var(--primary-soft); }
 .changelog { display: flex; flex-direction: column; gap: 8px; }
@@ -1091,11 +1257,11 @@ body.has-pager #grid { padding-bottom: 76px; }
 .cl-older { display: flex; flex-direction: column; gap: 8px; }
 .cl-toggle { align-self: flex-start; }
 .local-banner span { flex: 1 1 420px; }
-/* v2.2.12：网盘角标（卡片右上角 ☁） */
+/* 网盘角标（卡片右上角 ☁） */
 .badge-cloud { background: rgba(56,132,255,.34); color: #bcd6ff; border: 1px solid rgba(56,132,255,.5); }
-/* v2.2.12：许可证/readme 独立框（中性样式，不沿用未购买的淡出） */
+/* 许可证/readme 独立框（中性样式，不沿用未购买的淡出） */
 .ver-license { border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; background: var(--bg-soft, rgba(127,127,127,.08)); }
-/* v2.2.12：下载链接按变体分组；历史版本折叠 */
+/* 下载链接按变体分组；历史版本折叠 */
 .dl-group { margin-top: 8px; }
 .dl-group:first-of-type { margin-top: 2px; }
 .dl-group .chip-wrap { margin-bottom: 3px; }
@@ -1131,8 +1297,8 @@ button.chip-ver-off:hover { border-color: var(--primary); color: var(--text); }
 .card-cover.has-img .cat-badge { display: flex; }
 .card-cover.has-img .cover-ph { display: none; }
 .cat-badge:hover { transform: scale(1.12); border-color: var(--primary); }
-/* v6.7：分类角标现在是个开关 —— 已按这个分类筛选时点亮成实心主色，
-   用户一眼能看出「再点一下就是取消」。图标是白色的，压在浅色主题的封面上仍然看得清。 */
+/* 分类角标是个开关 —— 已按这个分类筛选时点亮成实心主色，
+   一眼能看出「再点一下就是取消」。图标是白色的，压在浅色主题的封面上仍然看得清。 */
 .cat-badge.cat-badge-on {
   background: var(--primary);
   border-color: var(--primary);
@@ -1140,7 +1306,7 @@ button.chip-ver-off:hover { border-color: var(--primary); color: var(--text); }
 }
 .cat-badge.cat-badge-on:hover { background: var(--primary); filter: brightness(1.08); }
 .card-cover .cover-img { position: relative; z-index: 1; }
-/* ---------------- v2.3.29：封面左下角的文件关联角标（本地路径 / 网盘，可点击打开） ---------------- */
+/* ---------------- 封面左下角的文件关联角标（本地路径 / 网盘，可点击打开） ---------------- */
 .card-corner { position: absolute; left: 7px; bottom: 7px; z-index: 3; display: flex; align-items: center; gap: 4px; }
 .card-corner .badge { cursor: pointer; transition: var(--tr); }
 .card-corner .badge:hover { transform: scale(1.12); border-color: var(--primary); }
@@ -1153,12 +1319,12 @@ button.chip-ver-off:hover { border-color: var(--primary); color: var(--text); }
 .detail-cover { aspect-ratio: auto; min-height: 240px; max-height: 460px; }
 .detail-left { position: sticky; top: calc(var(--topbar-h) + 12px); align-self: start; }
 @media (max-width: 1000px) { .detail-left { position: static; } }
-/* 详情页 v2：参考图式分区排版 */
+/* 详情页：参考图式分区排版 */
 .detail-v2 .detail-right { display: flex; flex-direction: column; gap: 4px; }
 .detail-section { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-2); overflow: hidden; margin-bottom: 10px; }
 .detail-section-title {
   display: flex; align-items: center; gap: 7px; padding: 8px 13px;
-  /* v2.5.2：标题行里的动作按钮要真右对齐（.grow 以前只在工具栏/操作行里定义过） */
+  /* 标题行里的动作按钮要真右对齐（.grow 只在工具栏/操作行里定义过，这里补一条） */
 }
 .detail-section-title .grow { flex: 1; min-width: 8px; }
 .detail-section-title .btn { flex: 0 0 auto; }
@@ -1168,35 +1334,35 @@ button.chip-ver-off:hover { border-color: var(--primary); color: var(--text); }
   border-bottom: 1px solid var(--border); background: var(--bg-3);
 }
 .detail-section-body { padding: 11px 13px; }
-/* v2.5.2：详情页路径标签本身就是「复制」入口 */
+/* 详情页路径标签本身就是「复制」入口 */
 .path-copy { cursor: pointer; transition: var(--tr); }
 .path-copy:hover { border-color: var(--primary); color: var(--text); }
 .detail-stack { display: flex; flex-direction: column; gap: 10px; }
 .detail-actions .btn { justify-content: flex-start; }
 .detail-actions .btn-lg { height: 40px; font-size: 14px; font-weight: 700; }
-/* 详情页 v3：头（左封面 + 右标题/按钮）+ 详细内容两列 */
+/* 详情页：头（左封面 + 右标题/按钮）+ 详细内容两列 */
 .detail.detail-v2 { display: block; }
 .detail-head {
   display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 22px;
   padding-bottom: 14px; border-bottom: 1px solid var(--border); margin-bottom: 14px;
 }
 .detail-head-cover { min-width: 0; }
-/* v2.5.2：头部封面 = 正方形、铺满、边长上限 320px（不再用定高+contain，避免竖图上下留边） */
+/* 头部封面 = 正方形、铺满、边长上限 320px（不用定高+contain，避免竖图上下留边） */
 .detail-head-cover .detail-cover { width: 100%; max-width: 320px; aspect-ratio: 1 / 1; height: auto; min-height: 0; max-height: 320px; }
 .detail-head-cover .detail-cover img { object-fit: cover; }
 .detail-head-info { min-width: 0; display: flex; flex-direction: column; }
-/* v2.5.2：标题/标签/图集上对齐；「隐藏·喜欢·删除」与「打开文件夹·编辑」整组下对齐，下沿与封面下沿齐平 */
+/* 标题/标签/图集上对齐；「隐藏·喜欢·删除」与「打开文件夹·编辑」整组下对齐，下沿与封面下沿齐平 */
 .detail-head-info .detail-tools { margin-top: auto; }
 .detail-head-info .detail-actions { margin-top: 4px; margin-bottom: 2px; }
 .detail-head-info .action-hint { margin-top: 6px; }
-/* v2.5.8（用户反馈）：按钮注释紧贴按钮 + 头部右侧整体收紧 */
+/* 按钮注释紧贴按钮 + 头部右侧整体收紧 */
 .detail-actions-cell .action-hint { margin: 4px 0 0; font-size: 11px; line-height: 1.35; color: var(--text-3); }
 .detail-head-info .detail-title { margin-bottom: 2px; }
 .detail-head-info .detail-subtitle { margin-bottom: 4px; }
-.detail-head-info .detail-chips { margin-bottom: 6px; }   /* v2.5.2：标签与图集靠得更近 */
+.detail-head-info .detail-chips { margin-bottom: 6px; }   /* 标签与图集靠得更近 */
 .detail-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .detail-tools .grow { flex: 1; }
-/* v2.5.10（用户要求）：「喜欢」与「重新获取」之间留一段更宽的空白 */
+/* 「喜欢」与「重新获取」之间留一段更宽的空白 */
 .detail-tools .tool-sep { flex: 0 0 auto; width: 14px; }
 .detail-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 .detail-actions .btn-lg { height: 40px; font-size: 14px; font-weight: 700; }
@@ -1212,11 +1378,11 @@ button.chip-ver-off:hover { border-color: var(--primary); color: var(--text); }
   font-size: 13px; font-weight: 700; color: var(--text-2);
 }
 .detail-content-head .ico { color: var(--primary); }
-/* v2.5.2：分隔条已按用户反馈移除——操作行只靠留白分组，删除按钮保持默认形状 */
+/* 操作行不画分隔条——只靠留白分组，删除按钮保持默认形状 */
 .detail-content { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
 .detail-head-info .detail-actions { flex-wrap: nowrap; }
 .detail-head-info .detail-actions .btn { flex: 0 0 auto; }
-/* v2.5.10：两格改成 grid 后，上一条 flex 的 align-items:center 仍在生效 —— 没有注释的那一格
+/* 两格是 grid 之后，上一条 flex 的 align-items:center 仍在生效 —— 没有注释的那一格
  * （编辑）会在格子里垂直居中，看起来比左边低。这里显式顶部对齐，两个按钮必须同一水平线。 */
 .detail-head-info .detail-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; flex-wrap: nowrap; align-items: start; }
 .detail-actions-cell { min-width: 0; }
@@ -1230,10 +1396,10 @@ button.chip-ver-off:hover { border-color: var(--primary); color: var(--text); }
 /* 头部图集预览条 + 底部对齐按钮区 */
 .detail-head { align-items: stretch; }
 .detail-head-info { display: flex; flex-direction: column; }
-.detail-gallery-slot { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; justify-content: center; align-items: stretch; margin: 4px 0; position: relative; }   /* v2.5.2：贴近标签；v2.5.4：改纵向，好让「重新获取」独占图集上方一行 */
-/* v2.5.4（用户要求）：图集操作行——独立一行、右上角对齐、紧贴图集（不再挤在缩略图右侧占位） */
+.detail-gallery-slot { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; justify-content: center; align-items: stretch; margin: 4px 0; position: relative; }   /* 贴近标签；纵向排，好让「重新获取」独占图集上方一行 */
+/* 图集操作行——独立一行、右上角对齐、紧贴图集（不挤在缩略图右侧占位） */
 .gallery-topbar { display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin: 0 0 2px; height: 24px; }
-/* v2.5.2：图集固定只占一行（把详情页头部的高度压在封面高度内）；超出部分横向滚动，右侧用模糊+渐隐表示还有更多 */
+/* 图集固定只占一行（把详情页头部的高度压在封面高度内）；超出部分横向滚动，两端用模糊+渐隐表示还有更多 */
 .detail-gallery-strip {
   display: flex; flex-wrap: nowrap; gap: 6px; width: 100%; height: 70px; padding: 2px;
   overflow-x: auto; overflow-y: hidden; scroll-behavior: smooth;
@@ -1241,16 +1407,16 @@ button.chip-ver-off:hover { border-color: var(--primary); color: var(--text); }
 }
 .detail-gallery-strip::-webkit-scrollbar { display: none; }
 .detail-gallery-strip .gallery-item { flex: 0 0 auto; }
-/* v2.5.2：缩略图占位/失败态都保持同一尺寸，绝不因为失败而改变布局 */
+/* 缩略图占位/失败态都保持同一尺寸，绝不因为失败而改变布局 */
 .gallery-item img { background: var(--cover-bg); }
 .gallery-item img.img-failed { opacity: .35; }
-/* v2.5.2：已购变体的「当前价」chip 比购买价淡一档，便于区分 */
+/* 已购变体的「当前价」chip 比购买价淡一档，便于区分 */
 .chip-price-cur { opacity: .72; }
-/* v2.5.2：当前素材卡片——蓝边框 + 外扩光晕（和多选选中同款视觉，但没有勾选标记）。
+/* 当前素材卡片——蓝边框 + 外扩光晕（和多选选中同款视觉，但没有勾选标记）。
  * 光晕只占卡片之间的空隙（2px 环 + 6px 柔光），不会盖住相邻卡片。 */
 .card { position: relative; }
 .card.card-active { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary), 0 0 6px rgba(109, 140, 255, .45); transition: box-shadow .2s, border-color .2s; }
-/* v2.5.2：溢出时按需两侧渐隐——淡化缩略图本身（mask），宽度约 1/3 张图（26px），边缘与背景融为一体。
+/* 溢出时按需两端渐隐——淡化缩略图本身（mask），宽度约 1/3 张图（26px），边缘与背景融为一体。
  * 在起点只淡右侧、滚到底只淡左侧、都在中间则两侧都淡（靠 JS 切 at-start / at-end / no-overflow）。 */
 .detail-gallery-slot:not(.no-overflow) .detail-gallery-strip {
   -webkit-mask-image: linear-gradient(to right, transparent 0, #000 26px, #000 calc(100% - 26px), transparent 100%);
@@ -1269,21 +1435,21 @@ button.chip-ver-off:hover { border-color: var(--primary); color: var(--text); }
 .viewer-img { max-width: 100%; max-height: 60vh; object-fit: contain; }
 .viewer-counter { color: var(--text-2); font-size: 12.5px; padding: 0 8px; }
 .viewer-stage .grow { flex: 1; }
-/* v2.5.4（用户要求）：翻页箭头贴在**图片本身**的左右两侧，半透明，鼠标不在图片两侧时不显示。
- * v2.5.4b：箭头尺寸 = 图片长边的 1/7（JS 按实际渲染尺寸写入 --nav-h/--nav-w），
+/* 翻页箭头贴在**图片本身**的左右两侧，半透明，鼠标不在图片两侧时不显示。
+ * 箭头尺寸 = 图片长边的 1/7（JS 按实际渲染尺寸写入 --nav-h/--nav-w），
  *          热区宽度 = 箭头 + 两侧留白 —— 也就是「图标左/右侧也算点击范围」。 */
 .viewer-imgwrap { position: relative; display: inline-flex; align-items: center; justify-content: center; max-width: 100%; }
 .viewer-navzone { position: absolute; top: 0; bottom: 0; z-index: 2; display: flex; align-items: center; justify-content: center; cursor: pointer;
-  width: 33.3333%; overflow: hidden; margin: 0; padding: 0; }   /* v2.5.8：热区 = 舞台的左右各 1/3（左中右三段）；overflow 让光晕不超出热区 */
-/* v2.5.8（用户批复 C）：点击带 = 从**能显示图片的区域（舞台）的边界**一直铺到**箭头的内缘**；
+  width: 33.3333%; overflow: hidden; margin: 0; padding: 0; }   /* 热区 = 舞台的左右各 1/3（左中右三段）；overflow 让光晕不超出热区 */
+/* 点击带 = 从**能显示图片的区域（舞台）的边界**一直铺到**箭头的内缘**；
  * 宽度 = 图片外空白 + 箭头 + 左侧留白，封顶 320px。锚点固定在「箭头内缘」，
- * 因此带宽变化不会挪动箭头位置；图片与舞台同宽时退化成旧行为（箭头 + 两侧留白）。
- * 鼠标进入整条带内都算 hover → 箭头显示（v2.5.8 用户要求）。 */
-/* v2.5.8（用户批复，最终口径）：左中右三段结构 —— 左 1/3 翻上一张、右 1/3 翻下一张、中间 1/3 不响应。
+ * 因此带宽变化不会挪动箭头位置；图片与舞台同宽时退化成「箭头 + 两侧留白」。
+ * 鼠标进入整条带内都算 hover → 箭头显示。 */
+/* 左中右三段结构 —— 左 1/3 翻上一张、右 1/3 翻下一张、中间 1/3 不响应。
  * 与图片尺寸/位置无关，只看舞台；箭头居中在各自那一段里。 */
 .viewer-navzone-prev { left: 0; }
 .viewer-navzone-next { right: 0; }
-/* v2.5.6（用户反馈「按钮样式不行」）：按钮 = 以图标为中心的**圆形径向虚化光晕**（去掉实心块与 1px 描边）；
+/* 按钮 = 以图标为中心的**圆形径向虚化光晕**（没有实心块与 1px 描边）；
  * 尺寸 = 图片纵向的 1/7（JS 写 --nav-h），正方形；箭头是定尺寸内联 SVG，靠 flex 精确居中。 */
 .viewer-nav { display: flex; align-items: center; justify-content: center; width: var(--nav-h, 78px); height: var(--nav-h, 78px); border-radius: 50%; border: 0; color: #fff;
   background: radial-gradient(circle at 50% 50%, rgba(10, 12, 17, .82) 0%, rgba(10, 12, 17, .64) 32%, rgba(10, 12, 17, .30) 62%, rgba(10, 12, 17, 0) 100%);
@@ -1292,19 +1458,19 @@ button.chip-ver-off:hover { border-color: var(--primary); color: var(--text); }
 .viewer-navzone:hover .viewer-nav { opacity: .68; }
 .viewer-navzone:active .viewer-nav { opacity: .96; background: radial-gradient(circle at 50% 50%, rgba(10, 12, 17, .96) 0%, rgba(10, 12, 17, .80) 34%, rgba(10, 12, 17, .40) 64%, rgba(10, 12, 17, 0) 100%); }
 @media (hover: none) { .viewer-nav { opacity: .42; } }   /* 触屏没有 hover：常显半透明，否则点不到 */
-/* v2.5.4：预览页图片下方那一行缩略图（复用详情页的外观，当前项高亮描边） */
+/* 预览页图片下方那一行缩略图（复用详情页的外观，当前项高亮描边） */
 .btn-ghost-refetch { background: transparent; border-color: var(--border); color: var(--primary); }
 .btn-ghost-refetch:hover { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); }
 .viewer-strip-slot { margin-top: 10px; max-height: 82px; }
 .viewer-strip .gallery-item.on { outline: 2px solid var(--primary); outline-offset: 1px; border-radius: var(--radius-sm); }
-/* v2.5.16（双板兼容）：同一份 HTML 在**桌面版壳**里跑时打上 body.desk-mode ——
+/* 双板兼容：同一份 HTML 在**桌面版壳**里跑时打上 body.desk-mode ——
  * 需要区分的内容与布局都挂在这条判据上（网页版讲「启动宿主」，桌面版讲「内置宿主」）。
  * 下面两条是首批差异：桌面版的载体标记 + 隐藏只对网页版有意义的元素（宿主离线提示条）。 */
 .chip-desk { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); font-weight: 600; }
 body.desk-mode #hostDeadBanner { display: none !important; }   /* 桌面版有内置宿主，不会出现「宿主已断开」 */
-/* v2.5.14（用户反馈）：图集预览里**双击「上一张 / 下一张」会触发浏览器默认的文本划选**（蓝色高亮）。
- * 实测（build/_probe-viewer-select.mjs，改前）：双击热区后选区 anchor=弹窗标题 H2「商品图集预览」、
- * focus=缩略图按钮 .gallery-item，选中内容是跨块级元素的空白；stage / counter 的 user-select 都是 auto。
+/* 图集预览里**双击「上一张 / 下一张」会触发浏览器默认的文本划选**（蓝色高亮）。
+ * 一次双击的选区会从弹窗标题 H2「商品图集预览」跨到缩略图按钮 .gallery-item，
+ * 选中内容是跨块级元素的空白；stage / counter 的 user-select 都是 auto。
  * 预览区域本来没有需要复制的文字 —— 整块关掉选中；图片再禁掉拖拽（拖图会拖出图片幽灵）。 */
 .viewer-stage, .viewer-stage *, .viewer-counter, .viewer-strip, .viewer-strip * {
   user-select: none; -webkit-user-select: none;
@@ -1330,8 +1496,6 @@ body.desk-mode #hostDeadBanner { display: none !important; }   /* 桌面版有�
   font-size: 11px; line-height: 1; padding: 1px 2px; border-radius: 4px;
 }
 .settings-chips .chip-x:hover { color: var(--danger); background: rgba(244,102,107,.15); }
-.side-status-inline { margin: 0 0 12px; }
-.side-status-inline .status-select { width: 100%; height: 30px; font-size: 13px; }
 .merge-pick { display: inline-block; margin: 0 4px 4px 0; }
 .merge-pick.active { background: var(--primary-soft); color: var(--primary); border-color: var(--primary); font-weight: 600; }
 /* 侧栏分组标题更醒目，与筛选项区分 */
@@ -1354,21 +1518,21 @@ body.desk-mode #hostDeadBanner { display: none !important; }   /* 桌面版有�
 .drop-zone { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 12px; border: 1.5px dashed var(--border-2); border-radius: var(--radius-sm); color: var(--text-3); font-size: 12.5px; transition: var(--tr); }
 .drop-zone.over { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
 
-/* ---------------- v2.3.28：支持角色选择器（折叠 + 检索） ---------------- */
+/* ---------------- 支持角色选择器（折叠 + 检索） ---------------- */
 .avpick-toolbar { display: flex; align-items: center; gap: 6px; }
 .avpick-search { flex: 1; min-width: 0; }
 .avpick-more { white-space: nowrap; }
 .avpick .avpick-toolbar + .avpick-list { margin-top: 8px; }   /* 检索框与角色气泡之间留白，不紧贴 */
 
-/* ---------------- v2.3.28：编辑页字段重排（标签右侧的 AI 按钮） ---------------- */
+/* ---------------- 编辑页字段重排（标签右侧的 AI 按钮） ---------------- */
 .field-label-split { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .field-label-split .btn { flex: none; }
 
-/* ---------------- v2.3.28：来源 / 分类 两栏（仅此处） ---------------- */
+/* ---------------- 来源 / 分类 两栏（仅此处） ---------------- */
 .form-two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: start; }
 
 /* ====================================================================
- * v4.2.0 素材包（导出 / 导入，89-pack.js）
+ * 素材包（导出 / 导入，89-pack.js）
  * ==================================================================== */
 .pack-body { display: flex; flex-direction: column; gap: 12px; }
 
@@ -1413,11 +1577,12 @@ body.desk-mode #hostDeadBanner { display: none !important; }   /* 桌面版有�
 .pack-prog-text { font-size: 12.5px; color: var(--text-2); margin-bottom: 6px; word-break: break-all; }
 .pack-prog-bar { height: 6px; background: var(--bg-3); border-radius: 999px; overflow: hidden; }
 .pack-prog-bar i { display: block; height: 100%; background: var(--primary); transition: width .25s ease; }
+.pack-cancel { margin-top: 8px; }
 
 .pack-body .btn-row { margin-top: 2px; }
 
 /* ====================================================================
- * v4.3.0 清单对比（89-pack.js · compareDialog）
+ * 清单对比（89-pack.js · compareDialog）
  * 反向对比：列出「我有、对方清单没有」的素材，勾选后导出。
  * ==================================================================== */
 .cmp-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -1453,7 +1618,7 @@ body.desk-mode #hostDeadBanner { display: none !important; }   /* 桌面版有�
 
 .chip-warn { color: var(--warn); border-color: var(--warn); }
 
-/* 相似项提示（v4.3.1）：黄色标签是「可能重复，需要人确认」，灰色是「没有本地文件」 */
+/* 相似项提示：黄色标签是「可能重复，需要人确认」，灰色是「没有本地文件」 */
 .chip-dim { color: var(--text-3); border-color: var(--border-2); }
 .cmp-check {
   display: inline-flex; align-items: center; gap: 6px;
@@ -1461,7 +1626,7 @@ body.desk-mode #hostDeadBanner { display: none !important; }   /* 桌面版有�
 }
 .cmp-check input { margin: 0; cursor: pointer; }
 
-/* ============ v4.3.2：检查更新的更新说明 ============ */
+/* ============ 检查更新的更新说明 ============ */
 .upd-notes {
   max-height: 220px;
   overflow: auto;
@@ -1476,7 +1641,7 @@ body.desk-mode #hostDeadBanner { display: none !important; }   /* 桌面版有�
 }
 
 /* ====================================================================
- * v4.4 拖入文件导入（89b-drop-import.js）
+ * 拖入文件导入（89b-drop-import.js）
  * 一行一个素材：勾选 / 改标题 / 选分类 / 看目标路径。
  * ==================================================================== */
 .di-list {
@@ -1507,7 +1672,7 @@ body.desk-mode #hostDeadBanner { display: none !important; }   /* 桌面版有�
 }
 
 /* ====================================================================
- * v4.4 素材右键菜单（86c-context-menu.js）
+ * 素材右键菜单（86c-context-menu.js）
  * ==================================================================== */
 .ctx-menu {
   position: fixed; z-index: 9500;
@@ -1552,10 +1717,10 @@ body.desk-mode #hostDeadBanner { display: none !important; }   /* 桌面版有�
 
 
 
-/* ---------------- v5.1 动效（让切换/翻页更顺滑） ---------------- */
-/* v6.7（用户反馈「小卡片弹出跳动不好看」）：原来是「下落 → 过冲弹回 → 再收一点」的三段回弹，
- * 一页几十张卡同时弹，画面很吵。改成一次到位的淡入上浮：没有回弹、没有缩放，只留位移和透明度，
- * 时长也从 .44s 收到 .26s，翻页/筛选后立刻能看清内容。 */
+/* ---------------- 动效（让切换/翻页更顺滑） ---------------- */
+/* 入场是一次到位的淡入上浮：没有回弹、没有缩放，只留位移和透明度。
+ * 三段回弹（下落 → 过冲弹回 → 再收一点）在一页几十张卡同时出现时画面很吵；
+ * 时长 .26s，翻页/筛选后立刻能看清内容。 */
 @keyframes cardIn {
   from { opacity: 0; transform: translateY(7px); }
   to   { opacity: 1; transform: none; }
@@ -1582,7 +1747,7 @@ body.desk-mode #hostDeadBanner { display: none !important; }   /* 桌面版有�
   .grid .card, .pager, .sidebar, .main, .icon-btn.spinning { animation: none !important; transition: none !important; }
 }
 
-/* ---------------- v6.8：库根扫描登记列表 ---------------- */
+/* ---------------- 库根扫描登记列表 ---------------- */
 .scan-cand-list {
   max-height: 340px; overflow: auto; display: flex; flex-direction: column; gap: 6px;
   border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px;
@@ -1590,7 +1755,7 @@ body.desk-mode #hostDeadBanner { display: none !important; }   /* 桌面版有�
 .scan-cand-list .import-row { flex: 0 0 auto; align-items: center; }
 .scan-cand-name { font-weight: 600; font-size: 13px; word-break: break-all; }
 
-/* 卡片左上角文件类型角标 */
+/* 卡片右下角的文件类型角标 */
 .file-kind {
   position: absolute;
   bottom: 8px;
@@ -1615,8 +1780,8 @@ input, textarea, select, [contenteditable="true"] {
 }
 
 /* 右下角悬浮操作区（多选模式显示）
- * 容器常驻、只切 .show：以前是 display:none → flex，没法做过渡，按钮是「啪」地出现。
- * 现在三个按钮都从右侧滑入（右移 + 轻微缩小 → 归位），并按顺序错开 60ms。 */
+ * 容器常驻、只切 .show：display:none → flex 没法做过渡，按钮会「啪」地出现。
+ * 所以三个按钮都从右侧滑入（右移 + 轻微缩小 → 归位），并按顺序错开 60ms。 */
 .fab-dock {
   position: fixed;
   right: 22px;
@@ -1660,10 +1825,11 @@ input, textarea, select, [contenteditable="true"] {
   transition: opacity .2s ease, transform .34s cubic-bezier(.22, 1.06, .36, 1), visibility 0s,
               border-color .2s ease, background .2s ease, box-shadow .2s ease;
 }
-/* 展开时自下而上逐个滑出：先退出，再导出，最后导入（最常用的那个压轴） */
+/* 展开时自上而下逐个滑出：退出 → 传给好友 → 导出素材包 → 导入到 Unity（最常用的压轴） */
 .fab-dock.show .fab-exit { transition-delay: .02s; }
 .fab-dock.show .fab-group .fab:nth-child(1) { transition-delay: .08s; }
 .fab-dock.show .fab-group .fab:nth-child(2) { transition-delay: .15s; }
+.fab-dock.show .fab-group .fab:nth-child(3) { transition-delay: .22s; }
 
 .fab:hover, .fab-dock.show .fab:hover { border-color: var(--primary); transform: translateY(-1px); }
 /* 图标与文字的间距由 flex gap 统一控制，屏蔽 ico-pre 自带的 5px 右边距（否则会叠成 12px） */
@@ -1695,11 +1861,11 @@ input, textarea, select, [contenteditable="true"] {
   user-select: text;
 }
 
-/* 导入队列悬浮窗（v6.9：外观与下载面板 .dl-panel 完全对齐：同宽 / 同圆角 / 同头部 / 同按钮，
+/* 导入队列悬浮窗（外观与下载面板 .dl-panel 完全对齐：同宽 / 同圆角 / 同头部 / 同按钮，
    折叠态同样是 34px 竖条 + 角标，鼠标移入自动展开） */
 .wb-task {
   position: fixed;
-  /* 要盖住工作台整页（z-index 400）和下载面板（480），但不能盖弹窗（900） */
+  /* 要盖住工作台整页（z-index 400）和下载面板（480），但不能盖弹窗（560） */
   z-index: 520;
   width: 320px;
   max-height: 46vh;
@@ -1751,7 +1917,7 @@ input, textarea, select, [contenteditable="true"] {
 /* 面板里的操作按钮收成小一号，别比面板本身还抢眼（与 dl-btn 的观感一致） */
 .wb-task-body .btn { font-size: 11px; padding: 4px 9px; border-radius: 6px; }
 .wb-task-resume { margin-top: 2px; align-self: flex-start; }
-/* v6.9：折叠态改用角标，不再用竖排文字条 */
+/* 折叠态用角标，不用竖排文字条 */
 .wb-task-strip { display: none; }
 .wb-task-dragging { opacity: .88; }
 /* 折叠态：与下载面板一致 —— 34px 宽、只剩角标、鼠标移入展开 */
@@ -1844,6 +2010,38 @@ input, textarea, select, [contenteditable="true"] {
   border: 1px solid var(--border); border-radius: var(--radius-sm); outline: none;
 }
 .p2p-code-input:focus { border-color: var(--primary); }
+/* 信令地址（可留空＝自动发现）：比口令小一号，别抢视线 */
+.p2p-addr-input {
+  width: 100%; box-sizing: border-box;
+  font-family: var(--mono); font-size: 11px;
+  padding: 7px 9px; margin-bottom: 12px;
+  background: var(--bg-3); color: var(--text-2);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); outline: none;
+}
+.p2p-addr-input:focus { border-color: var(--primary); color: var(--text); }
+.p2p-addr-line {
+  font-family: var(--mono); font-size: 11px; color: var(--text-2);
+  margin: -6px 0 12px; word-break: break-all;
+}
+.p2p-addr-line b { color: var(--text); font-weight: 500; }
+.p2p-addr-list { margin: -4px 0 12px; }
+.p2p-addr-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px;
+  margin-bottom: 4px; cursor: pointer;
+  font-family: var(--mono); font-size: 11px; color: var(--text-2);
+  transition: background .12s, border-color .12s;
+}
+.p2p-addr-item:hover { background: var(--bg-2); border-color: var(--border-2); }
+.p2p-addr-item b { color: var(--text); font-weight: 500; white-space: nowrap; }
+.p2p-addr-tag {
+  flex: none; min-width: 58px; text-align: center;
+  font-size: 10px; line-height: 1; padding: 3px 5px; border-radius: 4px;
+  background: var(--bg-3); color: var(--text-3);
+}
+.p2p-addr-item:first-child .p2p-addr-tag { color: var(--text-2); }
+.p2p-addr-nic { margin-left: auto; font-size: 10px; color: var(--text-3); }
+.p2p-addr-cap { font-size: 11px; color: var(--text-3); line-height: 1.5; margin-top: 6px; }
 .p2p-dst-row {
   display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
   font-size: 12px; color: var(--text-2);
@@ -1879,3 +2077,11 @@ input, textarea, select, [contenteditable="true"] {
 .p2p-signal-on { font-size: 11px; color: var(--ok); }
 .p2p-signal-head .btn { margin-left: auto; }
 .p2p-signal-note { margin: 10px 0 0; font-size: 11px; line-height: 1.6; color: var(--text-3); }
+
+/* 详情页顶部：从商品链接补充信息（整排） */
+.detail-enrich { display: flex; gap: 8px; align-items: center; }
+.detail-enrich .input { flex: 1 1 auto; min-width: 0; }
+/* 性能：不给 .grid .card 加 content-visibility / contain-intrinsic-size。
+ * 一页最多 34 张卡，本来就没有「跳过屏外内容」的收益；而卡片高度是内容撑出来的
+ * （auto 行高 + .card{height:100%}），估算 300px 与真实高度对不上时，
+ * 每有一张卡滚进视口就要重排一次网格 —— 这一点跟有没有图片完全无关。 */

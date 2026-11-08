@@ -66,6 +66,10 @@ var DropImport = (function () {
     return String(s || '')
       .replace(/_+/g, ' ')
       .replace(/\s+/g, ' ')
+      /* `[5058951]-オフショル…` 里的编号会被 versionless 当成版本括注拿掉，
+       * 剩下「-オフショル…」这种以分隔符开头的标题；编号已经记在 itemId 上，
+       * 这里把残留的分隔符清掉，标题才是干净的商品名。 */
+      .replace(/^[\s\-–—_·]+/, '')
       .trim();
   }
 
@@ -130,7 +134,10 @@ var DropImport = (function () {
       var key = (it.isDir ? 'D|' : 'F|') + base.toLowerCase();
       var g = byKey[key];
       if (!g) {
-        g = { base: base, files: [], cover: null, isDir: !!it.isDir, scan: null };
+        /* 名字里带 BOOTH 商品号（`[5058951]-xxx` / 纯数字）就先记下来：
+         * 导入后拿它当商品页去解析，补标题 / 封面 / 标签，省掉再手动粘一遍链接。 */
+        g = { base: base, files: [], cover: null, isDir: !!it.isDir, scan: null,
+          guessItemId: boothIdFromName(base) || boothIdFromName(it.name) || '' };
         byKey[key] = g;
         groups.push(g);
       }
@@ -217,7 +224,9 @@ var DropImport = (function () {
       coverOn: true,
       root: root,
       done: false,
-      failed: []
+      failed: [],
+      toParse: [],         // 名字里带商品编号的：导入完成后按编号解析商品页
+      abortParse: false    // 关窗 = 不再继续解析剩下的项
     };
     plan.groups.forEach(function (g) {
       g.selected = true;
@@ -300,6 +309,20 @@ var DropImport = (function () {
         refreshSummary();
       });
 
+      /* 商品编号提示：名字里带编号时显示，导入后会按它解析 BOOTH 商品页 */
+      var idChip = el('span', {
+        class: 'chip chip-ok', style: { display: 'none' },
+        title: '导入后会按这个编号解析 BOOTH 商品页，自动补全标题 / 封面 / 标签等信息'
+      });
+      function syncIdChip() {
+        if (g.guessItemId) {
+          idChip.style.display = '';
+          idChip.textContent = '商品 ID ' + g.guessItemId + '（导入后自动解析）';
+        } else {
+          idChip.style.display = 'none';
+        }
+      }
+
       var titleIn = el('input', {
         class: 'input', type: 'text', value: g.title, placeholder: '素材标题',
         oninput: function () {
@@ -312,6 +335,9 @@ var DropImport = (function () {
             g.dupChip = el('span', { class: 'chip chip-warn', title: '库里已经有同名素材；导入后会多一条，不会覆盖原来的', text: '库里已有同名素材' });
             chips.appendChild(g.dupChip);
           }
+          /* 标题改成带编号的（或从别处粘进来）→ 跟着认，方便直接导入 */
+          var id2 = boothIdFromName(this.value);
+          if (id2 && id2 !== g.guessItemId) { g.guessItemId = id2; syncIdChip(); }
         }
       });
 
@@ -347,6 +373,7 @@ var DropImport = (function () {
 
       if (g.files.length > 1) chips.appendChild(el('span', { class: 'chip', text: g.files.length + ' 个版本' }));
       if (g.cover) chips.appendChild(el('span', { class: 'chip', text: '封面：' + g.cover.name }));
+      chips.appendChild(idChip); syncIdChip();
       if (g.dup) {
         g.dupChip = el('span', { class: 'chip chip-warn', title: '库里已经有同名素材；导入后会多一条，不会覆盖原来的', text: '库里已有同名素材' });
         chips.appendChild(g.dupChip);
@@ -524,10 +551,13 @@ var DropImport = (function () {
               isLatest: i === moved.length - 1
             };
           });
+        var guessId = String(g.guessItemId || '');
         var asset = Store.normalizeAsset({
           title: g.title || cleanTitle(g.base),
           originalTitle: cleanTitle(g.base),
-          source: 'other',
+          source: guessId ? 'booth' : 'other',
+          itemId: guessId,
+          links: guessId ? [{ url: 'https://booth.pm/ja/items/' + guessId, label: 'BOOTH' }] : [],
           category: g.category || 'other',
           avatars: (g.avatars || []).slice(),
           downloaded: true,
@@ -549,7 +579,8 @@ var DropImport = (function () {
             });
           }).catch(function () { /* 封面失败不影响素材本体 */ });
         }
-        return step.then(function () { return App.save(asset); }).then(function () {
+        return step.then(function () { return App.save(asset); }).then(function (saved) {
+          if (guessId) state.toParse.push({ asset: saved || asset, id: guessId, name: g.title || g.base });
           return { added: true, failed: failed };
         });
       });
@@ -585,7 +616,6 @@ var DropImport = (function () {
 
       chain.then(function () {
         state.done = true;
-        busy = false;
         setProg('完成：新增 ' + added + ' 个素材'
           + (failed.length ? '，' + failed.length + ' 个文件没进去（见下）' : ''), 100);
         if (failed.length) {
@@ -597,11 +627,43 @@ var DropImport = (function () {
         UI.renderAll();
         if (added) Toast.ok('已导入 ' + added + ' 个素材到素材库', 6000);
         if (failed.length) Toast.warn('有 ' + failed.length + ' 个文件没导进去：多数是源文件被占用或目标同名，完成前先看一眼列表', 8000);
+        return parseAll(added);
       }).catch(function (e) {
         busy = false;
         importBtn.disabled = false;
         setProg('失败：' + ((e && e.message) || e), 0);
         Toast.err('导入失败：' + ((e && e.message) || e), 9000);
+      });
+    }
+
+    /** 导入完成后按「名字里的商品编号」解析一遍：串行 + 1.2~1.8 秒间隔。
+     *  和文件夹导入那边共用 Importer.autoParseBoothById，风控节奏只有一个来源。 */
+    function parseAll(added) {
+      var list = state.toParse || [];
+      if (!list.length) { busy = false; return Promise.resolve(null); }
+      if (App.settings && App.settings.autoParseOnImport === false) {
+        busy = false;
+        setProg('完成：新增 ' + (added || 0) + ' 个素材（已关闭「导入后按编号解析」，只登记了编号）', 100);
+        return Promise.resolve(null);
+      }
+      var okN = 0, badN = 0;
+      var p = Promise.resolve();
+      list.forEach(function (t, i) {
+        p = p.then(function () {
+          if (state.abortParse) { badN++; return null; }
+          setProg('按编号解析 ' + (i + 1) + '/' + list.length + '：' + t.id + '（' + t.name + '）', null);
+          return Importer.autoParseBoothById(t.asset, t.id).then(function (r) {
+            if (r && r.ok) okN++; else badN++;
+            UI.renderAll();
+          });
+        });
+      });
+      return p.then(function () {
+        busy = false;
+        setProg('完成：新增 ' + (added || 0) + ' 个素材；按编号解析成功 ' + okN + ' 项' + (badN ? '，跳过 ' + badN + ' 项' : ''), 100);
+        UI.renderAll();
+        if (okN) Toast.ok('已按商品编号补全 ' + okN + ' 项素材的信息', 5200);
+        return { ok: okN, bad: badN };
       });
     }
 
@@ -624,6 +686,7 @@ var DropImport = (function () {
       size: 'lg',
       body: [body],
       onClose: function () {
+        state.abortParse = true;      // 关窗后剩下的项不再挨个联网解析
         if (current === handle) current = null;
       }
     });
@@ -680,8 +743,15 @@ var DropImport = (function () {
     if (current) close();                      // 手上还开着的导入预览，换成本次操作
 
     var allImg = list.every(function (it) { return !it.isDir && isImage(it.name); });
+    /* 默认去向按「这条素材有没有本体」判断：
+     * 一条本体都还没有 → 拖进来的多半就是本体，默认「作为新版本」（不然它会被算成 DLC，
+     * 详情页里立刻变成「额外文件」，这跟手上的文件是什么没关系，纯粹是默认值带偏的）；
+     * 已经有本体 → 再拖进来的更可能是 DLC / 补丁，默认仍是「作为附加文件」。 */
+    var hasBase = App.localBaseEntries(asset).length > 0;
     var state = {
-      mode: allImg ? 'cover' : 'attach',
+      mode: allImg ? 'cover' : (hasBase ? 'attach' : 'version'),
+      /* 复制 / 移动随导入设置走：同一个人的习惯在这两处不该不一样 */
+      move: !!App.settings.importMoveInsteadOfCopy,
       verName: list.length === 1 ? defaultVerName(list[0].name) : '',
       copied: [],
       renamed: [],
@@ -690,13 +760,21 @@ var DropImport = (function () {
     };
 
     /* ---- 头部：放进哪一条 ---- */
+    var headHint = el('div', { class: 'pack-dim', text: '' });
+    function syncHeadHint() {
+      headHint.textContent = state.mode === 'cover'
+        ? '只读取这张图片当封面，不会复制进素材目录。'
+        : (state.move
+          ? '文件会移动到这条素材自己的目录（源文件不再保留）。同名文件自动改名，不会覆盖。'
+          : '文件会复制进这条素材自己的目录，源文件不动。同名文件自动改名，不会覆盖。');
+    }
     var head = el('div', { class: 'pack-summary' }, [
       el('div', {}, [
         el('b', { text: '放进「' + (asset.title || asset.originalTitle || '未命名') + '」' }),
         el('span', { class: 'pack-dim', text: ' · ' + App.categoryLabel(asset.category || 'other')
           + (Store.fileIdOf(asset) ? ' · 编号 ' + Store.fileIdOf(asset) : '') })
       ]),
-      el('div', { class: 'pack-dim', text: '文件会复制进这条素材自己的目录，源文件不动。同名文件自动改名，不会覆盖。' })
+      headHint
     ]);
 
     var fileBox = el('div', { class: 'di-files' }, list.map(function (it) {
@@ -725,6 +803,8 @@ var DropImport = (function () {
           if (!this.checked) return;
           state.mode = value;
           verRow.style.display = (value === 'version' && list.length === 1) ? '' : 'none';
+          placeBox.style.display = (value === 'cover') ? 'none' : '';   // 换封面不动文件，复制/移动没意义
+          syncHeadHint();
         }
       });
       return el('label', { class: 'pack-check' }, [
@@ -740,10 +820,37 @@ var DropImport = (function () {
     if (allImg) optRows.push(optionRow('cover', '设为封面', '只换封面图，不把图片复制进素材目录'));
 
     var optBox = el('div', { class: 'pack-sec' }, [el('div', { class: 'pack-label', text: '这批文件怎么算' })].concat(optRows));
+
+    /* ---- 复制 / 移动 ----
+     * 补 DLC 常常是「把下载目录里的文件收进库里」，这时移动更顺手；
+     * 但移动会动源文件，所以默认仍跟随导入设置，且失败的文件原样留着。 */
+    var moveName = 'diIntoPlace_' + Date.now();
+    function placeRow(move) {
+      var input = el('input', {
+        type: 'radio', name: moveName, checked: state.move === move,
+        onchange: function () { if (!this.checked) return; state.move = move; syncHeadHint(); }
+      });
+      return el('label', { class: 'pack-check' }, [
+        input,
+        el('span', {}, [
+          el('b', { text: move ? '移动' : '复制（保留原文件）' }),
+          el('span', { class: 'pack-dim', text: move
+            ? ' —— 源文件搬进素材目录，适合「下载目录直接清空」；移动失败的文件会原样留着'
+            : ' —— 源文件不动，最稳妥' })
+        ])
+      ]);
+    }
+    var placeBox = el('div', { class: 'pack-sec', style: state.mode === 'cover' ? { display: 'none' } : null }, [
+      el('div', { class: 'pack-label', text: '文件怎么放' }),
+      placeRow(false),
+      placeRow(true)
+    ]);
+
     if (list.length > 1 && state.mode === 'version') {
       verRow.style.display = 'none';           // 多文件各按自己的文件名当版本名
     }
     if (state.mode === 'version' && list.length === 1) verRow.style.display = '';
+    syncHeadHint();
 
     var prog = el('div', { class: 'pack-prog', style: { display: 'none' } });
     function setProg(text, pct) {
@@ -787,6 +894,16 @@ var DropImport = (function () {
           });
         });
         asset.versions = vs;
+      } else {
+        /* 附加文件 → 额外文件表：详情页「本地文件」据此把 DLC 与本体分成两组，
+         * 重新扫描时也能认出「这是登记过的 DLC」而不是陌生文件 */
+        var ex = (asset.extraFiles || []).slice();
+        state.copied.forEach(function (f) {
+          var k = String(f.name).toLowerCase();
+          if (ex.some(function (e) { return String((e && e.name) || '').toLowerCase() === k; })) return;
+          ex.push({ name: f.name, size: f.size || 0, addedAt: nowISO(), note: state.move ? '移动进卡片' : '拖进卡片' });
+        });
+        asset.extraFiles = ex;
       }
       return App.save(asset);
     }
@@ -814,14 +931,17 @@ var DropImport = (function () {
         return Importer.ensureStoragePathQuiet(asset);
       }).then(function (dir) {
         if (!dir) throw new Error('这条素材还没有存储目录，自动创建也失败了（检查设置里的素材库根目录）');
-        setProg('准备复制 ' + list.length + ' 个文件…', 0);
+        setProg((state.move ? '准备移动 ' : '准备复制 ') + list.length + ' 个文件…', 0);
         var chain = Promise.resolve();
         list.forEach(function (it, i) {
           chain = chain.then(function () {
             if (!it.path) { state.failed.push(it.name + '：拿不到磁盘路径'); return null; }
-            setProg('正在复制 ' + (i + 1) + '/' + list.length + '：' + it.name, (i / list.length) * 100);
+            setProg('正在' + (state.move ? '移动 ' : '复制 ') + (i + 1) + '/' + list.length + '：' + it.name, (i / list.length) * 100);
             return freeName(dir, it.name).then(function (target) {
-              return FS.host.copy(it.path, joinWinPath(dir, [target])).then(function () {
+              var dst = joinWinPath(dir, [target]);
+              /* 移动跨盘时后端会退化成「复制 + 删源」；失败的话源文件原样留着 */
+              var put = state.move ? FS.host.move(it.path, dst) : FS.host.copy(it.path, dst);
+              return put.then(function () {
                 state.copied.push({ name: target, srcName: it.name, size: it.size || 0 });
                 if (target !== it.name) state.renamed.push(it.name + ' → ' + target);
               });
@@ -841,8 +961,7 @@ var DropImport = (function () {
           }
           var tail = state.failed.length ? ('；' + state.failed.length + ' 个没进去（见下）') : '';
           setProg((state.mode === 'version' ? '已作为新版本放入 ' : '已放入 ') + state.copied.length
-            + ' 个文件' + (state.renamed.length ? '，重名已改名' : '') + tail, 100);
-          if (state.failed.length) {
+            + ' 个文件' + (state.renamed.length ? '，重名已改名' : '') + tail, 100);          if (state.failed.length) {
             prog.appendChild(el('div', { class: 'pack-warn', text: state.failed.slice(0, 5).join('；') }));
           }
           finish('已放进「' + (asset.title || asset.id) + '」：' + nameList.slice(0, 3).join('、')
@@ -881,7 +1000,7 @@ var DropImport = (function () {
     btnRow.appendChild(el('button', { class: 'btn', onclick: function () { close(); } }, '取消'));
     btnRow.appendChild(okBtn);
 
-    var body = el('div', { class: 'pack-body' }, [head, fileBox, optBox, verRow, prog, btnRow]);
+    var body = el('div', { class: 'pack-body' }, [head, fileBox, optBox, placeBox, verRow, prog, btnRow]);
     var handle = Modal.open({
       title: '放进这条素材',
       size: 'md',

@@ -8,7 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const {
-  exists, readText, readFileBase64, writeFile, mkdir, remove, move, copy, open, scan
+  exists, readText, readFileBase64, writeFile, mkdir, remove, trash, move, copy, open, scan
 } = require('./api-fs.js');
 const { apiFetch, apiStream } = require('./api-net.js');
 const { apiDownload, apiDownloadProgress, apiDownloadCancel } = require('./api-download.js');
@@ -102,6 +102,7 @@ function routes(getWindow) {
     '/api/writeFile': p => writeFile(p),
     '/api/mkdir': p => mkdir(p),
     '/api/delete': p => remove(p),
+    '/api/trash': p => trash(p),
     '/api/move': p => move(p),
     '/api/copy': p => copy(p),
     '/api/open': p => open(p),

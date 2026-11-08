@@ -178,6 +178,29 @@ var Settings = {
     }
     renderModes();
     box.appendChild(modeBox);
+    /* 自动补全是最容易「点开就悄悄发请求」的地方，单独给一个总开关：
+     * 关掉后只有手动按钮（强制联网填充 / 重新解析 / 批量）才会联网。 */
+    var varCk = el('input', { type: 'checkbox', checked: App.settings.autoVariantFetch !== false, onchange: function () {
+      App.settings.autoVariantFetch = varCk.checked; App.saveSettings();
+    } });
+    box.appendChild(el('label', { class: 'check check-row' }, [varCk, el('span', {
+      text: '打开素材详情 / 编辑页时自动补全版本与变体（只在存过 Cookie 的站点联网；同一条素材失败后冷却从 20 分钟起逐次翻倍，最长 6 小时）'
+    })]));
+    box.appendChild(el('div', { class: 'field-hint', style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } }, [
+      el('span', { text: '刚更新过 Cookie，想立刻重试？' }),
+      el('button', { class: 'btn btn-xs', type: 'button', onclick: function () {
+        try { localStorage.removeItem('vrclib.autoEnrich.tried.v1'); } catch (e) {}
+        Toast.ok('已清除自动补全的冷却记录，下次打开详情会重新尝试');
+      } }, '清除冷却记录')
+    ]));
+    /* 导入时按「名字里的商品编号」解析：一批几十个素材会挨个请求商品页，
+     * 节奏虽然已经放到 1~2 秒，仍然给一个开关 —— 想离线批量入库时直接关掉。 */
+    var parseCk = el('input', { type: 'checkbox', checked: App.settings.autoParseOnImport !== false, onchange: function () {
+      App.settings.autoParseOnImport = parseCk.checked; App.saveSettings();
+    } });
+    box.appendChild(el('label', { class: 'check check-row' }, [parseCk, el('span', {
+      text: '导入时按名字里的商品编号自动解析（例如「[5058951]-xxx」「5058951」：当成 BOOTH 商品号抓一次商品页，补标题 / 封面 / 标签；每项间隔 1~2 秒）'
+    })]));
     var autoCk = el('input', { type: 'checkbox', checked: !!App.settings.autoCookieFetch, onchange: function () {
       App.settings.autoCookieFetch = autoCk.checked; App.saveSettings();
     } });
@@ -731,10 +754,6 @@ var Settings = {
 
     function run() {
       if (running) return;
-      if (!Net.networkAllowed()) {
-        log('\u2716 当前为「手动粘贴源码」（不联网）。请先在「联网与抓取」中选择「内置联网」——它随程序运行，不需要额外启动任何东西。');
-        return;
-      }
       running = true; startBtn.disabled = true; ICONS.apply(startBtn, ('\u23F3 补全中 …'));
       var targets = App.assets.filter(function (a) {
         // 闲鱼/好友分享不自动获取；已下架不再重复获取（用户可在编辑页手动重试）
@@ -744,14 +763,14 @@ var Settings = {
       var skippedAuto = App.assets.length - targets.length;
       if (!targets.length) { log('\u2716 没有需要补全的素材（闲鱼/好友分享/已下架素材会自动跳过）'); running = false; startBtn.disabled = false; ICONS.apply(startBtn, ('\u{1F504} 开始补全')); return; }
       if (skippedAuto > 0) log('\u26AA 已自动跳过 ' + skippedAuto + ' 条（闲鱼 / 好友分享 / 已下架）');
-      log('共 ' + targets.length + ' 条素材需要补全，开始逐个处理（缓存命中会直接使用）…');
+      log('共 ' + targets.length + ' 条素材需要补全，开始逐个处理（每条都强制联网，不吃本地缓存）…');
       var done = 0, updated = 0, failed = 0;
       var chain = Promise.resolve();
-      targets.forEach(function (a) {
+      targets.forEach(function (a, ti) {
         chain = chain.then(function () {
           var url = (a.links || []).filter(function (l) { return isHttpUrl(l.url); })[0].url;
           var title = a.title || a.originalTitle || a.itemId || url;
-          return Fetchers.fetchInfo(url, { onLog: function (m) { log('  [' + title + '] ' + m); } }).then(function (info) {
+          return Fetchers.fetchInfo(url, { forceNetwork: true, noCache: true, onLog: function (m) { log('  [' + title + '] ' + m); } }).then(function (info) {
             if (!info || info.__failed) {
               var tried = (info && info.tried) || [];
               var gone = (info && (info.status === 404 || info.status === 410)) || tried.some(function (t) { return t && /HTTP (404|410)\b/.test(String(t.error || '')); });
@@ -798,7 +817,11 @@ var Settings = {
           }).then(function (saved) {
             done++;
             if ((done % 5) === 0 || done === targets.length) log('进度 ' + done + ' / ' + targets.length + '（已更新 ' + updated + ' 条）');
-          }).catch(function (e) { done++; failed++; log('  [失败] ' + (e && e.message ? e.message : e)); });
+          }).catch(function (e) { done++; failed++; log('  [失败] ' + (e && e.message ? e.message : e)); })
+            .then(function () {
+              /* 每条之间歇 900~1500ms：一次补全整个库时，这个节奏才像个在读页面的人 */
+              if (ti < targets.length - 1) return new Promise(function (r) { setTimeout(r, 900 + Math.random() * 600); });
+            });
         });
       });
       chain.then(function () {

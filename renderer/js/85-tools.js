@@ -191,10 +191,11 @@ var Tools = {
       App.runCategoryCleanup(plan, function (i, n) { ICONS.apply(runBtn, '\u23F3 整理中 ' + i + '/' + n); }).then(function (res) {
         Modal.close(mh);
         UI.renderAll();
+        var reTxt = res.repointed ? '，' + res.repointed + ' 项目标已有目录、只把记录指了过去（没删没覆盖）' : '';
         if (res.failed.length) {
-          Toast.warn('已移动 ' + res.moved + ' 项，' + res.failed.length + ' 项没搬成（多为目标同名或后端未就绪）：' + res.failed.slice(0, 3).map(function (f) { return f.name; }).join('、'), 8200);
+          Toast.warn('已移动 ' + res.moved + ' 项' + reTxt + '，' + res.failed.length + ' 项没搬成（多为目标同名或后端未就绪）：' + res.failed.slice(0, 3).map(function (f) { return f.name; }).join('、'), 8200);
         } else {
-          Toast.ok('已整理 ' + res.moved + ' 项素材目录', 5200);
+          Toast.ok('已整理 ' + res.moved + ' 项素材目录' + reTxt, 5200);
         }
       }).catch(function (e) {
         runBtn.disabled = false;
@@ -277,36 +278,47 @@ var Tools = {
     Store.putAssets(list).then(function () { UI.renderAll(); Toast.ok('已标记 ' + list.length + ' 项为' + (flag ? '已下载' : '未下载')); });
   },
 
-  /** 重新扫描磁盘状态：对选中素材跑磁盘对账，汇报正常 / 缺文件 / 路径失效 / 仅远端。 */
+  /** 重新扫描磁盘状态：对选中素材重新对照磁盘（只读顶层文件名，不深入扫描）。
+   *  记录里没有的文件补进「额外文件 / DLC」，磁盘上已经没有的从记录里删掉；
+   *  本体文件缺失只提示、不删记录（要留着让详情页提示并快速补回）。 */
   rescanDiskState: function () {
     var ids = App.selectedIds();
     if (!ids.length) { Toast.warn('请先选择素材'); return; }
     var list = App.assets.filter(function (a) { return ids.indexOf(a.id) >= 0; });
-    /* 只读对账：后端不可用也不该早退 —— App.localFileAudit 会降级到库根句柄（FSA）枚举。
-     * 只有「后端离线且没有可用句柄」才如实说拿不到数字，不可判定不等于没有文件。 */
-    FS.hostEnsure().then(function (hostOk) {
-      var okN = 0, missN = 0, missFiles = 0, badN = 0, fsaN = 0, unverifiedN = 0;
-      var chain = Promise.resolve();
-      list.forEach(function (a) {
-        chain = chain.then(function () {
-          return App.localFileAudit(a).then(function (st) {
-            if (st.error === 'offline' || st.error === 'no-host') { unverifiedN++; return; }   // 第三档：不可判定
-            if (st.error) { badN++; return; }
-            if (st.via === 'fsa') fsaN++;
-            if (st.missing && st.missing.length) { missN++; missFiles += st.missing.length; } else okN++;
-          });
+    var hostOk = !!(FS.host && typeof FS.host.scan === 'function');
+    var okN = 0, missN = 0, missFiles = 0, badN = 0, unverifiedN = 0, addAll = 0, delAll = 0, fixedN = 0;
+    var changedIds = Object.create(null);
+    var chain = Promise.resolve();
+    list.forEach(function (a) {
+      chain = chain.then(function () {
+        /* 后端不可用时 App.localScanFiles 会降级到库根句柄枚举；两条都不行才算「无法核对」 */
+        return App.localScanFiles(a).then(function (r) {
+          if (r.error === 'offline') { unverifiedN++; return; }
+          if (r.error) { badN++; return; }
+          var plan = App.localFileApply(a, r.files);
+          if (plan.missing.length) { missN++; missFiles += plan.missing.length; } else okN++;
+          addAll += plan.added; delAll += plan.removed;
+          if (!plan.changed) return;
+          fixedN++; changedIds[a.id] = 1;
+          return App.save(a).catch(function () {});
         });
       });
-      return chain.then(function () {
-        if (!hostOk && !fsaN && unverifiedN) {
-          Toast.warn('磁盘状态：后端不可用，且没有可用的素材库目录句柄，暂时无法核对磁盘（到「设置 → 本地库目录」选择一次即可）。共 ' + list.length + ' 个素材'
-            + '。', 7600);
-          return;
-        }
-        var how = hostOk ? '' : '（浏览器库目录校验）';
-        Toast.ok('磁盘状态' + how + '：正常 ' + okN + ' 个；缺文件 ' + missN + ' 个（共 ' + missFiles + ' 个文件）；路径失效 ' + badN + ' 个'
-          + (unverifiedN ? '；另有 ' + unverifiedN + ' 个暂时无法核对' : ''), 7600);
-      });
+    });
+    chain.then(function () {
+      UI.renderAll();
+      /* 详情页正开着某条被改动的素材 → 原地刷新，别让人看着旧列表 */
+      if (App.detailAssetId && changedIds[App.detailAssetId] && typeof Modals !== 'undefined' && Modals.refreshAfterChange) {
+        var live = App.assets.filter(function (x) { return x.id === App.detailAssetId; })[0];
+        if (live) { try { Modals.refreshAfterChange(live, { keepModal: true }); } catch (e) {} }
+      }
+      if (!hostOk && unverifiedN === list.length) {
+        Toast.warn('磁盘状态：后端不可用，且没有可用的素材库目录句柄，暂时无法核对磁盘（到「设置 → 本地库目录」选择一次即可）。共 '
+          + list.length + ' 个素材。', 7600);
+        return;
+      }
+      Toast.ok('磁盘状态：正常 ' + okN + ' 个；缺本体文件 ' + missN + ' 个（共 ' + missFiles + ' 个文件）；路径失效 ' + badN + ' 个'
+        + (unverifiedN ? '；另有 ' + unverifiedN + ' 个暂时无法核对' : '')
+        + ((addAll || delAll) ? '。已更新 ' + fixedN + ' 个素材的记录：新增 ' + addAll + ' 个 DLC、移除 ' + delAll + ' 条失效记录' : ''), 8200);
     }).catch(function (e) { Toast.err('扫描失败：' + ((e && e.message) || e)); });
   },
 
@@ -360,13 +372,11 @@ var Tools = {
       title: '批量添加（粘贴多个链接）', size: 'md',
       body: [
         el('div', { class: 'field-hint', text: '每行一个链接。工具会为每个链接创建一条素材记录（标题先占位，可稍后逐条补全）。' }),
-        el('div', { class: 'notice' + (Net.networkAllowed() ? '' : ' notice-warn') }, [
-          el('p', { text: Net.networkAllowed()
-            ? '当前为联网抓取模式，将依次尝试获取标题、封面与标签；命中本地缓存的链接不会重复请求。数量多时耗时较长。'
-            : '当前为「手动粘贴源码」模式（离线）：这里只会创建占位记录，不会联网。之后可逐条打开编辑页粘贴源码补全，或到「设置 → 联网与抓取」切换抓取方式。' })
+        el('div', { class: 'notice' }, [
+          el('p', { text: '勾选下面的「同时联网抓取信息」就会逐条强制联网获取标题、封面与标签（不吃本地缓存）。数量多时耗时较长。' })
         ]),
         ta,
-        el('label', { class: 'check check-row' }, [autoFetch, el('span', { text: '同时联网抓取信息（需先在「设置 → 联网与抓取」选「内置联网」）' })]),
+        el('label', { class: 'check check-row' }, [autoFetch, el('span', { text: '同时联网抓取信息（强制联网，每条都会重新请求）' })]),
         logBox
       ],
       footer: [
@@ -392,11 +402,11 @@ var Tools = {
             source: f.sourceId || 'other',
             links: [{ url: url, label: host }]
           });
-          if (!autoFetch.checked || !Net.networkAllowed()) {
+          if (!autoFetch.checked) {
             return App.save(a).then(function () { done++; log('\u2714 已创建占位记录：' + url); });
           }
           log('\u23F3 [' + (i + 1) + '/' + urls.length + '] 获取 ' + url);
-          return Fetchers.fetchInfo(url, { onLog: function () {} }).then(function (info) {
+          return Fetchers.fetchInfo(url, { forceNetwork: true, noCache: true, onLog: function () {} }).then(function (info) {
             if (info && !info.__failed) {
               a.originalTitle = info.originalTitle || '';
               a.title = (info.originalTitle || a.title).slice(0, 80);
@@ -432,7 +442,11 @@ var Tools = {
               log('\u2716 [' + (i + 1) + '] 抓取失败，已创建空白记录：' + url);
             }
             return App.save(a);
-          }).then(function () { done++; UI.renderAll(); });
+          }).then(function () {
+            done++; UI.renderAll();
+            /* 每条之间歇一下（900~1400ms）：一次粘几十个链接时别连着打站点 */
+            if (i < urls.length - 1) return new Promise(function (r) { setTimeout(r, 900 + Math.random() * 500); });
+          });
         });
       });
       chain.then(function () {
@@ -483,7 +497,6 @@ var Tools = {
     });
     startBtn.onclick = function () {
       if (running) return;
-      if (!Net.networkAllowed()) { log('\u2716 当前为「手动粘贴源码」（不联网）。请先在「联网与抓取」中选择「内置联网」。'); return; }
       cancelled = false;
       running = true; startBtn.disabled = true; ICONS.apply(startBtn, ('\u23F3 更新中 …'));
       log('共 ' + targets.length + ' 个素材有订单链接，开始逐个获取更新 …');
@@ -522,6 +535,9 @@ var Tools = {
               return App.save(a);
             }
             if (done % 20 === 0) log('… 已处理 ' + done + '/' + targets.length);
+          }).then(function () {
+            /* 每条之间歇一下（700~1200ms）：几十条订单页连着打，站点那边看起来就是爬虫 */
+            if (!cancelled) return new Promise(function (r) { setTimeout(r, 700 + Math.random() * 500); });
           });
         });
       });
@@ -661,17 +677,15 @@ var Tools = {
     var forceCk = el('input', { type: 'checkbox' });
     var runBtn = null;
     var running = false, cancelled = false;
-    var netOk = (typeof Net !== 'undefined' && Net.networkAllowed());
 
     var h = Modal.open({
       title: '更新商品信息（重新抓取商品页）', size: 'md',
       body: [
         el('div', { class: 'field-hint', text: '对选中的素材重新请求一次商品页，把商店侧的最新信息刷进来；每个素材只请求一次，并顺手刷新本地解析缓存。' }),
-        el('div', { class: 'notice' + (netOk ? '' : ' notice-warn') }, [
+        el('div', { class: 'notice' }, [
           el('p', { text: '会刷新的字段：原标题、作者 / 店铺、商品简介、标签（只增不减）、图集（只增不减）、封面外链（仅无本地封面时）、上架 / 更新时间、分类（仅当前为「其他」时）、支持角色（按标签识别）、已下架标记。' }),
           el('p', { text: '不会改动：自定义标题、角色名、本地文件与路径、购买价、备注、版本与下载文件 —— 那部分请用「批量获取更新（订单文件）」。' }),
-          el('p', { text: netOk ? '当前为内置联网模式。'
-            : '当前是「手动粘贴源码」模式：点「开始」仍会按你这次点击联网抓取一次，不会在后台自己发请求。' })
+          el('p', { text: '点「开始」会逐条强制联网（不吃本地缓存）：只在这次点击时抓取，不会在后台自己发请求。' })
         ]),
         el('div', { class: 'field-hint', text: '已选 ' + list.length + ' 项：' + targets.length + ' 项能定位到商品链接'
           + (noLink ? '；' + noLink + ' 项没有链接（跳过，可先在编辑页补上链接）' : '') + '。' }),
@@ -714,9 +728,13 @@ var Tools = {
               }
               return null;
             }
+            /* 改动前的副本：a 是库里那条对象，改完再 save 时 App.save 比不出
+             * 「标题 / 商品 ID / 分类变了」，文件夹就不会改名 / 不会跟着分类搬走 */
+            var before = null;
+            try { before = JSON.parse(JSON.stringify(a)); } catch (e2) { before = null; }
             var res = Tools.applyShopInfo(a, info, force);
             if (!res.changed.length) { okN++; log('\u00B7 [' + done + '/' + targets.length + '] ' + name + '：无变化'); return null; }
-            return App.save(a).then(function () {
+            return App.save(a, { prev: before || undefined }).then(function () {
               okN++; chgN++;
               var head = res.changed.slice(0, 7).join('、');
               log('\u2714 [' + done + '/' + targets.length + '] ' + name + '：' + head
@@ -728,8 +746,9 @@ var Tools = {
             log('\u2716 ' + name + '：' + ((e && e.message) || e));
           });
         }).then(function () {
-          /* 串行 + 220ms 间隔：一次刷几十个商品页时不至于把站点打急 */
-          if (!cancelled && i < targets.length - 1) return new Promise(function (r) { setTimeout(r, 220); });
+          /* 串行 + 900~1500ms 抖动间隔：一次刷几十个商品页时，节奏得像人在看页面，
+           * 别把站点打急（也别被当成爬虫）。220ms 那种节奏对 BOOTH 太快了。 */
+          if (!cancelled && i < targets.length - 1) return new Promise(function (r) { setTimeout(r, 900 + Math.random() * 600); });
         });
       });
       chain.then(function () {

@@ -1300,9 +1300,24 @@ var App = {
     return out;
   },
 
-  /** 执行整理：逐个移动目录并改写存储路径；返回 { moved, failed:[{name,reason}] } */
+  /** 执行整理：逐个移动目录并改写存储路径；返回 { moved, repointed, failed:[{name,reason}] }
+   *  目标位置已经有同名目录时不覆盖也不合并：如果那个目录不属于别的素材，就把记录直接指过去。
+   *  这修的是「分类搬过了、记录还指着旧位置」留下的坏记录（旧位置往往只剩一张封面图）。 */
   runCategoryCleanup: function (items, onProgress) {
-    var res = { moved: 0, failed: [] };
+    var res = { moved: 0, repointed: 0, failed: [] };
+    function pathTakenBy(assetId, abs) {
+      var want = normalizeWinPath(abs).toLowerCase();
+      return (App.assets || []).some(function (x) {
+        if (!x || x.id === assetId) return false;
+        return (x.paths || []).some(function (p) { return p && p.path && normalizeWinPath(p.path).toLowerCase() === want; });
+      });
+    }
+    function repoint(it) {
+      it.asset.paths = (it.asset.paths || []).map(function (x) {
+        return (x.path === it.hit.path) ? { path: it.to, note: it.hit.note || '存储路径' } : x;
+      });
+      return App.save(it.asset).then(function () { res.repointed++; });
+    }
     var chain = Promise.resolve();
     items.forEach(function (it, i) {
       chain = chain.then(function () {
@@ -1319,7 +1334,22 @@ var App = {
           });
           return App.save(it.asset).then(function () { res.moved++; });
         }).catch(function (e) {
-          res.failed.push({ name: it.asset.title || it.asset.id, reason: (e && e.message) || String(e) });
+          var msg = (e && e.message) || String(e);
+          /* 目标已存在：多半是之前按分类搬过、记录却还停在旧位置（旧位置剩个只有封面的空壳）。
+           * 目标不属于别的素材 → 直接把记录指过去；属于别人 → 老实报失败，绝不动别人的目录。 */
+          if (!/目标已存在/.test(msg)) {
+            res.failed.push({ name: it.asset.title || it.asset.id, reason: msg });
+            return null;
+          }
+          return FS.host.exists(it.to).then(function (kind) {
+            if (kind !== 'dir' || pathTakenBy(it.asset.id, it.to)) {
+              res.failed.push({ name: it.asset.title || it.asset.id, reason: msg });
+              return null;
+            }
+            return repoint(it);
+          }).catch(function () {
+            res.failed.push({ name: it.asset.title || it.asset.id, reason: msg });
+          });
         });
       });
     });
@@ -1748,13 +1778,22 @@ var App = {
       if (!folderPath) { warnHtml('未能创建素材存储路径，封面没写进素材文件夹（检查后端与素材库根目录）', 5600); return null; }
       var name = App.folderName(asset) + '.png';
       var dst = joinWinPath(folderPath, [name]);
-      return FS.host.exists(dst).then(function (kind) {
-        if (kind === 'file') return { path: dst, name: name, skipped: true };
-        return toPngBlob(blob).then(function (png) {
-          return FS.writeFileToPath(dst, png).then(function (ok) {
-            if (ok) { if (!quiet) Toast.ok('封面已写入素材文件夹：' + name, 3600); }
-            else warnHtml('封面写入素材文件夹失败（后端是否在线？）');
-            return ok ? { path: dst, name: name } : null;
+      /* 目录必须真的在：后端的写文件会顺手建父目录，路径一旦是「过期快照里的旧位置」，
+       * 就会在那边凭空长出一个只装着这张封面的空壳文件夹（用户看到的就是「新分类下多了个
+       * 只有图片、没有本体文件的目录」）。所以先确认目录存在，不在就什么都不写。 */
+      return FS.host.exists(folderPath).catch(function () { return 'unknown'; }).then(function (kindF) {
+        if (kindF !== 'dir') {
+          if (!quiet) warnHtml('素材文件夹不存在，封面没写进目录：' + folderPath, 6200);
+          return null;
+        }
+        return FS.host.exists(dst).then(function (kind) {
+          if (kind === 'file') return { path: dst, name: name, skipped: true };
+          return toPngBlob(blob).then(function (png) {
+            return FS.writeFileToPath(dst, png).then(function (ok) {
+              if (ok) { if (!quiet) Toast.ok('封面已写入素材文件夹：' + name, 3600); }
+              else warnHtml('封面写入素材文件夹失败（后端是否在线？）');
+              return ok ? { path: dst, name: name } : null;
+            });
           });
         });
       });
@@ -2109,6 +2148,183 @@ var App = {
       if (App.editWithin(q, t, max)) return true;
     }
     return false;
+  },
+
+  /**
+   * 「哪些磁盘文件算本体」的唯一判据（详情页「本地文件」分组 + 对账都用这一份）：
+   *   ① 本地登记的新版本（`v.local`）→ `v.fileName` 就是本体文件名；
+   *   ② 远端变体里**确实下载过**的那个主文件（名字出现在 downloadedFiles）→ 本体；
+   *   ③ 通过程序导入 / 下载过、但**没有版本归属**的文件（`downloadedFiles` 里不在任何 `versions[].files` 中的）→ 本体。
+   *     这条是为了「导入进来的新文件默认算本体」；有版本归属的交给 ②，免得同一订单里买的 DLC 被全算成本体。
+   * 其余磁盘文件一律算「额外文件 / DLC」。
+   * **`extraFiles` 里登记过的一律不算本体**：那是用户明确划成 DLC 的（拖到卡片选「附加文件」、
+   * 或在详情页手动拖到 DLC 组），优先级高于 ③ —— 否则「本体 → DLC」会被下一次对账改回去。
+   * 不能把 `versions[].files` 全算本体：没下载过的远端文件本来就不在磁盘上，
+   * 全算会每开一次详情就报一堆「本体缺失」。
+   * 一个版本只认一个主文件（`fileName` 优先，否则体积最大的非许可证文件）：
+   * 同一订单页里一起买下的 DLC 不该顶替本体，它会落到「额外文件」里。
+   */
+  localBaseEntries: function (a) {
+    var out = [], seen = Object.create(null);
+    var extraLow = Object.create(null);
+    (a.extraFiles || []).forEach(function (e) {
+      var k = String((e && e.name) || '').toLowerCase();
+      if (k) extraLow[k] = 1;
+    });
+    function push(name, v) {
+      var n = String(name || '').trim();
+      if (!n) return;
+      var k = n.toLowerCase();
+      if (extraLow[k] || seen[k]) return;
+      seen[k] = 1;
+      out.push({ name: n, version: v || null });
+    }
+    var dl = Object.create(null);
+    (a.downloadedFiles || []).forEach(function (x) { dl[String(x || '').toLowerCase()] = 1; });
+    /* 版本里登记过名字的文件归 ② 处理（一个版本只认一个主文件，其余算 DLC），
+     * ③ 只收「根本没有版本归属」的下载 / 导入记录 —— 否则同一订单里买的 DLC 会被全算成本体。 */
+    var inVersion = Object.create(null);
+    (a.versions || []).forEach(function (v) {
+      if (!v) return;
+      (v.files || []).forEach(function (f) {
+        var k = String((f && f.name) || '').toLowerCase();
+        if (k) inVersion[k] = 1;
+      });
+      var fk = String(v.fileName || '').toLowerCase();
+      if (fk) inVersion[fk] = 1;
+    });
+    function isLicense(n) { return /(^|[_\-\s（(])(licen[cs]e|copyright|readme|利用規約|規約|ライセンス|説明書?|取扱説明|はじめに|注意事項)/i.test(String(n || '')); }
+    (a.versions || []).forEach(function (v) {
+      if (!v) return;
+      if (v.local) {                                   // ① 本地登记：文件名就是磁盘上的名字
+        var ln = v.fileName || (((v.files || [])[0] || {}).name) || '';
+        if (ln) push(ln, v);
+        return;
+      }
+      var pool = (v.files || []).map(function (f) { return String((f && f.name) || ''); }).filter(Boolean);
+      if (v.fileName && pool.indexOf(v.fileName) < 0) pool.unshift(String(v.fileName));
+      var got = pool.filter(function (n) { return dl[n.toLowerCase()]; });
+      if (!got.length) return;                        // ② 一个都没下载过 → 没有本体可谈
+      /* 主文件只从「非许可证 / 非说明书」里挑：normalizeVersion 会把 files[0] 兜底成 fileName，
+       * 而 BOOTH 的 files[0] 经常是 readme —— 直接信 fileName 会把说明书当成本体。 */
+      var cand = got.filter(function (n) { return !isLicense(n); });
+      if (!cand.length) cand = got;
+      var main = '';
+      if (v.fileName && cand.indexOf(String(v.fileName)) >= 0) main = String(v.fileName);
+      if (!main) {
+        var best = cand[0], bestSize = -1;
+        cand.forEach(function (n) {
+          var f = (v.files || []).filter(function (x) { return String((x && x.name) || '') === n; })[0];
+          var sz = Number((f && f.size) || 0);
+          if (sz > bestSize) { best = n; bestSize = sz; }
+        });
+        main = best;
+      }
+      if (main) push(main, v);
+    });
+    /* ③ 导入 / 下载过、但没有版本归属的（编辑页「导入已有文件」、直链下载、审计工具「登记」都记在这里） */
+    (a.downloadedFiles || []).forEach(function (n) {
+      if (inVersion[String(n || '').toLowerCase()]) return;
+      push(n, null);
+    });
+    return out;
+  },
+
+  /**
+   * 本地文件对账：拿磁盘实况（只读顶层文件）更新记录的「额外文件」表。
+   *  - 磁盘上没有的额外文件 → 从记录里删掉（缺失项不留）；
+   *  - 磁盘上多出来、既不是本体也没登记的 → 记成额外文件（DLC），note 标「扫描补充」；
+   *  - 本体文件缺失只汇报、不从 records 里删（要能在详情页提示「本体缺失」并快速补回）。
+   * 图片（isImageFileName）不参与：那是封面 / 预览图，不算 DLC。
+   * 返回 { base, extra, missing, added, removed, changed }，changed=true 时需要落库。
+   */
+  localFileApply: function (a, diskFiles) {
+    var disk = (diskFiles || []).filter(function (f) { return f && f.name && !isImageFileName(f.name); });
+    var baseEnt = App.localBaseEntries(a);
+    var diskLow = Object.create(null);
+    disk.forEach(function (f) { diskLow[String(f.name).toLowerCase()] = f; });
+    /* 完全没有任何文件记录（早期按文件夹导入的素材）时没有「本体」可言：
+     * 这时把磁盘上除已登记的额外文件之外的全部当本体 —— 否则整条素材会显示成「没有本体、全是 DLC」，
+     * 比不分组还难懂。一旦有了版本 / 下载记录，就回到上面的判据。 */
+    var noMeta = !(a.versions || []).length && !(a.downloadedFiles || []).length;
+    if (noMeta) {
+      var knownExtra = Object.create(null);
+      (a.extraFiles || []).forEach(function (e) { knownExtra[String((e && e.name) || '').toLowerCase()] = 1; });
+      baseEnt = disk.filter(function (f) { return !knownExtra[String(f.name).toLowerCase()]; })
+        .map(function (f) { return { name: String(f.name), version: null }; });
+    }
+    var baseLow = Object.create(null);
+    baseEnt.forEach(function (b) { baseLow[b.name.toLowerCase()] = 1; });
+
+    var base = [], missing = [];
+    baseEnt.forEach(function (b) {
+      var hit = diskLow[b.name.toLowerCase()];
+      if (hit) base.push({ name: b.name, size: hit.size || 0, mtime: hit.mtime || 0, version: b.version });
+      else missing.push({ name: b.name, version: b.version });
+    });
+
+    var extras = [], seen = Object.create(null), added = 0, removed = 0, changed = false;
+    (a.extraFiles || []).forEach(function (e) {
+      var n = String((e && e.name) || '').trim();
+      if (!n) { changed = true; return; }
+      var k = n.toLowerCase();
+      if (seen[k]) { changed = true; return; }
+      seen[k] = 1;
+      var hit = diskLow[k];
+      /* 用户明确划成 DLC 的优先：即使它同时挂在某个版本上，也留在额外文件里，不再被「本体」抢回去 */
+      if (!hit) { changed = true; removed++; return; }
+      extras.push({ name: n, size: hit.size || Number(e.size) || 0, addedAt: e.addedAt || '', note: e.note || '' });
+    });
+    disk.forEach(function (f) {
+      var k = String(f.name).toLowerCase();
+      if (baseLow[k] || seen[k]) return;
+      seen[k] = 1;
+      extras.push({ name: String(f.name), size: f.size || 0, addedAt: nowISO(), note: '扫描补充' });
+      added++; changed = true;
+    });
+    extras.sort(function (x, y) {   // 最近放进来 / 新扫到的排前面，和「本地文件」页的口径一致
+      var mx = diskLow[String(x.name).toLowerCase()], my = diskLow[String(y.name).toLowerCase()];
+      return ((my && my.mtime) || 0) - ((mx && mx.mtime) || 0);
+    });
+    if (changed) a.extraFiles = extras;
+    return { base: base, extra: extras, missing: missing, added: added, removed: removed, changed: changed };
+  },
+
+  /**
+   * 只读顶层文件（不深入扫描）：本地文件对账的唯一输入。
+   * scan 的 maxDepth 传 1 —— 传 0 在后端等于「整棵树递归」，素材目录一堆贴图会被算进来。
+   * 返回 {dir, files:[{name,size,mtime}], via:'host'|'fsa', error}；error 用代号，文案由调用方出。
+   */
+  localScanFiles: function (a) {
+    var dir = App.primaryLocalPath(a);
+    if (!dir) return Promise.resolve({ dir: '', files: [], error: 'no-path' });
+    function pick(entries) {
+      return (entries || []).filter(function (e) {
+        return e && e.kind === 'file' && String(e.rel || e.name).indexOf('\\') < 0;
+      }).map(function (e) { return { name: String(e.name), size: Number(e.size) || 0, mtime: Number(e.mtime) || 0 }; });
+    }
+    return FS.hostEnsure().then(function (ok) {
+      if (ok) {
+        return FS.host.scan(dir, 1).then(function (entries) {
+          return { dir: dir, files: pick(entries), via: 'host' };
+        });
+      }
+      /* 后端离线时的降级：用库根目录句柄枚举，拿不到大小与时间，只够对账文件名 */
+      if (typeof FS.listLibraryDir !== 'function' || typeof FS.relPathFromLibrary !== 'function') {
+        return { dir: dir, files: [], error: 'offline' };
+      }
+      var relDir = FS.relPathFromLibrary(dir, '');
+      if (!relDir) return { dir: dir, files: [], error: 'offline' };
+      return FS.listLibraryDir(relDir).then(function (fsa) {
+        if (!fsa || !fsa.usable) return { dir: dir, files: [], error: 'offline' };
+        if (!fsa.exists) return { dir: dir, files: [], error: 'missing-dir' };
+        return { dir: dir, via: 'fsa', files: (fsa.names || []).map(String).map(function (n) {
+          return { name: n, size: 0, mtime: 0 };
+        }) };
+      });
+    }).catch(function (e) {
+      return { dir: dir, files: [], error: (e && e.message) || 'scan-failed' };
+    });
   },
 
   /** 磁盘对账——把存储目录里的真实文件与库里记录（downloadedFiles + 各版本 files）逐一比对。
@@ -2494,9 +2710,14 @@ var App = {
   clearSelection: function () { App.selection = Object.create(null); },
 
   /* ---------------- 保存 / 删除 ---------------- */
-  save: function (asset) {
+  /** opts.prev：改动前的快照。调用方直接在「库里那条对象」上改字段时（详情页解析并补充、
+   *  批量更新商品信息），old 与 a 是同一个对象，App.save 就比不出「改了标题 / 换了分类」，
+   *  磁盘上的文件夹便不会跟着走。这种调用点把自己的改动前副本传进来即可。 */
+  save: function (asset, opts) {
+    opts = opts || {};
     var a = Store.normalizeAsset(asset);
-    var old = App.assets.find(function (x) { return x.id === a.id; });
+    var old = opts.prev ? Store.normalizeAsset(opts.prev)
+      : App.assets.find(function (x) { return x.id === a.id; });
     /* 编号是身份，不能被空值抹掉：老调用点传进来的快照没带就沿用库里的，
      * 两边都没有才现生成（有 BOOTH 商品号的以商品号为准，见 Store.fileIdOf）。 */
     var incomingFileId = String(a.fileId || (old && old.fileId) || '').trim();
@@ -2527,42 +2748,174 @@ var App = {
       entries.push(Store.normalizeSource({ source: a.source, sourceCustom: a.sourceCustom, via: a.importedFrom || 'manual', at: nowISO() }));
     }
     a.sources = entries;
-    // 标题 / 角色名变化时，同步重命名素材库中的文件夹（尽力而为），并同步更新存储路径
-    var pre = Promise.resolve();
+    // 标题 / 角色名 / 分类变化时，同步重命名或搬动素材库中的文件夹（尽力而为），并同步更新存储路径
     var existedBefore = !!old;
-    if (old && App.folderName(old) !== App.folderName(a)) {
-      /* 改名 / 改标题前先查重：别的素材已占用同一个文件夹名就拒绝，
-       * 否则两条素材争同一个目录，写入互相覆盖。 */
-      var wantFolder = App.folderName(a);
-      var clash = App.assets.filter(function (x) {
-        return x.id !== a.id && App.folderName(x).toLowerCase() === wantFolder.toLowerCase();
-      })[0];
-      if (clash) {
-        return Promise.reject(new Error('已存在同名素材「' + (clash.title || clash.id) + '」，换个标题或角色名再保存'));
-      }
-      /* 段名取磁盘上的实际名字（存储路径末段）：导入后改过或翻译过标题的素材，
-       * 按当前标题算出的名字与目录对不上，改名会失败、路径也更新不了。 */
-      var realOld = '';
-      var oldPath = App.primaryLocalPath(old);
-      if (oldPath) realOld = oldPath.replace(/[\\/]+$/, '').replace(/^.*[\\/]/, '');
-      var oldFolder = realOld || App.folderName(old);
-      var newFolder = App.folderName(a);
-      pre = FS.renameAssetFolder(oldFolder, newFolder, App.categoryLabel(a.category), old).then(function (renamed) {
-        if (renamed) App.updatePathsForFolderName(a, oldFolder, newFolder);
-      }).catch(function (e) {
-        /* 改名尽力而为：失败也不能让保存卡住或整体失败 */
-        if (typeof console !== 'undefined' && console.warn) console.warn('[rename] 跳过：' + ((e && e.message) || e));
-        return false;
-      });
-    }
+    var pre = App.prepareFolderForSave(a, old);
     return pre.then(function () { return Store.putAsset(a); }).then(function (saved) {
       App.scheduleFileSync('assets');
       var i = App.assets.findIndex(function (x) { return x.id === saved.id; });
-      if (i >= 0) App.assets[i] = saved;
+      if (i >= 0) {
+        /* 就地更新，不换对象：详情页 / 编辑表单 / 批量条都可能还拿着这条素材的引用，
+         * 换成新对象会让它们继续保存「旧快照」——存储路径被写回旧值、分类被打回去，
+         * 于是下次写封面时后端在旧位置重建一个只有封面图的空壳目录。 */
+        var live = App.assets[i];
+        if (live !== saved) { Object.assign(live, saved); saved = live; }
+      }
       /* 只有确实新增的素材才插进列表：无条件 unshift 时，
        * 改名保存（要复制整个文件夹、耗时几秒）期间被删掉的素材会在保存完成后又回来。 */
       else if (!existedBefore) App.assets.unshift(saved);
+      /* 调用方拿的是副本（编辑表单 / 详情页改名传的快照）时也同步一份，
+       * 否则它手里的路径、分类会一直滞后于库，下一次保存又把磁盘状态覆盖回去。 */
+      if (asset && asset !== saved && typeof asset === 'object') {
+        try { Object.assign(asset, saved); } catch (e) {}
+      }
       return saved;
+    });
+  },
+
+  /** 保存前的磁盘对账（只做两件事，失败一律不阻塞保存）：
+   *  ① 存储路径别被过期快照指回一个已经不在磁盘上的目录；
+   *  ② 标题 / 角色名 / 分类变了，就把文件夹整体搬到「库根\分类\新文件夹名」。
+   *  返回 Promise<boolean> 表示有没有真的动过磁盘。 */
+  prepareFolderForSave: function (a, old) {
+    if (!old || !a) return Promise.resolve(false);
+    return App.reconcileStoragePath(a, old).then(function (fixed) {
+      /* 已经按磁盘把路径纠回来了 → 说明这次保存拿的是过期快照，
+       * 那就别再照着快照里的标题 / 分类去搬目录（会把真目录改成旧名字）。 */
+      if (fixed) return true;
+      return App.moveFolderForSave(a, old);
+    }).catch(function (e) {
+      /* 同名冲突必须抛回调用方（要拦住这次保存）；磁盘类失败只记日志，不拖住保存 */
+      if (e && e.fatal) throw e;
+      if (typeof console !== 'undefined' && console.warn) console.warn('[save] 目录对账跳过：' + ((e && e.message) || e));
+      return false;
+    });
+  },
+
+  /** 存储路径是磁盘实况：快照里那条路径如果根本不存在、而库里登记的还在，就以磁盘为准。
+   *  顺带把分类按「文件实际待在哪」修正回来 —— 这也是「解析后分类自己变了、文件却没跟着走」的兜底。
+   *  只在两条路径真的不一样时才查磁盘（路径没变就不发请求）。 */
+  reconcileStoragePath: function (a, old) {
+    var curP = App.primaryLocalPath(old);
+    var nextP = App.primaryLocalPath(a);
+    if (!curP || !nextP || curP.toLowerCase() === nextP.toLowerCase()) return Promise.resolve(false);
+    if (!FS.host || typeof FS.host.exists !== 'function') return Promise.resolve(false);
+    return FS.hostEnsure().then(function (ok) {
+      if (!ok) return false;
+      return FS.host.exists(nextP).catch(function () { return 'unknown'; }).then(function (kind) {
+        if (kind !== 'missing' && kind !== 'file') return false;   // 新路径可用 / 判断不了 → 不动
+        return FS.host.exists(curP).catch(function () { return 'unknown'; }).then(function (curKind) {
+          if (curKind !== 'dir') return false;                     // 两条都不在：按调用方的意思保存
+          var keep = (old.paths || []).filter(function (p) { return p && p.path && p.note === '存储路径'; })[0];
+          if (!keep) return false;
+          var foreign = (a.paths || []).filter(function (p) {
+            return p && p.path && normalizeWinPath(p.path).toLowerCase() !== normalizeWinPath(keep.path).toLowerCase();
+          });
+          a.paths = [{ path: keep.path, note: keep.note || '存储路径' }].concat(foreign);
+          var catId = App.categoryIdOfPath(keep.path);
+          if (catId && catId !== a.category) { a.category = catId; }
+          if (typeof console !== 'undefined' && console.warn) {
+            console.warn('[save] 快照里的存储路径不存在，已按库里的记录恢复：' + keep.path);
+          }
+          /* 说一句，别让「手填了一个还没建的路径」看起来像保存成功了 */
+          App._pathWarnAt = App._pathWarnAt || Object.create(null);
+          var lastAt = App._pathWarnAt[a.id] || 0;
+          if (typeof Toast !== 'undefined' && Toast.warn && (Date.now() - lastAt) > 60000) {
+            App._pathWarnAt[a.id] = Date.now();
+            Toast.warn('新填的存储路径在磁盘上不存在，已保留原目录：' + keep.path + '（要换位置请先建好文件夹再保存）', 7200);
+          }
+          return true;
+        });
+      });
+    });
+  },
+
+  /** 磁盘上那个素材文件夹的真实名字：存储路径的末级；没有路径才退回 folderName。 */
+  diskFolderName: function (a) {
+    var p = App.primaryLocalPath(a);
+    if (p) return String(p.replace(/[\\/]+$/, '').split('\\').pop() || '');
+    return App.folderName(a);
+  },
+
+  /** 存储路径里的分类段 → 分类 id（路径不在「库根\分类\名字」形状时返回空串） */
+  categoryIdOfPath: function (p) {
+    var s = String(p || '').replace(/[\\/]+$/, '');
+    var segs = s.split('\\');
+    var catName = String(segs[segs.length - 2] || '').toLowerCase();
+    if (!catName) return '';
+    var hit = (App.allCategories() || []).filter(function (c) {
+      return String(c.label || '').toLowerCase() === catName;
+    })[0];
+    return hit ? hit.id : '';
+  },
+
+  /** 在素材库里按 folderName 找一个真实存在的目录（当前分类优先）。找不到返回空串。
+   *  用于「记录里的存储路径已经不在了」时把素材认回磁盘上的老位置，而不是另建一个空目录。 */
+  findExistingFolder: function (a) {
+    var root = App.libraryRoot();
+    if (!root || !a) return Promise.resolve('');
+    if (!FS.host || typeof FS.host.exists !== 'function') return Promise.resolve('');
+    var name = App.folderName(a);
+    var cur = App.categoryLabel(a.category || 'other');
+    var labels = (App.allCategories() || []).map(function (c) { return c.label; })
+      .filter(function (l) { return l && l !== cur; });
+    var chain = Promise.resolve('');
+    [cur].concat(labels).forEach(function (lbl) {
+      chain = chain.then(function (hit) {
+        if (hit) return hit;
+        var p = joinWinPath(root, [lbl, name]);
+        return FS.host.exists(p).then(function (k) { return k === 'dir' ? p : ''; })
+          .catch(function () { return ''; });
+      });
+    });
+    return chain;
+  },
+
+  /** 标题 / 角色名 / 分类变了 → 把素材文件夹搬到新位置（库内整体搬，库外只改名）。
+   *  目标名优先用新的 folderName；只是换分类时保留磁盘上的真实名字（可能是 pickFreeFolderName 给的 名字_2）。 */
+  moveFolderForSave: function (a, old) {
+    var newFolder = App.folderName(a);
+    var nameChanged = App.folderName(old) !== newFolder;
+    var catChanged = String(old.category || '') !== String(a.category || '');
+    if (!nameChanged && !catChanged) return Promise.resolve(false);
+    if (nameChanged) {
+      /* 改名 / 改标题前先查重：别的素材已占用同一个文件夹名就拒绝，
+       * 否则两条素材争同一个目录，写入互相覆盖。 */
+      var clash = App.assets.filter(function (x) {
+        return x.id !== a.id && App.folderName(x).toLowerCase() === newFolder.toLowerCase();
+      })[0];
+      if (clash) {
+        var err = new Error('已存在同名素材「' + (clash.title || clash.id) + '」，换个标题或角色名再保存');
+        err.fatal = true;   // 让 prepareFolderForSave 别吞掉它
+        return Promise.reject(err);
+      }
+    }
+    var oldFolder = App.diskFolderName(old) || App.folderName(old);
+    var curPath = App.primaryLocalPath(old);
+    var root = App.libraryRoot();
+    var catLabel = App.categoryLabel(a.category);
+    /* 库内路径才搬分类目录；库外登记的位置不属于我们管，只在原地改名 */
+    var inLib = false;
+    if (curPath && root) {
+      var rl = normalizeWinPath(root).replace(/[\\/]+$/, '').toLowerCase();
+      inLib = normalizeWinPath(curPath).toLowerCase().indexOf(rl + '\\') === 0;
+    }
+    var targetName = nameChanged ? newFolder : oldFolder;
+    var dst = inLib ? joinWinPath(root, [catLabel, targetName]) : '';
+    return FS.renameAssetFolder(oldFolder, targetName, catLabel, old, dst).then(function (moved) {
+      if (!moved) return false;
+      if (inLib) {
+        /* 分类段和名字段可能一起变了：直接整条重写，别只替换末级 */
+        a.paths = (a.paths || []).map(function (p) {
+          if (!p || !p.path) return p;
+          var isStorage = (p.note === '存储路径');
+          var samePath = normalizeWinPath(p.path).toLowerCase() === normalizeWinPath(curPath).toLowerCase();
+          return (isStorage || samePath) ? { path: dst, note: p.note || '存储路径' } : p;
+        });
+      } else {
+        App.updatePathsForFolderName(a, oldFolder, targetName);
+      }
+      return true;
     });
   },
   /** 素材编号：好友导出/导入时用来判定「是不是同一份」 */
@@ -3282,10 +3635,11 @@ var UI = {
   /* ---------------- 一屏容量 ----------------
    * 目标：每页尽量铺满一屏，不用滚动就能看全，分页条落在页面底部。
    *
-   * 做法：画完这一页后**逐张**量「这张卡的下沿落在哪」。完整落在可视区里的都留下，
+   * 做法：画完这一页后**逐张**量「这张卡的下沿落在哪」。落在可视区里的都留下，
    * 第一张探出可视区的卡以及它后面的卡一起翻到下一页 —— 按「张」切，不按「行」切。
-   * 而且允许最后一排探出去一点（见下面的 TOL）：一屏只剩小半行时，为了那点像素
-   * 把整排推到下一页，底部空得更多。真正「整排都在屏幕外」的才翻下去。
+   * 允许最后一排探出**卡高的 80%**（见下面的 TOL）：只有当「超出部分 > 卡高的 80%」
+   * 也就是「露出来的不到卡高的 20%」时才翻页。只为了底部那点缝隙把整排推走，
+   * 页面底部会空掉一整排 —— 那才是真的难看（用户原话「这个页面还是空了好多」）。
    *
    * 为什么不再按行估算：卡片内容多少不一，同一行会被最高的那张撑高，一屏常常剩
    * 大半行的高度；整行丢到下一页，底部就空一大片（用户原话「卡片没塞满」）。
@@ -3294,6 +3648,10 @@ var UI = {
    * 反方向也要能长回来：窗口拉高 / 列数变多 / 卡片变小之后，旧张数会明显少于一屏，
    * 所以「一页画满且全都放得下」时按实测行高再补整数行 —— 这一段是估算，
    * 多补了下一帧量出来会自己收回去（收敛，不会来回抖）。 */
+
+  /* 抖动保护：上一次「加排后实测放不下」的张数，{ key, size, at }。初值 null 即可。 */
+  _fitReject: null,
+
   fitGrid: function (grid, pi) {
     if (!grid || !pi || UI._fitBusy) return;
     /* 列表视图一行就 92px，一屏能放六七条，翻页比滚动更烦 —— 维持原来的分页方式 */
@@ -3321,15 +3679,22 @@ var UI = {
       return node.getBoundingClientRect().bottom - mrect.top - borderT + scrolled;
     }
     var PAD_NOPAGER = 16, PAD_PAGER = 72;     // 与 styles.css 的 .main / body.has-pager .main 对齐
-    /* 允许最后一行「探出」一点点：一屏只剩小半行时，为了那几十像素把整排卡推到下一页，
-     * 底部反而空得更多。探出来的部分滚一下就看见了，再往下的行才翻页。
-     * 上限取「1/3 行高」且不超过 56px —— 再多就变成每页都要滚一大截了。 */
-    var rowProbe = 0;
-    for (var p = 0; p < Math.min(shown, cols); p++) {
+    /* 一排多高：取最后一排里最高的那张（可能就是残缺的一排）。网格行是 stretch 的，
+     * 同一排的卡一样高；用最后一排来算「再加一排会探出多少」最贴近实际情况。
+     * rowHMax 是整页最高的那一排：估「能不能再加一排」时用它 —— 排版是 masonry 式的，
+     * 各排高度可以差几十像素，按较矮的最后一排估会多加一排，下一帧又收回去，来回闪。 */
+    var rowH = 0, rowHMax = 0;
+    for (var p = 0; p < shown; p++) {
       var ph = cards[p].getBoundingClientRect().height;
-      if (ph > rowProbe) rowProbe = ph;
+      if (ph > rowHMax) rowHMax = ph;
+      if (p >= shown - cols && ph > rowH) rowH = ph;
     }
-    var TOL = Math.round(Math.min(rowProbe * 0.35, 56)) || 0;
+    if (!rowH) rowH = rowHMax;
+    /* 只有「超出部分 > 卡高的 80%」才翻页 —— 等价于「还能露出卡高的 20% 就留下这一排」。
+     * 卡高 ~210px 时，底部剩 40px 也照样把下一排画出来：滚一点点就能看全，
+     * 比空着大半屏强。旧规则是「最多探出 1/3 行高、且不超过 56px」，卡的尺寸一大
+     * 就只剩几十像素的容忍度，底部于是总空着一整排。 */
+    var TOL = Math.round(rowH * 0.8) || 0;
     /* 可视区下沿（同一套内容坐标）：clientHeight 含 padding，要把底部留白扣掉 */
     function fitCount(padB) {
       var limit = main.clientHeight - padB + TOL;   // +TOL：允许最后一排探出去一点
@@ -3348,30 +3713,48 @@ var UI = {
     var fit = single ? nNoPager : fitCount(PAD_PAGER);
     var cap;
 
+    /* 「估算能多放一排、实测放不下」时记一笔：新那一排的卡比上一排高就会出现，
+     * 而收回去之后又会估出同一个张数 —— 不收住的话 body 每帧重绘一次（一直闪）。
+     * 窗口 / 列数 / 视图 / 卡片尺寸变了就重新学（key 不同即作废）。 */
+    var fitKey = main.clientWidth + 'x' + main.clientHeight + '/c' + cols + '/'
+      + App.settings.view + '/' + (App.settings.cardSize || 'm');
+    if (UI._fitReject && UI._fitReject.key !== fitKey) UI._fitReject = null;
+    var rejected = !!(UI._fitReject && Date.now() - UI._fitReject.at < 60000);
+
     if (shown < size) {
       /* 这一页没画满（最后一页）：放得下就什么都别改 —— 拿不满的一页去量容量，
        * 量出来的永远等于「已经画出来的张数」，会把每页张数越算越小。
        * 只有真的溢出了才收一下（例：首帧按兜底 24 张画，而一屏只放得下 16 张）。 */
       if (fit >= shown) return;
       cap = fit;
+      UI._fitReject = { key: fitKey, size: size, at: Date.now() };
+      rejected = true;
     } else {
       cap = fit;
+      /* 画满了却放不下：说明这一页张数偏大（首帧兜底 / 估算多给了一排），收回去并记一笔，
+       * 免得下一帧又按同样的估算长回来 */
+      if (cap < shown) {
+        UI._fitReject = { key: fitKey, size: size, at: Date.now() };
+        rejected = true;
+      }
       /* 这一页画满了、而且全都放得下 —— 说明还有余量，往回收一点空间： */
       if (cap === shown) {
         /* 1) 最后一行没排满：同一排的卡不额外占高度，补满它几乎不花空间 */
+        var baseCap = cap;
         var rest = shown % cols;
-        if (rest) cap += cols - rest;
-        /* 2) 下面还够一整行（含行距）才继续加，半个行高不加，免得来回抖 */
-        var rowH = 0;
-        for (var k = Math.max(0, shown - cols); k < shown; k++) {
-          var h = cards[k].getBoundingClientRect().height;
-          if (h > rowH) rowH = h;
-        }
-        if (rowH > 0) {
+        if (rest) baseCap += cols - rest;
+        /* 2) 再往下还能放几排：按同一套容忍度估算（TOL）。少估一排，这一页底部
+         *    就白空一排 —— 那正是要修的问题，所以估算和实测必须用同一个 TOL。
+         *    行高取「整页最高那排」：按较矮的最后一排估会多加一排，下一帧又收回去。 */
+        var grownCap = baseCap;
+        var estH = rowHMax || rowH;
+        if (estH > 0) {
           var spare = (main.clientHeight - pb + TOL) - bottomOf(cards[shown - 1]);
-          var addRows = Math.floor((spare + gap) / (rowH + gap));
-          if (addRows > 0) cap += addRows * cols;
+          var addRows = Math.floor((spare + gap) / (estH + gap));
+          if (addRows > 0) grownCap += addRows * cols;
         }
+        if (grownCap > baseCap && rejected && UI._fitReject.size === grownCap) grownCap = baseCap;
+        cap = grownCap;
       }
     }
     /* 再挤也得留一整行：比一行还少就没法看了（窗口高度小于一行时才会到这） */
@@ -3725,10 +4108,8 @@ var UI = {
       }, '开源'));
     }
 
-    // 封面右下角：发布 / 上架日期（有记录才显示）
-    if (a.publishedAt) {
-      cover.appendChild(el('span', { class: 'cover-date', title: '发布 / 上架日期：' + fmtDate(a.publishedAt) }, fmtDate(a.publishedAt)));
-    }
+    /* 封面上不再挂「上架日期」：小卡片本身就没多少空间，日期挤在右下角只是噪声。
+     * 日期仍然完整保留在详情页「商品信息」与编辑表单里，需要的时候能查、能改。 */
 
     cover.appendChild(el('button', {
       class: 'fav-btn' + (a.favorite ? ' on' : ''),
@@ -3778,23 +4159,46 @@ var UI = {
         }, [App.categoryIcon(a.category, { size: 13 }), document.createTextNode(App.categoryLabel(a.category))]),
         srcTag,
       ]),
-      (a.avatars || []).length ? el('div', { class: 'card-avatars' },
-        App.normalizeAvatarIds(App.filterAvatars(a)).slice(0, 4).map(function (v) {
-          var avLabel = App.avatarLabel(v);
+      (function () {
+        /* 角色 chip：以前固定塞 4 枚 + 「+N」，名字一长 flex 就把每枚压成「威…」，
+         * 末尾的 +N 还会被卡片右边裁掉半截（用户截图就是这个）。
+         * 现在按卡片内宽做预算：能完整放下几枚就放几枚，放不下的折成 +N，一枚都不压缩。 */
+        var avList = App.normalizeAvatarIds(App.filterAvatars(a));
+        if (!avList.length) return null;
+        var inner = ({ s: 140, m: 198, l: 266 }[App.settings.cardSize] || 198) - 2;
+        var GAP = 4, MAX_N = 4;
+        function wpx(label) {
+          var w = 18;   // 左右内边距 + 边框
+          for (var i = 0; i < label.length; i++) w += /[\u0000-\u00ff]/.test(label.charAt(i)) ? 6 : 11;
+          return w;
+        }
+        var shown = [], used = 0;
+        for (var i = 0; i < avList.length && shown.length < MAX_N; i++) {
+          var lab = String(App.avatarLabel(avList[i]) || '');
+          var wNow = wpx(lab);
+          var gapN = shown.length ? GAP : 0;
+          var left = avList.length - i - 1;
+          var reserve = left > 0 ? wpx('+' + left) + GAP : 0;   // 还要给 +N 留出位置
+          if (shown.length && used + gapN + wNow + reserve > inner) break;
+          shown.push(avList[i]);
+          used += gapN + wNow;
+        }
+        var rest = avList.length - shown.length;
+        var nodes = shown.map(function (v) {
           return el('span', {
             class: 'chip chip-av chip-click' + (App.filters.avatars.indexOf(v) >= 0 ? ' chip-on' : ''),
             dataset: { fk: 'av', fv: v },
             title: UI.avChipTitle(v, App.filters.avatars.indexOf(v) >= 0),
             onclick: function (e) { e.stopPropagation(); UI.filterFromCard(a, function () { UI.filterOnly('avatars', v); }); }
-          }, avLabel);
-        })
-          .concat(a.avatars.length > 4 ? [el('span', {
-            class: 'chip chip-av chip-more',
-            /* 悬停显示被收起的角色，避免只有一个没有说明的 +N */
-            title: '另有 ' + (a.avatars.length - 4) + ' 个支持角色：' +
-              App.normalizeAvatarIds(App.filterAvatars(a)).slice(4).map(App.avatarLabel).join('、')
-          }, '+' + (a.avatars.length - 4))] : [])
-      ) : null,
+          }, App.avatarLabel(v));
+        });
+        if (rest > 0) nodes.push(el('span', {
+          class: 'chip chip-av chip-more',
+          /* 悬停显示被收起的角色，避免只有一个没有说明的 +N */
+          title: '另有 ' + rest + ' 个支持角色：' + avList.slice(shown.length).map(App.avatarLabel).join('、')
+        }, '+' + rest));
+        return el('div', { class: 'card-avatars' }, nodes);
+      })(),
       (function () {
         var all = App.displayTags(a);
         if (!all.length) return null;

@@ -152,6 +152,8 @@ var FS = (function () {
     },
     /** 删除本地文件 / 目录；后端带安全阀，拒绝盘符根与短路径 */
     remove: function (p) { return hostCall('/api/delete', { path: p }); },
+    /** 移进系统回收站（可撤回）。后端不支持 / 回收站不可用时 reject，调用方决定要不要退回 remove */
+    trash: function (p) { return hostCall('/api/trash', { path: p }); },
     /** 下载进度：后端统一返回 {ok, job:{received,total,speed,…}}，这里摊平成一层供 88-download.js 直接读。 */
     downloadProgress: function (jobId) {
       return hostCall('/api/downloadProgress', { jobId: jobId }).then(function (r) {
@@ -539,41 +541,44 @@ var FS = (function () {
     });
   }
 
-  /** 素材文件夹改名：标题或角色名改完后同步磁盘目录。
+  /** 绝对路径 → 相对素材库根的分段；不在库根下面返回 null（浏览器兜底只能操作库内目录） */
+  function relSegsFromRoot(abs) {
+    var root = String(App.libraryRoot() || '').replace(/[\\/]+$/, '');
+    var s = String(abs || '').replace(/[\\/]+$/, '');
+    if (!root || !s) return null;
+    if (s.toLowerCase().indexOf(root.toLowerCase() + '\\') !== 0) return null;
+    return s.slice(root.length + 1).split(/[\\/]+/).filter(Boolean);
+  }
+
+  /** 按分段取目录句柄；create=true 时逐级创建（浏览器兜底用） */
+  async function dirBySegs(root, segs, create) {
+    var dir = root;
+    for (var i = 0; i < segs.length; i++) {
+      dir = await dir.getDirectoryHandle(segs[i], { create: !!create });
+    }
+    return dir;
+  }
+
+  /** 目录句柄整树下复制（浏览器兜底用） */
+  async function copyDirTree(src, dst) {
+    for await (var entry of src.values()) {
+      if (entry.kind === 'file') {
+        var f = await entry.getFile();
+        var fh = await dst.getFileHandle(entry.name, { create: true });
+        var w = await fh.createWritable(); await w.write(f); await w.close();
+      } else {
+        var sub = await dst.getDirectoryHandle(entry.name, { create: true });
+        await copyDirTree(entry, sub);
+      }
+    }
+  }
+
+  /** 素材文件夹改名 / 换分类：标题改完、分类改完都要同步磁盘目录。
    *  源目录必须取素材自己的存储路径——磁盘文件夹名保留的是导入时的原标题，
    *  用当前标题重建多半根本不存在，后端只会报「源不存在」。
+   *  dstAbs 可选：给了就搬到这个绝对路径（换分类 = 分类段也一起换），不给就只在原父目录里改名。
    *  后端在线却失败时明说原因，不再静默退回浏览器复制 + 删除。 */
-  function renameAssetFolder(oldName, newName, categoryLabel, asset) {
-    if (!oldName || oldName === newName) return Promise.resolve(false);
-    function browserRename() {
-      return getLibraryRoot().then(function (root) {
-        if (!root) return false;
-        return ensurePermission(root, 'readwrite').then(function (ok) {
-          if (!ok) return false;
-          return root.getDirectoryHandle(categoryLabel, { create: true }).then(async function (catDir) {
-            try {
-              var oldDir = await catDir.getDirectoryHandle(oldName);
-              var newDir = await catDir.getDirectoryHandle(newName, { create: true });
-              async function copy(src, dst) {
-                for await (var entry of src.values()) {
-                  if (entry.kind === 'file') {
-                    var f = await entry.getFile();
-                    var fh = await dst.getFileHandle(entry.name, { create: true });
-                    var w = await fh.createWritable(); await w.write(f); await w.close();
-                  } else {
-                    var sub = await dst.getDirectoryHandle(entry.name, { create: true });
-                    await copy(entry, sub);
-                  }
-                }
-              }
-              await copy(oldDir, newDir);
-              try { await catDir.removeEntry(oldName, { recursive: true }); } catch (e) {}
-              return true;
-            } catch (e) { return false; }
-          }).catch(function () { return false; });
-        });
-      });
-    }
+  function renameAssetFolder(oldName, newName, categoryLabel, asset, dstAbs) {
     var rootPath = App.libraryRoot();
     /* 源目录优先取素材自己的存储路径；没有才退回「根目录 + 分类 + 旧名」 */
     var curPath = '';
@@ -586,8 +591,31 @@ var FS = (function () {
       parentDir = joinWinPath(rootPath, [categoryLabel]);
       oldAbs = joinWinPath(parentDir, [oldName]);
     }
-    var newAbs = joinWinPath(parentDir, [newName]);
+    var newAbs = String(dstAbs || '') ? String(dstAbs).replace(/[\\/]+$/, '') : joinWinPath(parentDir, [newName]);
     if (oldAbs.toLowerCase() === newAbs.toLowerCase()) return Promise.resolve(false);
+    function browserRename() {
+      return getLibraryRoot().then(function (root) {
+        if (!root) return false;
+        return ensurePermission(root, 'readwrite').then(function (ok) {
+          if (!ok) return false;
+          var fromSegs = relSegsFromRoot(oldAbs);
+          var toSegs = relSegsFromRoot(newAbs);
+          /* 库外路径（或没配库根）时按「分类 + 名字」拼，兼容旧行为 */
+          if (!fromSegs) fromSegs = [categoryLabel, oldName].filter(Boolean);
+          if (!toSegs) toSegs = [categoryLabel, newName].filter(Boolean);
+          return dirBySegs(root, fromSegs, false).then(function (srcDir) {
+            return dirBySegs(root, toSegs, true).then(function (dstDir) {
+              return copyDirTree(srcDir, dstDir).then(function () {
+                /* 源目录逐级删（只删我们搬走的那个），父目录留着 */
+                return dirBySegs(root, fromSegs.slice(0, -1), false).then(function (p) {
+                  return p.removeEntry(fromSegs[fromSegs.length - 1], { recursive: true }).catch(function () {});
+                });
+              }).then(function () { return true; });
+            });
+          }).catch(function () { return false; });
+        });
+      });
+    }
     /* 改名只是顺手同步磁盘目录，不能拖住保存：后端 8 秒不应答就放行，
      * 旧目录本来就缺失时也只提示一句，不拿红字吓人。 */
     var TIMEOUT = { timeout: true };
@@ -605,8 +633,8 @@ var FS = (function () {
       if (!ok) return browserRename();                       // 后端确实离线 → 才用浏览器实现
       return withTimeout(Host.move(oldAbs, newAbs), 8000).then(function (r) {
         if (r === TIMEOUT) {
-          if (typeof console !== 'undefined' && console.warn) console.warn('[rename] 后端改名超时：' + oldAbs + ' → ' + newAbs);
-          if (typeof Toast !== 'undefined' && Toast.info) Toast.info('文件夹改名没完成（后端没有应答），素材信息已保存', 5000);
+          if (typeof console !== 'undefined' && console.warn) console.warn('[rename] 后端搬家超时：' + oldAbs + ' → ' + newAbs);
+          if (typeof Toast !== 'undefined' && Toast.info) Toast.info('文件夹没搬完（后端没有应答），素材信息已保存', 5000);
           return false;
         }
         return true;
@@ -614,12 +642,15 @@ var FS = (function () {
         /* 后端在线却失败就明说原因：此时再回退到复制 + 删除，
          * 源路径不存在时只会留下半成品。 */
         var msg = (err && err.message) || String(err);
-        if (typeof console !== 'undefined' && console.warn) console.warn('[rename] 后端改名失败：' + msg + '（' + oldAbs + ' → ' + newAbs + '）');
-        if (/ENOENT|not found|不存在|no such file/i.test(msg)) {
+        if (typeof console !== 'undefined' && console.warn) console.warn('[rename] 后端搬家失败：' + msg + '（' + oldAbs + ' → ' + newAbs + '）');
+        if (/目标已存在/.test(msg)) {
+          /* 目标分类下已经有一个同名目录：不动它，也不合并，只提示 */
+          if (typeof Toast !== 'undefined' && Toast.warn) Toast.warn('目标位置已有同名文件夹，没敢覆盖，文件仍留在：' + oldAbs, 6800);
+        } else if (/ENOENT|not found|不存在|no such file/i.test(msg)) {
           /* 旧目录本来就不在磁盘上（多半已被手动改名/移走）：不算故障，保存照常进行 */
           if (typeof Toast !== 'undefined' && Toast.info) Toast.info('旧目录不在磁盘上（可能已手动改名），本次只保存素材信息，路径未改动。', 5200);
         } else if (typeof Toast !== 'undefined' && Toast.warn) {
-          Toast.warn('文件夹改名没成功（后端：' + msg + '）：素材库里的目录仍是旧名，可手动改名后重新登记路径。', 6000);
+          Toast.warn('文件夹没搬成功（后端：' + msg + '）：素材库里的目录仍是旧位置，可手动挪好后重新登记路径。', 6000);
         }
         return false;
       });

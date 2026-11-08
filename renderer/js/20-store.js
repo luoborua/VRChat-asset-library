@@ -79,6 +79,18 @@ var Store = (function () {
     };
   }
 
+  /** 额外文件（DLC / 补丁 / 说明书）：只记磁盘上真实存在的那些，本体不进这张表 */
+  function normalizeExtraFile(e) {
+    if (typeof e === 'string') return { name: e, size: 0, addedAt: '', note: '' };
+    e = e || {};
+    return {
+      name: String(e.name || '').trim(),
+      size: Number(e.size) || 0,
+      addedAt: e.addedAt || '',
+      note: e.note || ''
+    };
+  }
+
   /** 图集去重：同一张图的 /c/WxH/ 缩略版与原图视为一张，保留原图 */
   function dedupeImages(list) {
     function key(u) {
@@ -165,6 +177,9 @@ var Store = (function () {
       downloadLinks: Array.isArray(a.downloadLinks) ? a.downloadLinks.slice() : [], // 下载直链
       cloudUrl:      typeof a.cloudUrl === 'string' ? a.cloudUrl : '',              // 网盘路径或分享链接
       downloadedFiles: Array.isArray(a.downloadedFiles) ? a.downloadedFiles.slice() : [],  // 成功下载过的文件名：后端与目录句柄都不可用时用来兜底按钮状态
+      /* 额外文件（DLC / 补丁 / 说明书）：本体之外、磁盘上真实存在的文件。
+       * 详情页「本地文件」据此把本体与 DLC 分成两组，重新扫描时按磁盘实况增删。 */
+      extraFiles:    Array.isArray(a.extraFiles) ? a.extraFiles.map(normalizeExtraFile).filter(function (e) { return !!e.name; }) : [],
       versions:      Array.isArray(a.versions) ? a.versions.map(normalizeVersion) : [],       // 版本 / 变体
       activeVersion: a.activeVersion || '',                                                   // 单个已购版本 id（多版本用 activeVersions）
       activeVersions: Array.isArray(a.activeVersions) ? uniq(a.activeVersions)

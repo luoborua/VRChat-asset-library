@@ -835,9 +835,27 @@ var Fetchers = (function () {
     });
   }
 
-  /** 统一入口：先查本地缓存，未命中再按当前方案抓取，成功后写回缓存 */
+  /** 同步判断「这个站存过 Cookie 吗」——只查有没有、不解密。
+   *  用来拦住无意义的自动抓取：没 Cookie 就读不到订单页，商品页那几次请求跑了也白跑。 */
+  function hasCred(url) {
+    var host = hostOf(url);
+    var creds = (App.settings.credentials) || {};
+    var keys = Object.keys(creds);
+    for (var i = 0; i < keys.length; i++) {
+      var c = creds[keys[i]];
+      if (!c || !c.cookie) continue;
+      if (!host) return true;
+      if (host === keys[i] || host.slice(-(keys[i].length + 1)) === '.' + keys[i]) return true;
+    }
+    return false;
+  }
+
+  /** 统一入口：按当前方案抓取并解析。
+   *  调用方默认就是「强制联网」（普通填充已移除）—— 不传 forceNetwork 也按强制处理，
+   *  免得新增的调用点又悄悄回到「吃缓存 + 只填空值」的老路上。 */
   function fetchInfo(url, ctx) {
     ctx = ctx || {};
+    if (ctx.forceNetwork === undefined) ctx = Object.assign({ forceNetwork: true, noCache: true }, ctx);
     var log = ctx.onLog || function () {};
     return Store.cacheGet(url).then(function (cached) {
       // forceNetwork 表示调用方明确要求联网刷新，必须绕过缓存
@@ -950,8 +968,52 @@ var Fetchers = (function () {
     return false;
   }
 
+  /* ---------- 商品输入归一 ----------
+   * 编辑页的「强制联网填充」和详情页的「从商品链接补充信息」共用这一处：
+   * 允许用户只填数字商品 ID（BOOTH 的商品号就是纯数字），也接受漏了协议头的链接、
+   * 以及 Gumroad 的短码。返回按优先级排好的候选完整链接；空数组表示认不出来。 */
+  function productCandidates(raw) {
+    var s = String(raw || '').trim();
+    if (!s) return [];
+    if (/^https?:\/\//i.test(s)) return [s];
+    s = s.replace(/^\/+/, '');
+    if (/^\d{4,15}$/.test(s)) {
+      /* BOOTH 商品号：ja 页的 JSON 与界面语言无关，放第一个；zh-cn 作为同商品的重试。
+       * 不再拿纯数字去试 Gumroad —— 那边是字母数字短码，试了只会多等一次超时。 */
+      return ['https://booth.pm/ja/items/' + s, 'https://booth.pm/zh-cn/items/' + s];
+    }
+    /* 少了 https:// 的链接：booth.pm/ja/items/123、www.example.com/p/1 */
+    if (/^[a-z0-9.-]+\.[a-z]{2,}(\/|$)/i.test(s)) return ['https://' + s];
+    /* 纯字母数字短码：按 Gumroad 短链试一次（BOOTH 商品号一定是纯数字，走不到这） */
+    if (/^[A-Za-z0-9][A-Za-z0-9_.=-]{0,100}$/.test(s)) return ['https://gumroad.com/l/' + encodeURIComponent(s)];
+    return [];
+  }
+
+  /** fetchInfo + 超时。试探「用户可能填错的候选链接」时用：编号写错时后端可能长时间不返回，
+   *  超时按失败处理（返回 __failed，reason=timeout），调用方才能继续试下一个或给出提示，
+   *  不至于让按钮永远停在「解析中…」。 */
+  function fetchInfoTimed(url, ctx, ms) {
+    return new Promise(function (resolve, reject) {
+      var done = false;
+      var timer = setTimeout(function () {
+        if (done) return;
+        done = true;
+        resolve({ __failed: true, reason: 'timeout', tried: [] });
+      }, ms || 12000);
+      fetchInfo(url, ctx).then(function (v) {
+        if (done) return;
+        done = true; clearTimeout(timer); resolve(v);
+      }, function (e) {
+        if (done) return;
+        done = true; clearTimeout(timer); reject(e);
+      });
+    });
+  }
+
   return {
     register: register, detect: detect, fetchInfo: fetchInfo, fetchTitle: fetchTitle,
+    hasCred: hasCred,
+    productCandidates: productCandidates, fetchInfoTimed: fetchInfoTimed,
     parsePasted: parsePasted, parseGeneric: parseGeneric, emptyInfo: emptyInfo,
     ghParseRepo: ghParseRepo, ghFromJSON: ghFromJSON,   // GitHub 来源（供详情页与冒烟使用）
     cleanTags: cleanTags, finalize: finalize, extractVariations: extractVariations,

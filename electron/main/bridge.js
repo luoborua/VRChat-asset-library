@@ -49,6 +49,7 @@ function buildRoutes() {
     '/api/writeFile': p => fsApi.writeFile(p),
     '/api/mkdir': p => fsApi.mkdir(p),
     '/api/delete': p => fsApi.remove(p),
+    '/api/trash': p => fsApi.trash(p),
     '/api/move': p => fsApi.move(p),
     '/api/copy': p => fsApi.copy(p),
     '/api/open': p => fsApi.open(p),

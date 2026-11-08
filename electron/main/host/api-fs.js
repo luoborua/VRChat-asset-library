@@ -1,4 +1,4 @@
-/* 文件系统接口：exists / readText / readFileBase64 / writeFile / mkdir / remove /
+/* 文件系统接口：exists / readText / readFileBase64 / writeFile / mkdir / remove / trash /
  * move / copy / open / scan，返回体与宿主 HTTP 接口同一形状。
  * 与谁交互：bridge.js 与 server.js 的路由表按整个 payload 调用；写入前过 guard 的路径护栏。
  * 边界：不判业务、不决定路径归属；超限读取直接报错，让调用方改用复制 / 下载 / 素材包。
@@ -73,6 +73,20 @@ async function remove({ path: p }) {
   }
   guard.assertWritable(s);
   await fsp.rm(s, { recursive: true, force: true });
+  return { ok: true, path: s };
+}
+
+/** 移进系统回收站（可撤回）。用在「本地文件」删错文件这类用户明确要删、但可能后悔的动作上。
+ *  护栏与 remove 一样；回收站不可用时抛错，由渲染层问用户要不要改成永久删除。 */
+async function trash({ path: p }) {
+  const s = String(p || '');
+  if (!s) throw new Error('缺少 path');
+  if (/^[a-zA-Z]:[\\/]?$/.test(s) || s.replace(/[\\/]+/g, '').length < 4) {
+    throw new Error('拒绝删除：路径过短或为盘符根（' + s + '）');
+  }
+  guard.assertWritable(s);
+  if (!(await pathExists(s))) throw new Error('文件已经不在了：' + s);
+  await shell.trashItem(s);
   return { ok: true, path: s };
 }
 
@@ -152,4 +166,4 @@ function isDirectorySync(p) {
   try { return fs.statSync(p).isDirectory(); } catch { return false; }
 }
 
-module.exports = { mkdirp, exists, readText, readFileBase64, writeFile, mkdir, remove, move, copy, open, scan, isDirectorySync };
+module.exports = { mkdirp, exists, readText, readFileBase64, writeFile, mkdir, remove, trash, move, copy, open, scan, isDirectorySync };

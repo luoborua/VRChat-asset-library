@@ -6,6 +6,9 @@
 
 var Modals = {
 
+  /** 详情页「版本与下载」上次停在哪个切页（true=本地文件）：原地刷新时回到那一页，不把人甩回「链接」 */
+  _localTab: false,
+
   /**
    * 素材变更后的统一刷新入口：
    * 能原地刷新就只换目标卡片，否则整页重渲染并重新定位；同时负责关闭或重开详情。
@@ -39,7 +42,7 @@ var Modals = {
        * 否则只保留上面已完成的网格刷新，绝不碰别人的弹窗。 */
       var top = Modal.stack && Modal.stack.length ? Modal.stack[Modal.stack.length - 1] : null;
       var sameDetail = !!(top && top.kind === 'detail' && target && target.id && App.detailAssetId === target.id);
-      if (sameDetail) Modals.detail(target.id, top, { noAutoEnrich: true });
+      if (sameDetail) Modals.detail(target.id, top, { noAutoEnrich: true, keepTab: true });
       return;
     }
     if (target && target.id) {
@@ -334,7 +337,6 @@ var Modals = {
     // 「获取更新」常驻：先补缺失文件，之后用来刷新已解析文件（含作者新上传的）
     /** 抓商品页：BOOTH 走公开 JSON，Gumroad 走商品页 data-page，抓不到返回 null */
     function fetchItemInfo() {
-      if (typeof Net === 'undefined' || !Net.networkAllowed()) return Promise.resolve(null);
       var itemId = String(a.itemId || '').trim();
       if (a.source === 'booth' && itemId) {
         var url = 'https://booth.pm/ja/items/' + itemId + '.json';
@@ -358,10 +360,15 @@ var Modals = {
       || (a.links || []).some(function (l) { return isHttpUrl(l.url); });
     var fetchOrderBtn = canUpdate ? el('button', {
       class: 'btn btn-xs btn-parse', type: 'button',
-      title: '重新解析这条素材的商品页与订单页：刷新所有变体（含免费变体）的下载文件、未购变体的当前价，并补上作者新增的变体与免费下载',
+      title: '重新解析这条素材的商品页与订单页（刷新变体文件 / 未购价 / 新变体），并重新对账本地目录（缺失的移除、多出来的记进额外 DLC）',
       onclick: function () {
         var targets = purchasedVer.slice();
         fetchOrderBtn.disabled = true; ICONS.apply(fetchOrderBtn, ('\u23F3 获取更新 …'));
+        /* 本地目录也要一起对账：文件早被移动 / 删掉了，光刷链接会得到一份「记录里有、磁盘上没有」的假清单。
+         * 不深入扫描，只读顶层文件名。失败（离线 / 盘不在）不影响联网那半。 */
+        var localP = rescanLocal({ force: true }).catch(function () {
+          return { ok: false, error: '对账失败', added: 0, removed: 0, missing: [], baseN: 0, extraN: 0 };
+        });
         var urls = uniq(targets.map(function (v) { return v.orderUrl; }).filter(Boolean));
         var orderP = Promise.all(urls.map(function (url) {
           return Net.fetchText(url, { forceNetwork: true, onLog: function () {} }).then(function (r) {
@@ -390,9 +397,9 @@ var Modals = {
             return { url: url, item: mine || null };
           }).catch(function () { return { url: url, item: null }; });
         }));
-        // 订单页（已购变体的文件）+ 商品页（免费变体文件 / 未购当前价 / 新变体 / 公开下载链接）一起刷
-        Promise.all([orderP, fetchItemInfo()]).then(function (pack2) {
-          var results = pack2[0] || [], info = pack2[1];
+        // 订单页（已购变体的文件）+ 商品页（免费变体文件 / 未购当前价 / 新变体 / 公开下载链接）+ 本地目录对账 一起处理
+        Promise.all([orderP, fetchItemInfo(), localP]).then(function (pack3) {
+          var results = pack3[0] || [], info = pack3[1], lres = pack3[2] || null;
           var shop = info ? Importer.mergeItemInfo(a, info) : null;
           var byUrl = Object.create(null), failed = 0;
           results.forEach(function (r) { if (r && r.item) byUrl[r.url] = r.item; else failed++; });
@@ -410,7 +417,15 @@ var Modals = {
           });
           var back = function () { fetchOrderBtn.disabled = false; ICONS.apply(fetchOrderBtn, ('\u{1F504} 获取更新')); };
           var shopN = shop ? (shop.files + shop.priced + shop.added + shop.links) : 0;
-          if (!touched && !shopN) {
+          var localTxt = '';
+          if (lres && lres.ok) {
+            localTxt = (lres.added || lres.removed)
+              ? ('；本地：新增 ' + lres.added + ' 个文件、移除 ' + lres.removed + ' 条失效记录')
+              : ('；本地已核对（本体 ' + lres.baseN + '、DLC ' + lres.extraN + '）');
+            if (lres.missing && lres.missing.length) localTxt += '；本体缺失 ' + lres.missing.length + ' 个';
+          }
+          var localChanged = !!(lres && lres.ok && (lres.added || lres.removed));
+          if (!touched && !shopN && !localChanged) {
             back();
             Toast.err(targets.length
               ? '未解析到更新：订单页可能需要已登录的 Cookie（设置 → 联网与抓取），或该 Gumroad 下载链接已过期。'
@@ -419,7 +434,7 @@ var Modals = {
           }
           if (!added && !changed && !shopN) {
             back();
-            Toast.info('没有发现更新' + (failed ? '（' + failed + ' 个订单页取不到）' : ''), 4200);
+            Toast.info('没有发现更新' + (failed ? '（' + failed + ' 个订单页取不到）' : '') + localTxt, 4600);
             return;
           }
           return App.save(a).then(function () {
@@ -430,7 +445,7 @@ var Modals = {
                 + (shop.added ? '；新增变体 ' + shop.added + ' 个' : '') + (shop.links ? '；新增下载链接 ' + shop.links + ' 条' : ''))
               : '';
             Toast.ok('已更新：新增 ' + added + ' 个文件' + (changed ? '、刷新 ' + changed + ' 个版本' : '') +
-              (failed ? '；' + failed + ' 个订单页取不到' : '') + shopTxt, 5200);
+              (failed ? '；' + failed + ' 个订单页取不到' : '') + shopTxt + localTxt, 5600);
           });
         });
       }
@@ -955,9 +970,8 @@ var Modals = {
         var link = (a.links || []).filter(function (l) { return isHttpUrl(l.url); })[0];
         var url = link ? link.url : (a.itemId ? 'https://booth.pm/ja/items/' + a.itemId : '');
         if (!url) { Toast.warn('这条素材没有商店链接，无法重新获取图集'); return; }
-        if (typeof Net === 'undefined' || !Net.networkAllowed()) { Toast.warn('当前抓取方式不允许联网（可在「设置 → 联网与抓取」切换）', 4200); return; }
         refetchGalleryBtn.disabled = true; ICONS.apply(refetchGalleryBtn, '\u23F3 获取中 …');
-        Fetchers.fetchInfo(url, { forceNetwork: true, noCache: false }).then(function (info) {
+        Fetchers.fetchInfo(url, { forceNetwork: true, noCache: true }).then(function (info) {
           var fresh = (info && !info.__failed && Array.isArray(info.images)) ? info.images.filter(Boolean) : null;
           if (!fresh || !fresh.length) { Toast.warn('没抓到图集（商品页可能取不到，或需要先登录）'); return null; }
           var before = (a.images || []).length;
@@ -1020,10 +1034,54 @@ var Modals = {
       kv('本地修改', fmtDate(a.updatedAt, true))
     ]);
 
+    /* 标题可就地改：点一下变输入框，回车 / 失焦保存，Esc 取消。
+     * 存的是「素材名字」（a.title）；商店原标题（a.originalTitle）永远不动。
+     * 改名会连带重命名素材目录（App.save 里做），重名会被拒绝并提示。 */
+    var titleNode = el('h3', { class: 'detail-title detail-title-edit', title: '点击修改素材名字', text: title });
+    titleNode.addEventListener('click', function () { startTitleEdit(); });
+    function startTitleEdit() {
+      if (titleNode.querySelector('input')) return;
+      var before = String(a.title || '');
+      var input = el('input', { class: 'input detail-title-input', value: before, placeholder: '素材名字' });
+      titleNode.textContent = '';
+      titleNode.appendChild(input);
+      try { input.focus(); input.select(); } catch (e) {}
+      var done = false;
+      function restore(text) {
+        titleNode.textContent = cleanTitle(text) || '（未命名）';
+        try { titleNode.title = '点击修改素材名字'; } catch (e) {}
+      }
+      function finish(save) {
+        if (done) return;
+        done = true;
+        var v = String(input.value || '').replace(/\s+/g, ' ').trim();
+        if (!save || !v || v === before) { restore(a.title || before); return; }
+        titleNode.textContent = v;
+        /* 必须传一份「副本」给 App.save：它靠 old.folderName 与新的比对来决定是否改目录、
+         * 查不查重名。直接改 a 再存时新旧是同一个对象，比对永远相等 —— 目录不会改名，
+         * 重名也拦不住。 */
+        var draft = Object.assign({}, a, { title: v });
+        App.save(draft).then(function (saved) {
+          Toast.ok('已改名为「' + (saved.title || v) + '」', 3200);
+          Modals.refreshAfterChange(saved, { keepModal: true });   // 卡片 + 详情（路径可能跟着目录改名变）
+        }).catch(function (e) {
+          a.title = before;
+          restore(before);
+          Toast.err('改名失败：' + ((e && e.message) || e), 6400);
+        });
+      }
+      input.addEventListener('keydown', function (e) {
+        e.stopPropagation();                       // Esc 不要冒泡去关弹窗
+        if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+        else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+      });
+      input.addEventListener('blur', function () { finish(true); });
+    }
+
     var head = el('div', { class: 'detail-head' }, [
       el('div', { class: 'detail-head-cover' }, [cover]),
       el('div', { class: 'detail-head-info' }, [
-        el('h3', { class: 'detail-title', text: title }),
+        titleNode,
         orig ? el('div', { class: 'detail-subtitle', title: a.originalTitle }, orig) : null,
         chips,
         el('div', { class: 'detail-gallery-slot' }, [galleryNode]),
@@ -1041,31 +1099,69 @@ var Modals = {
       ])
     ]);
 
-    /* 从商品链接补充信息：粘贴商品页 → 解析 → 预览 → 应用 */
+    /* 从商品链接补充信息：粘贴商品页 / 只填商品 ID → 补全链接 → 解析 → 预览 → 应用 */
     function linkEnrichBlock() {
       var input = el('input', {
         class: 'input', type: 'text',
-        placeholder: '粘贴商品链接，如 https://booth.pm/ja/items/8562330'
+        placeholder: '粘贴商品链接，或只填 BOOTH 商品 ID（如 8562330）'
       });
-      var tip = el('div', { class: 'wb-hint', text: '' });
+      var tip = el('div', { class: 'wb-hint', text: '只填数字商品 ID 也行，点「解析并补充」会自动补成完整商品页再解析。' });
       var btn = el('button', {
         class: 'btn btn-sm', type: 'button', text: '解析并补充',
         onclick: function () {
-          var url = String(input.value || '').trim();
-          if (!/^https?:\/\//i.test(url)) { tip.textContent = '先粘贴一个 http(s) 链接'; return; }
-          if (typeof Net === 'undefined' || !Net.networkAllowed()) { tip.textContent = '网络权限没开：设置 → 网络'; return; }
+          var raw = String(input.value || '').trim();
+          var cands = (typeof Fetchers.productCandidates === 'function') ? Fetchers.productCandidates(raw) : [];
+          if (!cands.length) { tip.textContent = '填商品 ID（纯数字）或完整的 http(s) 商品链接'; return; }
+          /* 自己拼出来的候选要更严：BOOTH 的 404 页也是 HTTP 200，只能靠标题判断 */
+          var strict = !/^https?:\/\//i.test(raw);
+          function usable(info) {
+            if (!info || info.__failed) return false;
+            if (!strict) return true;
+            return !!info.originalTitle
+              && !/(^|\s)(404|not found|page not found|不存在)(\s|$)/i.test(info.originalTitle)
+              && info.originalTitle.toLowerCase() !== 'gumroad';
+          }
+          /* 后端的 reason 是内部代号（host-failed / host-offline），别直接丢给用户看 */
+          function reasonText(r) {
+            if (!r) return '链接无效或需要登录';
+            if (r === 'host-failed') return '页面打不开，可能已下架或被删除';
+            if (r === 'host-offline') return '程序后端没就绪，重启程序再试';
+            if (r === 'timeout') return '请求超时';
+            return r;
+          }
           btn.disabled = true; btn.textContent = '解析中…'; tip.textContent = '';
-          Fetchers.fetchInfo(url, { forceNetwork: true, noCache: true }).then(function (info) {
-            btn.disabled = false; btn.textContent = '解析并补充';
-            if (!info || info.__failed) {
-              tip.textContent = '抓不到这个页面：' + ((info && info.reason) || '链接无效或需要登录');
+          function next(i) {
+            if (i >= cands.length) {
+              btn.disabled = false; btn.textContent = '解析并补充';
+              tip.textContent = '抓不到这个商品：编号可能写错、已下架，或需要登录后才能看。';
               return;
             }
-            previewApply(info, url);
-          }, function (e) {
-            btn.disabled = false; btn.textContent = '解析并补充';
-            tip.textContent = '解析失败：' + ((e && e.message) || e);
-          });
+            var url = cands[i];
+            /* 带超时：编号写错时后端可能一直不返回，不能让按钮停在「解析中…」 */
+            Fetchers.fetchInfoTimed(url, { forceNetwork: true, noCache: true }, 10000).then(function (info) {
+              if (info && info.__failed && info.reason === 'timeout') {
+                btn.disabled = false; btn.textContent = '解析并补充';
+                tip.textContent = '请求超时了（10 秒没有响应），检查一下网络后重试。';
+                return;
+              }
+              if (!usable(info) && i + 1 < cands.length) return next(i + 1);
+              btn.disabled = false; btn.textContent = '解析并补充';
+              if (!usable(info)) {
+                tip.textContent = strict
+                  ? '抓不到这个商品：编号可能写错、已下架，或需要登录后才能看。'
+                  : '抓不到这个页面：' + reasonText(info && info.reason);
+                return;
+              }
+              /* 只填了 ID 时把补全后的链接回填到输入框，用户能看清解析的是哪一页 */
+              if (url !== raw) { input.value = url; tip.textContent = '已补全为 ' + url; }
+              previewApply(info, url);
+            }, function (e) {
+              if (i + 1 < cands.length) return next(i + 1);
+              btn.disabled = false; btn.textContent = '解析并补充';
+              tip.textContent = '解析失败：' + ((e && e.message) || e);
+            });
+          }
+          next(0);
         }
       });
       return section('从商品链接补充信息', el('div', { class: 'detail-stack' }, [
@@ -1074,70 +1170,195 @@ var Modals = {
       ]));
     }
 
-    /** 预览将从商品页补充的字段，只列空白项 */
-    function previewApply(info, url) {
-      var rows = [];
-      /* 只补空白字段：已有的值一律不动，避免覆盖你手填的内容 */
-      function add(label, cur, next) {
+    /** 链接比对用的键：去掉 query / hash / 末尾斜杠后再比。
+     *  **别用 `normU`** —— 那个只在详情页「同商品检测」的局部作用域里定义过，
+     *  在这里是未定义标识符；而且 `Array.prototype.some` 的会调它，只要素材已有一条链接就抛
+     *  ReferenceError（旧版「应用」后既不提示也不刷新就是这个原因）。 */
+    function urlKey(u) {
+      return String(u || '').replace(/[?#].*$/, '').replace(/\/+$/, '').toLowerCase();
+    }
+
+    /** 「解析并补充」的计划：**预览列什么、应用就写什么**，两边共用这一份 ——
+     *  规则：只补空白字段（已有值不动）；标签 / 图集只增不减；
+     *  商品价只在完全没有商品价时写，而且**永远不写 0**（0 会被当成「免费」，见 Store.deriveAssetIsFree）。 */
+    function enrichPlan(info, url) {
+      var plan = [];
+      var S = (typeof Smart !== 'undefined') ? Smart : null;
+      function add(label, cur, next, apply) {
         if (cur != null && String(cur).trim() !== '') return;
         if (next == null || String(next).trim() === '') return;
-        rows.push(kv(label, el('span', {}, [
-          el('span', { class: 'dim', text: (cur || '（空）') + ' → ' }),
-          el('b', { text: String(next) })
-        ])));
+        plan.push({ label: label, cur: String(cur || ''), next: String(next), apply: apply });
       }
-      add('标题', a.originalTitle || a.title, info.originalTitle || info.title);
-      add('店铺', a.shop, info.shop);
-      add('作者', a.author, info.author);
-      add('商品 ID', a.itemId, info.itemId);
-      add('标签', '', (info.tags || []).length ? (info.tags || []).join(' / ') : '');
+      function short(t, n) {
+        var s = String(t == null ? '' : t).replace(/\s+/g, ' ').trim();
+        return s.length > n ? s.slice(0, n) + '…' : s;
+      }
+
+      var nextTitle = info.originalTitle || info.title || '';
+      /* 原标题与自定义标题分开算：作者改了名，原标题照样该补上（旧版就是这个语义，别合在一起）。 */
+      add('原标题', a.originalTitle, nextTitle, function () { if (!a.originalTitle) a.originalTitle = nextTitle; });
+      if (!a.title || /^未命名/.test(a.title)) {
+        add('标题', a.title, nextTitle ? ((cleanTitle && cleanTitle(nextTitle)) || nextTitle) : '', function () {
+          a.title = (cleanTitle && cleanTitle(nextTitle)) || nextTitle;
+        });
+      }
+      add('店铺', a.shop, info.shop, function () { a.shop = info.shop; });
+      add('作者', a.author, info.author, function () { a.author = info.author; });
+      add('商品 ID', a.itemId, info.itemId, function () { a.itemId = String(info.itemId); });
+      add('店铺链接', a.shopUrl, info.shopUrl, function () { a.shopUrl = info.shopUrl; });
+
+      /* 标签：翻译 + 去角色名 + 去黑名单后，算出「真正会新增几个」再列出来，
+       * 免得预览说新增 12 个、应用后一个都没多（全被角色名过滤掉了）。 */
+      var rawNew = (info.tags || []).map(function (t) { return String(t || '').trim(); }).filter(Boolean)
+        .filter(function (t) { return (a.rawTags || []).map(String).indexOf(t) < 0; });
+      if (rawNew.length) {
+        var shownAll = [];
+        try {
+          var rawAll = uniq((a.rawTags || []).concat(info.tags || []).map(function (t) { return String(t || '').trim(); }).filter(Boolean));
+          var tr = (App.settings.autoTranslateTags !== false && S && S.translateTags) ? S.translateTags(rawAll) : rawAll.slice();
+          if (S && S.purgeAvatarTags) {
+            try { tr = S.purgeAvatarTags(tr, { shop: a.shop || info.shop, author: a.author || info.author, url: url }) || tr; } catch (e) {}
+          }
+          if (S && S.filterBlacklist) tr = S.filterBlacklist(tr);
+          shownAll = uniq(tr);
+        } catch (e) { shownAll = []; }
+        var shownNew = shownAll.filter(function (t) { return (a.tags || []).indexOf(t) < 0; });
+        if (shownNew.length) {
+          plan.push({
+            label: '标签',
+            cur: (a.tags || []).length ? '已有 ' + (a.tags || []).length + ' 个' : '',
+            next: '新增 ' + shownNew.length + ' 个：' + shownNew.slice(0, 10).join(' / ') + (shownNew.length > 10 ? ' …' : ''),
+            apply: function () {
+              a.rawTags = uniq((a.rawTags || []).concat(info.tags || []).map(function (t) { return String(t || '').trim(); }).filter(Boolean));
+              a.tags = uniq((a.tags || []).concat(shownNew));
+            }
+          });
+        }
+      }
+
+      /* 支持角色：按标签识别，只在现在一个都没有时补 */
+      if (!(a.avatars || []).length && S && S.detectAvatars) {
+        var av = [];
+        try { av = (S.detectAvatars(info) || []).slice(); } catch (e) { av = []; }
+        add('支持角色', '', av.map(function (v) { return App.avatarLabel(v); }).join('、'), function () { a.avatars = av.slice(); });
+      }
+
+      /* 分类：只在当前是「其他」时补，别抢用户分好的类 */
+      if (!a.category || a.category === 'other') {
+        var guess = '';
+        try { guess = (S && S.guessCategory) ? S.guessCategory(info) : ''; } catch (e) { guess = ''; }
+        if (guess && guess !== 'other') add('分类', '', App.categoryLabel(guess), function () { a.category = guess; });
+      }
+
+      var desc = '';
+      if (!a.description && info.description) {
+        try { desc = (S && S.pickChinese) ? (S.pickChinese(info.description) || info.description) : info.description; } catch (e) { desc = info.description; }
+      }
+      add('简介', a.description, desc ? short(desc, 90) : '', function () { a.description = desc; });
+
+      var imgsNew = (info.images || []).filter(function (u) { return u && (a.images || []).indexOf(u) < 0; });
+      if (imgsNew.length) {
+        plan.push({
+          label: '图集',
+          cur: (a.images || []).length ? '已有 ' + (a.images || []).length + ' 张' : '',
+          next: '新增 ' + imgsNew.length + ' 张',
+          apply: function () { a.images = uniq((a.images || []).concat(imgsNew)); }
+        });
+      }
+      if (!a.coverURL && !a.hasCover && info.coverURL) {
+        add('封面', '', '1 张外链（保存后会下载到本地）', function () { a.coverURL = info.coverURL; });
+      }
+
+      /* 商品价：只写非 0 的数字，0 一律不碰（0 = 免费，会改变整条素材的判定） */
+      if (!a.shopPrice && info.price != null) {
+        var pnum = Number(String(info.price).replace(/[^\d.]/g, '')) || 0;
+        if (pnum > 0) add('商品价', '', short(info.price, 24), function () { a.shopPrice = String(info.price); });
+      }
+      add('上架日期', a.publishedAt ? fmtDate(a.publishedAt) : '', info.publishedAt ? fmtDate(info.publishedAt) : '',
+        function () { a.publishedAt = info.publishedAt; });
+
+      if (!(a.versions || []).length && (info.versions || []).length) {
+        plan.push({
+          label: '版本',
+          cur: '',
+          next: (info.versions || []).length + ' 个：' + (info.versions || []).slice(0, 4).map(function (v) { return (v && v.name) || '未命名'; }).join(' / '),
+          apply: function () { a.versions = (info.versions || []).slice(); }
+        });
+      }
+      if (!(a.downloadLinks || []).length && (info.downloadLinks || []).length) {
+        plan.push({
+          label: '下载链接',
+          cur: '',
+          next: (info.downloadLinks || []).length + ' 条',
+          apply: function () { a.downloadLinks = (info.downloadLinks || []).slice(); }
+        });
+      }
+      return plan;
+    }
+
+    /** 预览并应用：只列会变的字段，点「应用」才写库 */
+    function previewApply(info, url) {
+      var plan = enrichPlan(info, url);
+      var rows = plan.map(function (p) {
+        return kv(p.label, el('span', {}, [
+          el('span', { class: 'dim', text: (p.cur || '（空）') + ' → ' }),
+          el('b', { text: p.next })
+        ]));
+      });
       if (!rows.length) rows.push(kv('结果', '没有比现在更新的信息'));
       var modal = Modal.open({
         title: '补充信息预览',
-        size: 'sm',
-        body: [el('div', { class: 'detail-stack' }, rows)],
+        size: 'md',
+        body: [el('div', { class: 'detail-stack' }, [
+          /* 把规则写在最上面：用户才知道为什么有些字段没出现在列表里 */
+          el('div', { class: 'field-hint', text: plan.length
+            ? '将补充 ' + plan.length + ' 项。只填空缺字段，已有的值一律不动；标签与图集会合并，不会清掉你原来补的。'
+            : '这条素材的商品信息已经齐了，没有需要补充的字段。' })
+        ].concat(rows))],
         footer: [
           el('button', { class: 'btn', onclick: function () { Modal.close(modal); } }, '取消'),
           el('button', { class: 'btn btn-primary', onclick: function () {
             Modal.close(modal);
-            applyInfo(info, url);
+            applyInfo(info, url, plan);
           } }, '应用')
         ]
       });
     }
 
-    function applyInfo(info, url) {
-      if (info.itemId && !a.itemId) a.itemId = String(info.itemId);
-      var t = info.originalTitle || info.title || '';
-      if (t && !a.originalTitle) a.originalTitle = t;
-      if ((!a.title || /^未命名/.test(a.title)) && t) a.title = cleanTitle ? (cleanTitle(t) || t) : t;
-      if (info.shop && !a.shop) a.shop = info.shop;
-      if (info.author && !a.author) a.author = info.author;
+    /** 写库：跑计划里的每一项，再补上不显示在预览里的关联动作（存链接、认来源） */
+    function applyInfo(info, url, plan) {
+      /* 改动前的副本：这里的 a 就是库里那条对象，直接改完再 save，App.save 比不出
+       * 「标题 / 商品 ID / 分类变了」，磁盘上的文件夹因此不会改名字、也不会跟着分类搬走
+       * （用户看到的就是「分类换了，文件还在老目录，新分类下只多了个封面」）。 */
+      var before = null;
+      try { before = JSON.parse(JSON.stringify(a)); } catch (e) { before = null; }
+      (plan || []).forEach(function (p) { try { p.apply(); } catch (e) { console.warn('补充字段失败：' + p.label, e); } });
       if (/gumroad/i.test(url)) a.source = 'gumroad';
       else if (/booth/i.test(url)) a.source = 'booth';
       else if (info.sourceId && !a.source) a.source = info.sourceId;
-      var tags = (info.tags || []).map(function (x) { return String(x || '').trim(); }).filter(Boolean);
-      if (tags.length) {
-        var merged = (a.rawTags || []).slice();
-        tags.forEach(function (x) { if (merged.indexOf(x) < 0) merged.push(x); });
-        a.rawTags = merged;
-        if (typeof Smart !== 'undefined' && Smart.purgeAvatarTags) {
-          try { var clean = Smart.purgeAvatarTags(merged, { shop: a.shop, author: a.author, url: url }); if (clean && clean.length) a.rawTags = clean; } catch (e) {}
-        }
-      }
       if (!a.links) a.links = [];
-      if (!a.links.some(function (l) { return normU(l.url) === normU(url); })) {
+      if (!a.links.some(function (l) { return urlKey(l.url) === urlKey(url); })) {
         a.links.push({ url: url, label: info.shop || '商品页' });
       }
-      if (info.coverURL && !a.coverURL) a.coverURL = info.coverURL;
-      if (info.description && !a.description) a.description = info.description;
-      App.save(a).then(function () {
-        Toast.ok('已补充：' + (a.originalTitle || a.title || ''));
-        try { Modals.detail(a.id); } catch (e) {}
+      App.save(a, { prev: before || undefined }).then(function (saved) {
+        var names = (plan || []).map(function (p) { return p.label; });
+        Toast.ok(names.length
+          ? '已补充 ' + names.length + ' 项：' + names.slice(0, 5).join('、') + (names.length > 5 ? ' 等' : '')
+          : '没有需要补充的字段', 4200);
+        /* 原地换掉这一条详情 + 刷新卡片：别用 Modals.detail(a.id) ——
+         * 不带 handle 调用会再压一层新弹窗，回来时看到两个详情叠在一起。 */
+        try { Modals.refreshAfterChange(saved || a, { keepModal: true }); }
+        catch (e) { try { Modals.detail(a.id); } catch (e2) {} }
       }, function (e) { Toast.err('保存失败：' + ((e && e.message) || e)); });
     }
-    /* 「版本与下载」分两个切页：链接（远端，保持原样）/ 本地文件（点开才扫磁盘）。
-     * 素材以本地文件为主时，这一块原本只剩一两行路径，等于看不到自己手上有哪些文件。 */
+
+    /* 「版本与下载」分两个切页：链接（远端，保持原样）/ 本地文件（磁盘实况）。
+     * 素材以本地文件为主时，这一块原本只剩一两行路径，等于看不到自己手上有哪些文件。
+     * 本地页按「本体 / 额外文件（DLC）」分两组：素材以本地为主，分不清哪个是本体等于没法用；
+     * 图片一律不列（封面 / 预览图不是素材文件，删一张图也不该报「本体缺失」）。 */
+    var localState = { dir: '', files: null, error: '', scanned: false };   // files=null 表示还没扫过
+    var localScanP = null;
+    var localDrag = '';   // 正在从哪一行拖起：拖到另一组就改判本体 / DLC
     var localPane = el('div', { class: 'detail-stack', style: { display: 'none' } });
     var localLoaded = false;
     var localNum = el('span', { class: 'detail-tab-num', text: '' });
@@ -1146,85 +1367,472 @@ var Modals = {
     var tabLink = el('button', { class: 'detail-tab', type: 'button' }, ['链接', linkNum]);
     var tabLocal = el('button', { class: 'detail-tab', type: 'button' }, ['本地文件', localNum]);
     var linkPane = el('div', { class: 'detail-stack' }, [activeTotalNode, verSectionNode, dlNode, licenseNode, unpurchasedNode, pathNode]);
+    /* 本体缺失提示挂在两个切页之上：停在「链接」页也看得见，不能把问题藏起来 */
+    var missBox = el('div', { class: 'local-miss-box', style: { display: 'none' } });
 
     function pickTab(local) {
       tabLink.classList.toggle('on', !local);
       tabLocal.classList.toggle('on', local);
       linkPane.style.display = local ? 'none' : '';
       localPane.style.display = local ? '' : 'none';
+      Modals._localTab = !!local;      // 原地刷新（重新解析后重建详情）回到原来那一页
       if (local) loadLocalPane();
     }
     tabLink.addEventListener('click', function () { pickTab(false); });
     tabLocal.addEventListener('click', function () { pickTab(true); });
 
-    function loadLocalPane() {
-      if (localLoaded) return;
-      localLoaded = true;
+    /* ---------------- 本地文件：扫描 / 对账 ---------------- */
+
+    /** 只读顶层文件（App.localScanFiles）。结果写进 localState，失败也写（error），
+     *  调用方据此决定要不要落库 —— 读不到目录时绝不能把「文件都没了」当成事实写进去。 */
+    function scanLocalDir() {
+      localState.dir = App.primaryLocalPath(a);
+      return App.localScanFiles(a).then(function (r) {
+        localState.dir = r.dir || localState.dir;
+        localState.files = r.error ? null : (r.files || []);
+        localState.error = r.error ? ({
+          'no-path': '这条素材还没有本地路径',
+          'offline': '程序后端未就绪，暂时读不到本地文件',
+          'missing-dir': '目录不存在（可能被移动或删除了）'
+        }[r.error] || ('读取失败：' + r.error)) : '';
+        localState.scanned = true;
+        return localState;
+      });
+    }
+
+    /**
+     * 一次对账：扫磁盘 → App.localFileApply（缺的删、多的登记成 DLC）→ 需要时落库 → 重画。
+     * opts.force=true 无视缓存重扫；opts.save=false 只改界面不落库（打开详情时用）。
+     * 读不到目录（后端离线 / 盘符不在）时一律不落库，避免把一次失败的扫描当成「文件都没了」。
+     */
+    function rescanLocal(opts) {
+      opts = opts || {};
+      var p = opts.force ? scanLocalDir()
+        : (localState.scanned ? Promise.resolve(localState) : (localScanP || (localScanP = scanLocalDir())));
+      return p.then(function (st) {
+        var fail = function () {
+          localNum.textContent = st.dir ? '\u2014' : '0';
+          renderMissing([]);
+          if (localLoaded) renderLocal(null);
+          return { ok: false, error: st.error || (st.dir ? '读不到目录' : '这条素材还没有本地路径'),
+            added: 0, removed: 0, missing: [], baseN: 0, extraN: 0, changed: false };
+        };
+        if (st.error || !st.files) return fail();
+        var plan = App.localFileApply(a, st.files);
+        var after = function () {
+          localNum.textContent = String(plan.base.length + plan.extra.length);
+          renderMissing(plan.missing);
+          if (localLoaded) renderLocal(plan);
+          return { ok: true, error: '', added: plan.added, removed: plan.removed, missing: plan.missing,
+            baseN: plan.base.length, extraN: plan.extra.length, changed: plan.changed };
+        };
+        if (!plan.changed || opts.save === false) return after();
+        return App.save(a).then(after, after);
+      });
+    }
+
+    /* ---------------- 本体文件缺失：列出 + 快速补充 ---------------- */
+
+    function renderMissing(missing) {
+      missBox.innerHTML = '';
+      missing = (missing || []).filter(function (m) { return m && m.name; });
+      if (!missing.length) { missBox.style.display = 'none'; return; }
+      missBox.style.display = '';
+      missBox.appendChild(el('div', { class: 'local-miss-title' }, [
+        ICONS.make('warning', { size: 14 }),
+        el('span', { text: '本体文件缺失 ' + missing.length + ' 个：磁盘上找不到，可能被移动或删除了' })
+      ]));
+      missBox.appendChild(el('div', { class: 'local-miss-list' }, missing.map(function (m) {
+        return el('div', { class: 'local-miss-row' }, [
+          el('span', { class: 'local-miss-ver', title: m.version ? String(m.version.name || '') : '',
+            text: (m.version && m.version.name) || '本体' }),
+          el('code', { class: 'local-miss-name', title: m.name, text: m.name }),
+          el('button', {
+            class: 'btn btn-xs local-miss-del', type: 'button',
+            title: '不再记录这个文件（只改库里的记录，磁盘上的文件不会被动）',
+            onclick: function () { removeMissing([m]); }
+          }, '移除记录')
+        ]);
+      })));
+      missBox.appendChild(el('div', { class: 'local-miss-actions' }, [
+        el('button', { class: 'btn btn-xs btn-primary', onclick: function () { openBaseFill(missing); } },
+          ICONS.label('\u{1F4C2} 快速补充本体文件')),
+        missing.length > 1
+          ? el('button', { class: 'btn btn-xs', type: 'button', onclick: function () { removeMissing(missing); } }, '全部移除记录')
+          : null,
+        el('span', { class: 'local-miss-hint', text: '选一个文件即可：会放进素材目录并记回对应版本，不用重新导入整条素材。' })
+      ]));
+    }
+
+    /** 把文件名从版本 / 下载记录 / 额外文件里全部摘掉。
+     *  只改库里的记录，一个字节都不碰磁盘 —— 这些文件本来就找不到了。
+     *  本地导入的版本本身就是一个文件，记录摘空后版本也跟着收掉（否则留下一个空版本）。 */
+    function stripFileRecord(names) {
+      var low = Object.create(null);
+      (names || []).forEach(function (n) {
+        var s = String(n || '').trim().toLowerCase();
+        if (s) low[s] = 1;
+      });
+      if (!Object.keys(low).length) return false;
+      var droppedLatest = false;
+      (a.versions || []).forEach(function (v) {
+        if (!v) return;
+        if (v.fileName && low[String(v.fileName).toLowerCase()]) v.fileName = '';
+        if (Array.isArray(v.files)) {
+          v.files = v.files.filter(function (f) { return !low[String((f && f.name) || '').toLowerCase()]; });
+        }
+      });
+      a.versions = (a.versions || []).filter(function (v) {
+        var empty = !!(v && v.local && !v.fileName && !((v.files || []).length));
+        if (empty && v.isLatest) droppedLatest = true;
+        return !empty;
+      });
+      if (droppedLatest) {
+        /* 收掉的那个是「最新版本」，就把剩下的最后一个本地版本顶上去，别让版本区一个都不标最新 */
+        var next = (a.versions || []).filter(function (v) { return v && v.local; })[0];
+        if (next) next.isLatest = true;
+      }
+      a.downloadedFiles = (a.downloadedFiles || []).filter(function (n) { return !low[String(n || '').toLowerCase()]; });
+      a.extraFiles = (a.extraFiles || []).filter(function (e) { return !low[String((e && e.name) || '').toLowerCase()]; });
+      return true;
+    }
+
+    /** 手动移除缺失记录：先确认再改库。文件本来就不在了，这只影响「还提不提示」。 */
+    function removeMissing(list) {
+      list = (list || []).filter(function (m) { return m && m.name; });
+      if (!list.length) return;
+      var names = list.map(function (m) { return String(m.name); });
+      var one = list.length === 1;
+      var what = one
+        ? '「' + names[0] + '」' + (list[0].version && list[0].version.name ? '（' + list[0].version.name + '）' : '')
+        : names.length + ' 个文件';
+      Modal.confirm('不再记录 ' + what + '？\n\n'
+        + (one ? '这个文件在库里登记过，但磁盘上已经找不到。移除记录后不再提示缺失，版本里也不再登记它。'
+          : '这些文件在库里登记过，但磁盘上已经找不到。移除记录后不再提示缺失，版本里也不再登记它们。')
+        + '\n\n只改库里的记录，不会删除任何文件。'
+        + (one ? '如果文件只是被挪走了，用「快速补充本体文件」把它指回来更好。'
+          : '如果文件只是被挪走了，用「快速补充本体文件」把它们指回来更好。'),
+        { okText: '移除记录' }).then(function (ok) {
+        if (!ok) return;
+        if (!stripFileRecord(names)) return;
+        App.save(a).then(function () {
+          Modals.refreshAfterChange(a, { keepModal: true });   // 原地重建详情：版本区 / 缺失提示一起刷新
+          Toast.ok('已移除 ' + names.length + ' 条缺失记录', 4200);
+        }).catch(function (e) { Toast.err('移除失败：' + ((e && e.message) || e)); });
+      });
+    }
+
+    /** 快速补充：列出每个缺失的本体，逐个「选择文件」；只有一个缺失时直接弹选文件。 */
+    function openBaseFill(missing) {
+      if (missing.length === 1) { pickAndBind(missing[0], null); return; }
+      var rows = missing.map(function (m) {
+        var btn = el('button', { class: 'btn btn-xs' }, ICONS.label('选择文件 …'));
+        btn.onclick = function () { pickAndBind(m, btn); };
+        return el('div', { class: 'local-fill-row' }, [
+          el('div', { class: 'local-fill-info' }, [
+            el('b', { text: (m.version && m.version.name) || '本体' }),
+            el('code', { class: 'path', title: m.name, text: m.name })
+          ]),
+          btn
+        ]);
+      });
+      var h = Modal.open({
+        title: '补充本体文件（' + missing.length + ' 个）', size: 'md',
+        body: [el('div', { class: 'detail-stack' }, [
+          el('div', { class: 'field-hint', text: '选中的文件会复制进这条素材的目录（源文件保留），并登记为该版本的本体文件。' })
+        ].concat(rows))],
+        footer: [el('button', { class: 'btn', onclick: function () { Modal.close(h); } }, '关闭')]
+      });
+    }
+
+    function pickAndBind(m, btn) {
+      var PICK = '\u{1F4C2} 选择文件 …';
+      if (btn) { btn.disabled = true; ICONS.apply(btn, '\u23F3 选择中 …'); }
+      FS.hostEnsure().then(function (ok) {
+        if (!ok) throw new Error('程序后端未就绪，无法选择文件');
+        return FS.host.pickFiles();
+      }).then(function (r) {
+        var list = Array.isArray(r) ? r : ((r && r.paths) || []);
+        if (!list.length) { if (btn) { btn.disabled = false; ICONS.apply(btn, PICK); } return null; }
+        return bindBaseFile(m, list[0]);
+      }).then(function (done) {
+        if (!done) return;
+        if (btn) { btn.disabled = false; ICONS.apply(btn, PICK); }
+        Toast.ok('已补回本体文件：' + done);
+        try { UI.renderAll(); } catch (e) {}
+        return rescanLocal({ force: true });
+      }).catch(function (e) {
+        if (btn) { btn.disabled = false; ICONS.apply(btn, PICK); }
+        Toast.err('补回失败：' + ((e && e.message) || e), 7000);
+      });
+    }
+
+    /** 把选中的文件放进素材目录并登记成该版本的本体；目录里已有同名文件就直接复用，不重复复制 */
+    function bindBaseFile(m, srcPath) {
+      var dir = localState.dir || App.primaryLocalPath(a);
+      if (!dir) return Promise.reject(new Error('这条素材还没有存储目录'));
+      var name = String(srcPath || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+      if (!name) return Promise.reject(new Error('读不到文件名'));
+      var size = 0;
+      return FS.host.stat(srcPath).then(function (st) { size = Number(st && st.size) || 0; })
+        .then(function () { return FS.host.exists(joinWinPath(dir, [name])); })
+        .then(function (kind) {
+          if (kind === 'file') return null;
+          return FS.host.copy(srcPath, joinWinPath(dir, [name]));
+        })
+        .then(function () {
+          var v = m.version;
+          var oldName = v ? String(v.fileName || '') : '';
+          if (v) {
+            v.fileName = name;
+            if (size) v.size = size;
+          }
+          /* 旧名字（缺的那个）从下载记录里摘掉，否则下一次扫描还会报同一个缺失 */
+          var df = (a.downloadedFiles || []).filter(function (x) {
+            return String(x).toLowerCase() !== oldName.toLowerCase();
+          });
+          if (df.every(function (x) { return String(x).toLowerCase() !== name.toLowerCase(); })) df.push(name);
+          a.downloadedFiles = df;
+          a.downloaded = true;
+          a.downloadedAt = nowISO();
+          if (size) a.fileSize = (Number(a.fileSize) || 0) + size;
+          return App.save(a).then(function () { return name; });
+        });
+    }
+
+    /**
+     * 把某个文件在本体 / DLC 之间改判（把行拖到另一组时调用）。
+     * 归本体 = 从 extraFiles 摘掉 + 记进 downloadedFiles（判据③）；归 DLC = 记进 extraFiles（优先级最高）。
+     * 不删 downloadedFiles：那是「这个文件下载过」的事实，删了下载按钮会变回「下载」，
+     * 而分类只看 extraFiles，留着不会让分类回弹。
+     */
+    function reclassifyLocal(name, toBase) {
+      var nm = String(name || '').trim();
+      if (!nm) return Promise.resolve();
+      var low = nm.toLowerCase();
+      if (toBase) {
+        a.extraFiles = (a.extraFiles || []).filter(function (e) {
+          return String((e && e.name) || '').toLowerCase() !== low;
+        });
+        var df = (a.downloadedFiles || []).slice();
+        if (!df.some(function (x) { return String(x || '').toLowerCase() === low; })) df.push(nm);
+        a.downloadedFiles = df;
+      } else {
+        var ex = (a.extraFiles || []).slice();
+        if (!ex.some(function (e) { return String((e && e.name) || '').toLowerCase() === low; })) {
+          var hit = (localState.files || []).filter(function (f) { return String(f.name).toLowerCase() === low; })[0];
+          ex.push({ name: nm, size: (hit && hit.size) || 0, addedAt: nowISO(), note: '手动归为 DLC' });
+        }
+        a.extraFiles = ex;
+      }
+      return App.save(a).then(function () {
+        return rescanLocal({ force: true, save: false });   // 已经保存过，这里只重画
+      }).then(function () {
+        Toast.ok((toBase ? '已归为本体：' : '已归为 DLC：') + nm, 3000);
+      }, function (e) {
+        Toast.err('改判失败：' + ((e && e.message) || e), 6000);
+      });
+    }
+
+    /**
+     * 删掉一个「错误添加」的本地文件（拖错了 / 把 DLC 当成本体了 / 下错了版本）。
+     * 两道闸：先确认，再移进系统回收站；回收站不可用时再问一次才永久删除。
+     * 删完把它从版本 / 下载记录 / 额外文件里一起摘掉（否则下次扫描会报「本体缺失」），
+     * 然后原地重建详情。**只碰这一个文件**，素材记录、目录里其它文件都不动。
+     */
+    function deleteLocalFile(name, size, full, isBase) {
+      var nm = String(name || '');
+      if (!nm || !full) return;
+      var sizeTxt = size ? '（' + fmtSize(size) + '）' : '';
+      var tail = isBase
+        ? '\n\n删掉本体后，如果这条素材还有商品链接，可以在「链接」页重新下载。'
+        : '';
+      var via = '';
+      Modal.confirm('从素材目录里删除「' + nm + '」' + sizeTxt + '？\n\n位置：' + full + '\n\n'
+        + '会移进 Windows 回收站（可以还原），并把这条文件从「本体 / DLC」记录里去掉；'
+        + '素材本身、以及目录里的其它文件都不动。' + tail,
+        { okText: '删除文件', title: '删除本地文件' }).then(function (ok) {
+        if (!ok) return null;
+        /* 回收站通道不存在（网页载体）或系统不让用 → 再问一次，绝不默默永久删 */
+        var trashP = (FS.host && typeof FS.host.trash === 'function')
+          ? FS.host.trash(full)
+          : Promise.reject(new Error('当前载体没有回收站'));
+        return trashP.then(function () { via = 'trash'; return true; }, function (e) {
+          var msg = (e && e.message) || String(e);
+          return Modal.confirm('没能移进回收站：' + msg + '\n\n要直接永久删除吗？这一步不能撤回。',
+            { okText: '永久删除', title: '回收站不可用' }).then(function (yes) {
+            if (!yes) return Promise.reject({ cancelled: true });
+            return FS.host.remove(full).then(function () { via = 'delete'; return true; });
+          });
+        });
+      }).then(function (done) {
+        if (!done) return;
+        stripFileRecord([nm]);
+        /* 素材体积是累加的：删掉一个就减掉它，否则卡片上的占用会一直虚高 */
+        var had = Number(a.fileSize) || 0;
+        if (size && had >= size) a.fileSize = had - size;
+        return App.save(a).then(function () {
+          try { Modals.refreshAfterChange(a, { keepModal: true }); } catch (e) { try { UI.renderAll(); } catch (e2) {} }
+          Toast.ok((via === 'trash' ? '已移进回收站：' : '已永久删除：') + nm, 4600);
+        }, function (e) {
+          Toast.warn('文件已删除，但记录没更新成功：' + ((e && e.message) || e) + '（点「重新扫描」再试一次）', 7600);
+        });
+      }).catch(function (e) {
+        if (e && e.cancelled) return;
+        Toast.err('删除失败：' + ((e && e.message) || e), 7000);
+      });
+    }
+
+    /* ---------------- 本地文件：渲染 ---------------- */
+    /** plan 由 App.localFileApply 算出；null = 读不到目录，只显示失败原因 */
+    function renderLocal(plan) {
       localPane.innerHTML = '';
-      var dir = App.primaryLocalPath(a);
+      var dir = localState.dir;
       if (!dir) {
         localNum.textContent = '0';
         localPane.appendChild(el('div', { class: 'multi-empty', text: '这条素材还没有本地路径。用编辑页的「导入已有文件 / 文件夹」补一份，或把文件拖到卡片上。' }));
         return;
       }
-      localPane.appendChild(el('div', { class: 'field-hint', text: '正在读取 ' + dir + ' …' }));
-      FS.hostEnsure().then(function (ok) {
-        if (!ok) throw new Error('程序后端未就绪，暂时读不到本地文件');
-        return FS.host.scan(dir, 1);
-      }).then(function (entries) {
-        /* 只看这一层：素材目录是平的，子目录里的文件不混进来 */
-        var files = (entries || []).filter(function (e) {
-          return e && e.kind === 'file' && String(e.rel || e.name).indexOf('\\') < 0;
-        });
-        localNum.textContent = String(files.length);
-        localPane.innerHTML = '';
-        if (!files.length) {
-          localPane.appendChild(el('div', { class: 'multi-empty', text: '目录里还没有文件：' + dir }));
-          return;
-        }
-        /* 记录里有、磁盘上没有：如实列出来，别让人以为文件还在 */
-        var recorded = uniq((a.downloadedFiles || []).map(String).concat((a.versions || []).reduce(function (acc, v) {
-          return acc.concat((v.files || []).map(function (f) { return String((f && f.name) || ''); }));
-        }, []))).filter(Boolean);
-        var onDisk = Object.create(null);
-        files.forEach(function (e) { onDisk[String(e.name).toLowerCase()] = 1; });
-        var missing = recorded.filter(function (n) { return !onDisk[String(n).toLowerCase()]; });
-        files.sort(function (x, y) { return (y.mtime || 0) - (x.mtime || 0); });   // 最近放进来的排最前
-        /* 磁盘上的文件 → 它在「版本」里叫什么：拖进卡片时选了「作为新版本」的才有 */
-        var verOfFile = Object.create(null);
-        (a.versions || []).forEach(function (v) {
-          var names = (v.files || []).map(function (f) { return String((f && f.name) || ''); });
-          if (v.fileName) names.push(String(v.fileName));
-          names.forEach(function (n) { if (n) verOfFile[n.toLowerCase()] = String(v.name || ''); });
-        });
-        localPane.appendChild(el('div', { class: 'link-list' }, files.map(function (e) {
-          var vn = verOfFile[String(e.name).toLowerCase()];
-          return el('div', { class: 'link-row local-file-row' }, [
-            el('code', { class: 'path', title: e.name }, e.name + (e.size ? '  ·  ' + fmtSize(e.size) : '')),
-            vn ? el('span', { class: 'local-ver', title: '在版本里登记为：' + vn, text: vn }) : null,
-            el('button', { class: 'btn btn-xs', onclick: function () { FS.openPath(dir); } }, ICONS.label('\u{1F4C2} 在文件夹中显示'))
-          ]);
-        })));
-        if (missing.length) {
-          localPane.appendChild(el('div', { class: 'field-hint', text: '\u26A0 记录里有 ' + missing.length + ' 个文件在磁盘上找不到：'
-            + missing.slice(0, 4).join('、') + (missing.length > 4 ? ' …' : '') }));
-        }
-        localPane.appendChild(el('div', { class: 'field-hint', text: '共 ' + files.length + ' 个文件，合计 '
-          + fmtSize(files.reduce(function (s, e) { return s + (e.size || 0); }, 0)) + '；按修改时间倒序。' }));
-      }).catch(function (e) {
-        localPane.innerHTML = '';
+      if (localState.error || !localState.files) {
         localNum.textContent = '\u2014';
-        localPane.appendChild(el('div', { class: 'field-hint', text: '读取失败：' + ((e && e.message) || e) }));
-      });
+        localPane.appendChild(el('div', { class: 'field-hint', text: '读取失败：' + (localState.error || '后端未就绪') }));
+        return;
+      }
+      if (!plan) plan = App.localFileApply(a, localState.files);
+      localNum.textContent = String(plan.base.length + plan.extra.length);
+
+      /* 顶部：目录 + 重新扫描（只对账，不联网） */
+      var scanBtn = el('button', { class: 'btn btn-xs', title: '重新读一遍这个目录：删掉已经不存在的记录，多出来的文件补进额外 DLC' },
+        ICONS.label('\u21BB 重新扫描'));
+      scanBtn.onclick = function () {
+        if (scanBtn.disabled) return;
+        scanBtn.disabled = true; ICONS.apply(scanBtn, '\u23F3 扫描中 …');
+        rescanLocal({ force: true }).then(function (r) {
+          scanBtn.disabled = false; ICONS.apply(scanBtn, '\u21BB 重新扫描');
+          if (!r.ok) { Toast.warn('读不到本地目录：' + r.error, 6200); return; }
+          Toast.ok('已按磁盘更新：本体 ' + r.baseN + ' 个、DLC ' + r.extraN + ' 个'
+            + (r.added ? '；新增 ' + r.added : '') + (r.removed ? '；移除 ' + r.removed : ''), 4600);
+        });
+      };
+      localPane.appendChild(el('div', { class: 'local-head' }, [
+        el('code', { class: 'path local-dir', title: dir, text: dir }),
+        scanBtn,
+        el('button', { class: 'btn btn-xs', onclick: function () { FS.openPath(dir); } }, ICONS.label('\u{1F4C2} 打开文件夹'))
+      ]));
+
+      function row(name, size, verName, kind) {
+        var full = joinWinPath(dir, [name]);
+        var node = el('div', { class: 'link-row local-file-row', draggable: 'true',
+          title: '拖动到另一个分组，可改判「本体 / DLC」' }, [
+          el('code', { class: 'path local-name', title: name, text: name }),
+          verName ? el('span', { class: 'local-ver', title: '版本：' + verName, text: verName }) : null,
+          el('span', { class: 'local-size', text: size ? fmtSize(size) : '' }),
+          el('button', { class: 'btn btn-xs local-open', title: '在文件夹中显示：' + full,
+            onclick: function () { FS.openPath(full); } }, ICONS.label('显示')),
+          /* 删错文件（拖错了、把 DLC 当成本体了）的出口：只删这一个文件，跟着把记录摘掉 */
+          el('button', {
+            class: 'btn btn-xs btn-danger-ghost local-del', type: 'button',
+            title: '把这个文件移进回收站，并从「本体 / DLC」记录里去掉',
+            onclick: function (e) {
+              if (e && e.stopPropagation) e.stopPropagation();
+              deleteLocalFile(name, size, full, kind === 'base');
+            }
+          }, ICONS.label('\u{1F5D1} 删除'))
+        ]);
+        node.addEventListener('dragstart', function (e) {
+          localDrag = name;
+          node.classList.add('drag-src');
+          try { e.dataTransfer.setData('text/plain', name); e.dataTransfer.effectAllowed = 'move'; } catch (x) {}
+        });
+        node.addEventListener('dragend', function () {
+          localDrag = '';
+          node.classList.remove('drag-src');
+          Array.prototype.forEach.call(localPane.querySelectorAll('.drop-ok'), function (n) { n.classList.remove('drop-ok'); });
+        });
+        return node;
+      }
+
+      /** 一个分组 = 标题 + 列表；整块都是放置区（拖到另一组 = 改判本体 / DLC） */
+      function groupBox(kind, title, hint, rows, emptyText) {
+        var box = el('div', { class: 'local-group-box', dataset: { kind: kind } });
+        box.appendChild(el('div', { class: 'local-group' + (kind === 'extra' ? ' local-group-sep' : '') }, [
+          el('span', { class: 'local-group-name', text: title }),
+          el('span', { class: 'local-group-num', text: String(rows.length) }),
+          el('span', { class: 'grow' }),
+          el('span', { class: 'local-group-hint', text: hint })
+        ]));
+        if (!rows.length) box.appendChild(el('div', { class: 'field-hint', text: emptyText }));
+        else box.appendChild(el('div', { class: 'link-list' }, rows));
+        function kindOf(nm) {
+          var low = String(nm || '').toLowerCase();
+          if (plan.base.some(function (f) { return f.name.toLowerCase() === low; })) return 'base';
+          if (plan.extra.some(function (f) { return f.name.toLowerCase() === low; })) return 'extra';
+          return '';
+        }
+        function okHere() {
+          var from = kindOf(localDrag);
+          return !!from && from !== kind;
+        }
+        box.addEventListener('dragover', function (e) {
+          if (!okHere()) return;
+          e.preventDefault();
+          e.stopPropagation();
+          try { e.dataTransfer.dropEffect = 'move'; } catch (x) {}
+          box.classList.add('drop-ok');
+        });
+        box.addEventListener('dragleave', function (e) {
+          if (e.relatedTarget && box.contains(e.relatedTarget)) return;
+          box.classList.remove('drop-ok');
+        });
+        box.addEventListener('drop', function (e) {
+          if (!okHere()) return;
+          e.preventDefault();
+          e.stopPropagation();
+          box.classList.remove('drop-ok');
+          var nm = localDrag || (e.dataTransfer ? e.dataTransfer.getData('text/plain') : '');
+          localDrag = '';
+          if (nm) reclassifyLocal(nm, kind === 'base');
+        });
+        return box;
+      }
+
+      /* 本体：版本里登记过、磁盘上确实存在的那个主文件 */
+      localPane.appendChild(groupBox('base', '本体文件', '版本里登记的主文件',
+        plan.base.map(function (f) { return row(f.name, f.size, f.version ? String(f.version.name || '') : '', 'base'); }),
+        '没有识别到本体文件：版本里还没登记过下载 / 导入的文件，或它们已被删掉。'));
+
+      /* 额外文件：磁盘上多出来、不属于本体的那些（DLC / 补丁 / 说明书） */
+      localPane.appendChild(groupBox('extra', '额外文件 · DLC', 'DLC / 补丁 / 说明书，图片不计',
+        plan.extra.map(function (f) { return row(f.name, f.size, '', 'extra'); }),
+        '没有额外文件。把 DLC 拖到卡片上选「作为附加文件」就会出现在这里。'));
+
+      var total = plan.base.concat(plan.extra).reduce(function (s, f) { return s + (f.size || 0); }, 0);
+      localPane.appendChild(el('div', { class: 'field-hint', text: '共 ' + (plan.base.length + plan.extra.length)
+        + ' 个文件，合计 ' + fmtSize(total) + '；图片不统计。把这行文件拖到另一组，即可改判本体 / DLC；'
+        + '行尾「删除」把错放的文件移进回收站。' }));
+    }
+
+    function loadLocalPane(force) {
+      if (localLoaded && !force) return;
+      localLoaded = true;
+      if (!localState.scanned) {
+        localPane.innerHTML = '';
+        localPane.appendChild(el('div', { class: 'field-hint', text: '正在读取 ' + (App.primaryLocalPath(a) || '素材目录') + ' …' }));
+      }
+      /* 只画界面、不落库：打开详情不该悄悄改记录。要落库走「重新扫描」或「重新解析」。 */
+      rescanLocal({ save: false });
     }
 
     var versionsPane = el('div', { class: 'detail-stack' }, [
       el('div', { class: 'detail-tabs' }, [tabLink, tabLocal]),
-      linkPane, localPane
+      missBox, linkPane, localPane
     ]);
-    /* 一条链接都没有、但有本地路径 → 直接停在「本地文件」，省一次点击 */
-    if (!linkFileCount && (a.paths || []).length) pickTab(true);
+    /* 默认页：原地刷新（opts.keepTab）回到上次那一页；一条链接都没有、但有本地路径 → 直接停在「本地文件」 */
+    if (opts.keepTab ? !!Modals._localTab : (!linkFileCount && (a.paths || []).length)) pickTab(true);
     else tabLink.classList.add('on');
+    /* 打开就先静默对一次账：本体文件被删了要在「打开的时候」就提示出来。
+     * 只改界面不落库（落库留给显式的「重新扫描 / 重新解析」），避免扫错一次就被当成事实写进库。 */
+    if (App.primaryLocalPath(a)) rescanLocal({ save: false });
 
     var content = el('div', { class: 'detail-content-wrap' }, [
       el('div', { class: 'detail-content-head' }, [ICONS.make('box', { size: 15 }), el('span', { text: '详细信息' })]),
@@ -1257,8 +1865,11 @@ var Modals = {
       !(a.autoFilled && a.autoFilled.versions) &&
       !(a.versions || []).some(function (v) { return v.orderUrl && v.orderUrl.trim() && !v.special; }) &&
       (((a.links || []).some(function (l) { return isHttpUrl(l.url); })) || a.itemId);
-    if (!opts.noAutoEnrich && needsVariantAuto) {
-      Toast.info('正在通过程序后端自动获取版本 / 变体 …', 2200);
+    /* 自动补全先过限流闸（`Importer.autoEnrichGate`）：设置关掉、该站没存 Cookie、或这条素材还在
+     * 冷却里，就静静跳过 —— 不能让「点开详情」变成对 BOOTH 的连续请求。 */
+    var autoGate = (needsVariantAuto && !opts.noAutoEnrich) ? Importer.autoEnrichGate(a) : { ok: false, why: 'skip' };
+    if (autoGate.ok) {
+      Toast.info('正在自动获取版本 / 变体 …', 2000);
       var enrichFn = a.source === 'gumroad' ? Importer.autoEnrichGumroadAsset : Importer.autoEnrichBoothAsset;
       enrichFn(a).then(function (saved) {
         if (!saved || saved.delisted) return;
@@ -1713,17 +2324,17 @@ var Modals = {
     });
     var pasteHint = el('div', { class: 'field-hint' });
     var pasteHintLink = el('div', { class: 'field-hint' });
-    var fetchHint = el('div', { class: 'field-hint', text: '提示：可粘贴完整商品链接；也可以只输入 BOOTH 数字商品 ID（如 8404988）或 Gumroad 短链接 ID，点「联网自动填充」会自动补全为完整链接并写入下方「商店链接」。' });
+    var fetchHint = el('div', { class: 'field-hint', text: '提示：可粘贴完整商品链接；也可以只输入 BOOTH 数字商品 ID（如 8404988）或 Gumroad 短链接 ID，点「强制联网填充」会自动补全为完整链接并写入下方「商店链接」。' });
     function updateFetchHint() {
       var raw = fetchInput.value.trim();
       if (!raw) {
-        fetchHint.textContent = '提示：可粘贴完整商品链接；也可以只输入 BOOTH 数字商品 ID（如 8404988）或 Gumroad 短链接 ID，点「联网自动填充」会自动补全为完整链接并写入下方「商店链接」。';
+        fetchHint.textContent = '提示：可粘贴完整商品链接；也可以只输入 BOOTH 数字商品 ID（如 8404988）或 Gumroad 短链接 ID，点「强制联网填充」会自动补全为完整链接并写入下方「商店链接」。';
       } else if (/^\d{4,15}$/.test(raw)) {
-        fetchHint.textContent = '已识别为 BOOTH 商品 ID：点「联网自动填充」会自动补全为完整商品链接，并写入「商店链接」。';
+        fetchHint.textContent = '已识别为 BOOTH 商品 ID：点「强制联网填充」会自动补全为完整商品链接，并写入「商店链接」。';
       } else if (!isHttpUrl(raw) && /^[A-Za-z0-9][A-Za-z0-9_.=-]{0,100}$/.test(raw)) {
-        fetchHint.textContent = '已识别为商品 ID / 短链接：点「联网自动填充」会先尝试补全为完整链接（BOOTH 优先），成功后写入「商店链接」。';
+        fetchHint.textContent = '已识别为商品 ID / 短链接：点「强制联网填充」会先尝试补全为完整链接（BOOTH 优先），成功后写入「商店链接」。';
       } else {
-        fetchHint.textContent = '完整商品链接：点「联网自动填充」抓取信息，并自动写入「商店链接」。';
+        fetchHint.textContent = '完整商品链接：点「强制联网填充」抓取信息，并自动写入「商店链接」。';
       }
     }
     function updatePasteHint() {
@@ -1760,37 +2371,27 @@ var Modals = {
       }, ICONS.label('\u{1F50E} 解析粘贴内容'))
     ]);
 
-    /* ---- 联网抓取（全部由程序后端负责） ---- */
-    var netBtn = el('button', {
-      class: 'btn', type: 'button', onclick: function () { doFetch({}); }
-    }, ICONS.label('\u{1F310} 联网自动填充'));
-    // 已保存 Cookie 时：即便在手动粘贴模式下也可直接让后端联网获取（含已购版本与下载直链）
-    var cookieBtn = el('button', {
-      class: 'btn btn-warn', type: 'button', title: '用本机保存的 Cookie 由程序后端获取，已购商品会带出版本、价格与全部下载直链',
-      onclick: function () { doFetch({ forceNetwork: true, viaCookie: true }); }
-    }, ICONS.label('\u{1F510} 用 Cookie 获取已购信息'));
-    // 强制联网填充：忽略字段锁定与本地缓存，除自定义标题/原标题/角色三语名外全部用获取信息覆盖
+    /* ---- 联网抓取（全部由程序后端负责） ----
+     * 只保留一个「强制联网填充」。以前还有「联网自动填充」和「用 Cookie 获取已购信息」：
+     * 那两个只填空值、还吃本地缓存，点完常常看不出变化（用户原话「差点意思」），已删除；
+     * 所有自动 / 刷新入口也统一走这一套（默认值见 startFetch）。 */
     var forceBtn = el('button', {
       class: 'btn btn-danger-ghost', type: 'button',
-      title: '忽略「自动获取/用户自定义」锁定与本地缓存，重新联网获取并覆盖信息（自定义标题、原标题、角色三语名始终保留；标签会重新自动翻译）',
+      title: '联网重新获取并覆盖信息（忽略本地缓存与字段锁定；自定义标题、原标题、角色三语名始终保留）',
       onclick: function () { doFetch({ forceFill: true, forceNetwork: true, noCache: true }); }
     }, ICONS.label('\u26A1 强制联网填充'));
 
     /* 判据在 Fetchers.looksDelisted（批量更新商品信息共用），这里只转发 */
     function looksDelisted(info) { return Fetchers.looksDelisted(info); }
 
-    /** 输入的是商品 ID（不是完整链接）时，后台依次尝试 BOOTH / Gumroad 候选链接；
-     *  成功就把输入框替换为完整链接，并继续按该链接完成信息获取填充。 */
+    /** 输入的是商品 ID（不是完整链接）时，后台依次尝试候选链接（BOOTH / Gumroad）；
+     *  成功就把输入框替换为完整链接，并继续按该链接完成信息获取填充。
+     *  候选规则统一由 Fetchers.productCandidates 给（详情页的「从商品链接补充信息」共用）。 */
     function resolveProductInput(raw, opts) {
-      var candidates = [];
-      if (/^\d{4,15}$/.test(raw)) {
-        candidates.push('https://booth.pm/ja/items/' + raw);
-        candidates.push('https://booth.pm/zh-cn/items/' + raw);
-      }
-      candidates.push('https://gumroad.com/l/' + encodeURIComponent(raw));
+      var candidates = Fetchers.productCandidates(raw);
       logBox.innerHTML = ''; logBox.style.display = '';
-      log('\u{1F50D} 检测到输入的是商品 ID：' + raw + '，正在后台尝试补全为完整商品链接 …');
-      netBtn.disabled = true; cookieBtn.disabled = true; forceBtn.disabled = true;
+      log('\u{1F50D} 输入的不是完整链接：' + raw + '，正在后台尝试补全为完整商品链接 …');
+      forceBtn.disabled = true; ICONS.apply(forceBtn, ('\u23F3 补全链接中 …'));
       function next(i) {
         if (i >= candidates.length) {
           log('\u2716 未能把「' + raw + '」补全为有效商品链接。请粘贴完整商品页 URL 后重试。');
@@ -1799,7 +2400,13 @@ var Modals = {
           return;
         }
         var candidate = candidates[i];
-        return Fetchers.fetchInfo(candidate, { forceNetwork: true, noCache: false, onLog: function () {} }).then(function (info) {
+        return Fetchers.fetchInfoTimed(candidate, { forceNetwork: true, noCache: true, onLog: function () {} }, 12000).then(function (info) {
+          if (info && info.__failed && info.reason === 'timeout') {
+            log('\u26A0 补全超时（12 秒没有响应）：' + candidate + '，先粘贴完整商品页链接再试');
+            Toast.err('补全超时：请粘贴完整商品链接后重试', 5600);
+            restoreButtons();
+            return;
+          }
           var ok = info && !info.__failed && info.originalTitle &&
             !/(^|\s)(404|not found|page not found|不存在)(\s|$)/i.test(info.originalTitle) &&
             info.originalTitle.toLowerCase() !== 'gumroad';
@@ -1815,9 +2422,7 @@ var Modals = {
     }
 
     function restoreButtons() {
-      netBtn.disabled = false; cookieBtn.disabled = false; forceBtn.disabled = false;
-      ICONS.apply(netBtn, ('\u{1F310} 联网自动填充'));
-      ICONS.apply(cookieBtn, ('\u{1F510} 用 Cookie 获取已购信息'));
+      forceBtn.disabled = false;
       ICONS.apply(forceBtn, ('\u26A1 强制联网填充'));
     }
 
@@ -1826,7 +2431,8 @@ var Modals = {
       var url = rememberLink();
       if (!isHttpUrl(url)) {
         var raw = String(url || '').trim();
-        if (/^[A-Za-z0-9][A-Za-z0-9_.=-]{0,100}$/.test(raw)) { resolveProductInput(raw, opts); return; }
+        /* 纯 ID / 短码 / 漏了协议头的链接都交给补全（判据同 Fetchers.productCandidates） */
+        if (raw && Fetchers.productCandidates(raw).length) { resolveProductInput(raw, opts); return; }
         Toast.warn('请输入商品链接，或只输入商品 ID（BOOTH 数字 ID / Gumroad 短链接 ID）');
         return;
       }
@@ -1834,16 +2440,11 @@ var Modals = {
     }
 
     function startFetch(url, opts) {
-      opts = opts || {};
-      if (!Net.networkAllowed() && !opts.forceNetwork) {
-        log('\u{1F6E1} 当前为「手动粘贴源码」模式，未发起任何请求。如需联网抓取，请在「设置 → 联网与抓取」选择「内置联网」，或点「用 Cookie 获取已购信息」。');
-        Toast.warn('当前为「手动粘贴源码」模式');
-        return;
-      }
+      /* 一律按「强制联网填充」走：忽略本地缓存、忽略字段锁定（自定义标题 / 原标题 / 角色三语名除外）。
+       * 普通填充只填空值、命中缓存就直接返回，用户点完经常「看不出变化」，已经移除。 */
+      opts = Object.assign({ forceFill: true, forceNetwork: true, noCache: true }, opts || {});
       logBox.innerHTML = ''; logBox.style.display = '';
-      netBtn.disabled = true; cookieBtn.disabled = true; forceBtn.disabled = true;
-      ICONS.apply(netBtn, ('\u{23F3} 抓取中 …'));
-      ICONS.apply(cookieBtn, ('\u{23F3} 获取中 …'));
+      forceBtn.disabled = true;
       ICONS.apply(forceBtn, ('\u23F3 强制联网填充中 …'));
       Fetchers.fetchInfo(url, { onLog: log, noCache: !!opts.noCache, forceNetwork: !!opts.forceNetwork }).then(function (info) {
         if (!info || info.__failed) {
@@ -1871,7 +2472,7 @@ var Modals = {
             });
         } else {
           if (a.delisted) { a.delisted = false; log('\u2714 商品可正常获取，已清除「已下架」标记'); }
-          // 「联网自动填充」附带识别已购版本/变体：
+          // 联网填充顺带识别已购版本/变体：
           // BOOTH 已购 variation 的按钮是订单链接；Gumroad 登录后 purchase.content_url 是下载页链接。
           Net.fetchText(url, { forceNetwork: true, onLog: function () {} }).then(function (r) {
             if (r && r.ok && r.text) {
@@ -1962,12 +2563,7 @@ var Modals = {
       modeBadge.textContent = '当前方案：' + modeLabel();
       var paste = currentMode() === 'paste';
       pasteWrap.style.display = paste ? '' : 'none';
-      netBtn.style.display = paste ? 'none' : '';
-      forceBtn.style.display = '';
-      // 离线模式下如果保存过 Cookie，仍提供「仅 Cookie 联网获取」按钮
-      var creds = App.settings.credentials || {};
-      var hasCookie = Object.keys(creds).some(function (h) { return creds[h] && creds[h].cookie; });
-      cookieBtn.style.display = (paste && hasCookie) ? '' : 'none';
+      forceBtn.style.display = '';          // 「手动粘贴源码」下也留着：想联网就点它，不会偷偷发请求
       updatePasteHint();
     }
     /* 去抖函数必须只创建一次：写在回调里等于每次按键新建闭包，
@@ -2037,7 +2633,7 @@ var Modals = {
 
     /* ---------------- 链接 → 自动填「原标题」 ----------------
      * 打开表单、或粘贴/更换商品链接后，由后端取一次商品标题填进「原标题」；
-     * 「自定义标题」为空时顺带用它兜底。其他字段（简介、标签、价格）仍要用户点「联网自动填充」。
+     * 「自定义标题」为空时顺带用它兜底。其他字段（简介、标签、价格）仍要用户点「强制联网填充」。
      * 两点约束：
      *   1. 手动粘贴模式（默认）下一律不联网 —— 「不发外部请求」是程序对外的承诺；
      *   2. 用户自己填过原标题就不覆盖，只有「空」或「上次自动写进去的值」才更新。 */
@@ -2100,8 +2696,7 @@ var Modals = {
       if (url === autoTitleLastUrl) return;
       if (!autoTitleWritable()) { titleAutoHint.textContent = '原标题是你手动填的，链接标题不会覆盖它'; return; }
       var netOpen = (typeof Net !== 'undefined' && Net.networkAllowed());
-      /* 「手动粘贴源码」默认零请求；唯一例外是设置里明确开着的「粘贴链接自动取标题」，
-       * 它只发一次、只取标题。用户关掉后连这一次都不发。 */
+      /* 「手动粘贴源码」+ 关掉「粘贴链接自动取标题」才是零请求；其余一律照抓（强制联网） */
       if (!netOpen && App.settings.autoTitleFetch === false) {
         titleAutoHint.textContent = '「粘贴链接自动取标题」已关闭，不会联网（可在「设置 → 联网与抓取」打开）';
         return;
@@ -2112,8 +2707,7 @@ var Modals = {
       autoTitleBusy = true;
       var seq = ++autoTitleSeq;
       titleAutoHint.textContent = '正在获取链接标题…';
-      /* 手动粘贴模式下要靠 forceNetwork 才发得出去：这是上面那个开关授权的，不是绕过用户设置 */
-      Fetchers.fetchTitle(url, { forceNetwork: !netOpen }).then(function (r) {
+      Fetchers.fetchTitle(url, { forceNetwork: true }).then(function (r) {
         if (seq !== autoTitleSeq) return;
         autoTitleBusy = false;
         if (r && r.ok && r.title) {
@@ -2121,7 +2715,7 @@ var Modals = {
           autoTitleApplied[url] = r.title;
           fillAutoTitle(r.title);
         } else {
-          titleAutoHint.textContent = '没能取到标题（' + ((r && r.reason) || '网络问题') + '），可点「联网自动填充」';
+          titleAutoHint.textContent = '没能取到标题（' + ((r && r.reason) || '网络问题') + '），可在下面点「强制联网填充」';
         }
       }).catch(function (e) {
         autoTitleBusy = false;
@@ -2290,7 +2884,7 @@ var Modals = {
     var body = el('div', { class: 'form' }, [
       el('div', { class: 'form-section' }, [
         el('div', { class: 'section-title' }, [ICONS.label('\u{1F4E5} 从商品链接填充信息 '), modeBadge]),
-        el('div', { class: 'fetch-row' }, [fetchInput, openPageBtn, netBtn, cookieBtn, forceBtn, switchModeBtn]),
+        el('div', { class: 'fetch-row' }, [fetchInput, openPageBtn, forceBtn, switchModeBtn]),
         fetchHint,
         pasteWrap,
         logBox
@@ -2328,7 +2922,7 @@ var Modals = {
             el('label', { class: 'check' }, [favCheck, el('span', { text: '喜欢' })]),
             el('label', { class: 'check' }, [hideCheck, el('span', { text: '隐藏（不在默认列表显示）' })])
           ]), '获赠会显示专属角标与筛选标签（BOOTH 获赠页同步时自动识别，可手动改）'),
-          Field.row('上架日期', publishedAtInput, '商品发布 / 上架日期（YYYY-MM-DD），详情与卡片封面右下角显示'),
+          Field.row('上架日期', publishedAtInput, '商品发布 / 上架日期（YYYY-MM-DD），详情页「商品信息」里显示（卡片封面不再显示）'),
           Field.row('商品简介', el('div', {}, [descInput]), null, aiDescBtn),
           Field.row('备注', noteInput, null, aiNoteBtn),
         ]),
@@ -2391,18 +2985,33 @@ var Modals = {
     var freeAssetEdit = a.isFree === true || !!(epEdit && epEdit.value === 0);
     var needVariantAuto = !isNew && isOrderSite && autoSourceOk && shopLink && !freeAssetEdit && !a.delisted && !Importer.autoEnrichBusy() &&
       !(a.autoFilled && a.autoFilled.versions) && !hasValidVersion;
-    if (needVariantAuto) {
+    var needCookieAuto = !isNew && App.settings.autoCookieFetch && hasCookieAuto && shopLink && autoSourceOk && !a.delisted &&
+      !(a.versions || []).length && !(a.downloadLinks || []).length;
+    /* 两条自动补齐都要过限流闸（`Importer.autoEnrichGate`）：该站没 Cookie 就不发请求，
+     * 同一条素材失败过就按冷却退避 —— 反复开编辑页不该变成对 BOOTH 的连发。 */
+    var gateVariant = needVariantAuto ? Importer.autoEnrichGate(a) : { ok: false };
+    var gateCookie = needCookieAuto ? Importer.autoEnrichGate(a, { ignoreSetting: true }) : { ok: false };
+    if (gateVariant.ok) {
       setTimeout(function () {
+        Importer.autoEnrichTouch(a.id);            // 先记一次尝试：中途失败也走冷却，不每次都重来
         log('\u{1F510} 检测到 ' + (a.source === 'gumroad' ? 'Gumroad' : 'BOOTH') + ' 素材缺少已购变体，自动获取版本 / 变体 …');
-        doFetch({ forceNetwork: true, silent: true });
+        /* 打开编辑页的自动补齐：走强制联网（不吃缓存），但不覆盖已填字段 ——
+         * 静默动作覆盖用户改过的东西，等于页面一开就自己变样 */
+        doFetch({ forceNetwork: true, noCache: true, forceFill: false, silent: true });
       }, 900);
+    } else if (needVariantAuto && !gateVariant.ok) {
+      if (gateVariant.why === 'cooldown') log('\u{1F634} 这条素材刚自动补全过（' + gateVariant.tries + ' 次未成功），按冷却跳过，稍后可手动点「强制联网填充」。');
+      else if (gateVariant.why === 'no-cookie') log('\u{1F36A} 还没保存 ' + (a.source === 'gumroad' ? 'Gumroad' : 'BOOTH') + ' 的 Cookie，自动补全跳过（读不到订单页，跑了也没用）。');
+      else if (gateVariant.why === 'off') log('\u{1F6E1} 「自动补全版本与变体」已关闭，跳过。');
     } else if (Importer.autoEnrichBusy() && !isNew && isOrderSite) {
       log('\u26A0 详情页正在自动获取变体信息，编辑页本次自动操作已跳过，避免冲突。');
-    } else if (!isNew && App.settings.autoCookieFetch && hasCookieAuto && shopLink && autoSourceOk && !a.delisted &&
-        !(a.versions || []).length && !(a.downloadLinks || []).length) {
+    } else if (gateCookie.ok) {
       setTimeout(function () {
+        Importer.autoEnrichTouch(a.id);
         log('\u{1F510} 检测到已保存 Cookie，自动获取已购版本与价格 …');
-        doFetch({ forceNetwork: true, silent: true });
+        /* 打开编辑页的自动补齐：走强制联网（不吃缓存），但不覆盖已填字段 ——
+         * 静默动作覆盖用户改过的东西，等于页面一开就自己变样 */
+        doFetch({ forceNetwork: true, noCache: true, forceFill: false, silent: true });
       }, 700);
     }
 

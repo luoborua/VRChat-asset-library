@@ -66,7 +66,7 @@ var Importer = (function () {
     onLog = onLog || function () {};
     var top = [];
     for await (var entry of sourceDir.values()) top.push(entry);
-    var counter = { copied: 0, moved: 0, failed: 0 };
+    var counter = { copied: 0, moved: 0, failed: 0, names: [] };
     var moveMode = !!App.settings.importMoveInsteadOfCopy;
     if (moveMode) {
       // 拖拽来的目录通常只有读权限：先给源目录补一次读写权限，子项的 move 才可能成功
@@ -80,7 +80,7 @@ var Importer = (function () {
     for (var item of top) {
       if (moveMode) {
         var moved = await tryMoveEntry(item, dst);
-        if (moved) { counter.moved++; onLog('已移动：' + item.name); }
+        if (moved) { counter.moved++; counter.names.push(item.name); onLog('已移动：' + item.name); }
         else {
           counter.failed++;
           onLog('\u26A0 移动失败，已跳过（不复制' + (item.kind === 'directory' ? '，目录整项移动不被浏览器支持' : '') + '）：' + item.name);
@@ -90,6 +90,7 @@ var Importer = (function () {
       if (item.kind === 'file') {
         await copyEntryTo(item, dst, item.name);
         counter.copied++;
+        counter.names.push(item.name);
         onLog('已复制：' + item.name);
       } else {
         var sub = await dst.getDirectoryHandle(item.name, { create: true });
@@ -220,6 +221,9 @@ var Importer = (function () {
     return {
       selected: true,
       name: String(name).replace(/[_]+/g, ' ').trim(),
+      /* 名字里带 BOOTH 商品号（[5058951]-xxx / 纯数字）就先记下来：
+       * 导入时直接当 itemId 用，并在导入完成后自动按它解析一次商品页。 */
+      guessItemId: boothIdFromName(name),
       dirHandle: dirHandle,
       files: files, archives: archives, images: images, linkFiles: links,
       versions: versions, totalSize: total,
@@ -370,7 +374,20 @@ var Importer = (function () {
   function ensureStoragePathQuiet(asset) {
     if (!asset) return Promise.resolve(null);
     var existing = (asset.paths || []).filter(function (p) { return p && p.path && p.note === '存储路径'; })[0];
-    if (existing) return Promise.resolve(existing.path);
+    if (existing) {
+      /* 记录里那条目录可能已经不在了（被手动改名 / 跟着分类搬走 / 被旧快照写回了老位置）。
+       * 这时先在库里按名字把真目录找回来 —— 否则后面任何一次写文件都会在原处
+       * 重建一个只装着封面图的空壳文件夹（用户看到「新分类下多了个只有图片的目录」）。 */
+      if (!FS.host || typeof FS.host.exists !== 'function') return Promise.resolve(existing.path);
+      return FS.host.exists(existing.path).then(function (kind) {
+        if (kind !== 'missing') return existing.path;                 // dir / file / 判不了 → 不折腾
+        return App.findExistingFolder(asset).then(function (hit) {
+          if (!hit) return existing.path;
+          setPathEntry(asset, hit, '存储路径');
+          return Promise.resolve(App.save(asset)).then(function () { return hit; }, function () { return hit; });
+        });
+      }).catch(function () { return existing.path; });
+    }
     var cat = App.categoryLabel(asset.category || 'other');
     var safe = App.folderName(asset);
     var rootPath = App.libraryRoot();
@@ -448,7 +465,23 @@ var Importer = (function () {
       if (!state.cands.length) { listBox.appendChild(el('div', { class: 'multi-empty', text: '未发现可导入的素材' })); return; }
       state.cands.forEach(function (c, i) {
         var cb = el('input', { type: 'checkbox', checked: c.selected, onchange: function () { c.selected = cb.checked; updateSummary(); } });
-        var nameIn = el('input', { class: 'input input-sm', value: c.name, oninput: function () { c.name = nameIn.value; } });
+        /* 商品编号提示：能改文字，不能改「认出来的编号」——除非名字里出现新的编号。
+         * 只更新这一小块节点，重绘整个列表会让输入框失焦、光标丢掉。 */
+        var idChip = el('div', { class: 'chip-wrap' });
+        function syncIdChip() {
+          idChip.innerHTML = '';
+          if (!c.guessItemId) return;
+          idChip.appendChild(el('span', {
+            class: 'chip chip-ok',
+            title: '导入后会按这个编号解析 BOOTH 商品页，自动补全标题 / 封面 / 标签等信息',
+            text: '商品 ID ' + c.guessItemId + '（导入后自动解析）'
+          }));
+        }
+        var nameIn = el('input', { class: 'input input-sm', value: c.name, oninput: function () {
+          c.name = nameIn.value;
+          var id2 = boothIdFromName(this.value);
+          if (id2 && id2 !== c.guessItemId) { c.guessItemId = id2; syncIdChip(); }
+        } });
         var thumb = el('div', { class: 'import-thumb' }, [App.categoryIcon(c.category || 'other', { size: 22 })]);
         if (c.coverFile) {
           c.coverFile.handle.getFile().then(function (f) {
@@ -470,6 +503,7 @@ var Importer = (function () {
             c.versions.length ? el('div', { class: 'chip-wrap' }, c.versions.slice(0, 6).map(function (v) {
               return el('span', { class: 'chip' + (v.isLatest ? ' chip-ok' : '') }, v.name + '（' + fmtSize(v.size) + '）');
             })) : null,
+            (function () { syncIdChip(); return idChip; })(),
             c.storeURL ? el('div', { class: 'field-hint mono', text: c.storeURL }) : null
           ])
         ]));
@@ -526,18 +560,24 @@ var Importer = (function () {
 
       log('开始导入 ' + sel.length + ' 项 …');
       var chain = Promise.resolve(), done = 0, failed = 0, stopped = 0;
+      var toParse = [];        // 名字里带商品编号的：导入完成后按编号解析一次商品页
 
       sel.forEach(function (c) {
         chain = chain.then(function () {
           if (aborted) { stopped++; return; }
           var cat = forceCat || c.category || 'other';
           var catLabel = App.categoryLabel(cat);
+          /* 名字里的商品编号：有商店链接时以链接为准（链接可能是 Gumroad），
+           * 没链接才拿编号当 BOOTH 商品页。 */
+          var guessId = c.storeURL ? '' : String(c.guessItemId || '');
           var asset = Store.normalizeAsset({
             title: c.name,
-            source: c.storeURL ? (Fetchers.detect(c.storeURL).sourceId || 'other') : 'other',
+            source: c.storeURL ? (Fetchers.detect(c.storeURL).sourceId || 'other') : (guessId ? 'booth' : 'other'),
+            itemId: guessId,
             category: cat,
             avatars: uniq((c.avatars || []).concat(extraAvatars)),
-            links: c.storeURL ? [{ url: c.storeURL, label: hostOf(c.storeURL) }] : [],
+            links: c.storeURL ? [{ url: c.storeURL, label: hostOf(c.storeURL) }]
+              : (guessId ? [{ url: 'https://booth.pm/ja/items/' + guessId, label: 'BOOTH' }] : []),
             downloaded: true, downloadedAt: nowISO(),
             fileSize: c.totalSize,
             importedFrom: 'folder',
@@ -576,7 +616,10 @@ var Importer = (function () {
             } else {
               asset.paths = [{ path: normalizeWinPath((state.rootName || '') + '\\' + c.name), note: '相对路径，请补全为绝对路径' }];
             }
-            return App.save(asset);
+            return App.save(asset).then(function (saved) {
+              if (guessId) toParse.push({ asset: saved || asset, id: guessId, name: c.name });
+              return saved;
+            });
           });
 
           /* 单项失败不中断整批：某一项抛错（权限 / 文件被占用 / 磁盘满）不该让它
@@ -589,6 +632,35 @@ var Importer = (function () {
         });
       });
 
+      /* 导入完成后统一按编号解析一遍：串行 + 1.2~1.8 秒间隔，
+       * 一批几十个也不会把 BOOTH 打成爬虫。每项失败只记一行，不影响别的项。 */
+      function parseAll() {
+        if (!toParse.length) return Promise.resolve(null);
+        if (App.settings && App.settings.autoParseOnImport === false) {
+          log('\u00B7 已关闭「导入后按编号解析」，' + toParse.length + ' 项只登记了编号');
+          return Promise.resolve(null);
+        }
+        log('开始按商品编号解析 ' + toParse.length + ' 项（每项间隔 1~2 秒，别把站点打急）…');
+        var okN = 0, badN = 0;
+        var p = Promise.resolve();
+        toParse.forEach(function (t, i) {
+          p = p.then(function () {
+            if (aborted) { badN++; return null; }
+            log('\u00B7 [' + (i + 1) + '/' + toParse.length + '] 解析 ' + t.id + ' 号：' + t.name);
+            return autoParseBoothById(t.asset, t.id).then(function (r) {
+              if (r && r.ok) {
+                okN++;
+                log('  \u2714 已补充：' + (((r.changed || []).slice(0, 6).join('、')) || '（没有新增字段）'));
+              } else {
+                badN++;
+                log('  \u00B7 跳过：' + ((r && r.reason) || '解析失败'));
+              }
+            });
+          });
+        });
+        return p.then(function () { return { ok: okN, bad: badN }; });
+      }
+
       chain.then(function () {
         var tail = aborted
           ? '（已按关闭窗口中止，剩余 ' + stopped + ' 项未处理）'
@@ -598,6 +670,14 @@ var Importer = (function () {
         UI.renderAll();
         if (aborted) Toast.info('导入已中止：成功 ' + done + ' 项' + (failed ? '，失败 ' + failed + ' 项' : ''), 7000);
         else Toast.ok('已导入 ' + done + ' 项素材' + (failed ? '，' + failed + ' 项失败' : ''));
+
+        return parseAll().then(function (pr) {
+          UI.renderAll();
+          if (!pr) return;
+          log('\u2014\u2014 按编号解析完成：成功 ' + pr.ok + ' 项'
+            + (pr.bad ? '，跳过 ' + pr.bad + ' 项' : '') + ' \u2014\u2014');
+          if (pr.ok) Toast.ok('已按商品编号补全 ' + pr.ok + ' 项素材的信息', 5200);
+        });
       }).catch(function (e) {
         log('\u2716 导入中断：' + (e.message || e));
         Toast.err('导入失败：' + (e.message || e));
@@ -1423,7 +1503,6 @@ var Importer = (function () {
 
     function run() {
       if (syncRunning) { log('\u26A0 同步正在进行中，请勿重复点击'); return; }
-      if (!Net.networkAllowed()) { log('\u2716 当前为「手动粘贴源码」（不联网）。请先在「设置 → 联网与抓取」中选择「内置联网」。'); return; }
       var myRun = ++syncSeq;
       syncRunning = true;
       startBtn.disabled = true; ICONS.apply(startBtn, ('\u{23F3} 同步中 …'));
@@ -1828,6 +1907,9 @@ var Importer = (function () {
         return;
       }
       var added = [], okFiles = 0, failFiles = 0;
+      /* 导进来的文件名要登记：详情页「本地文件」靠 downloadedFiles 认「这是本体」。
+       * 不登记的话，导入完的文件会被当成「磁盘上多出来的」，一扫描就被划成 DLC。 */
+      var importedNames = [];
       var folderPath = absPath([cat, safeTitle]);
       function absPath(parts) {
         return joinWinPath(App.libraryRoot(), parts);   // 推导自应用目录，不写死路径
@@ -1849,12 +1931,16 @@ var Importer = (function () {
             });
             okFiles += counter.moved + counter.copied;
             failFiles += counter.failed || 0;
+            importedNames = importedNames.concat(counter.names || []);
             continue;
           }
           if (!it.isDir) {
             var movedSingle = await tryMoveEntry(it.handle, dst);
-            if (movedSingle) { okFiles++; }
-            else if (!App.settings.importMoveInsteadOfCopy) { await writeFile(it.file, dst); okFiles++; }
+            if (movedSingle) { okFiles++; importedNames.push(it.file ? it.file.name : it.rel); }
+            else if (!App.settings.importMoveInsteadOfCopy) {
+              await writeFile(it.file, dst); okFiles++;
+              importedNames.push(it.file.name);
+            }
             else { failFiles++; console.warn('拖拽导入：移动失败，已跳过（不复制）', it.rel); }
           } else if (it.handle) {
             // 文件夹作为整体搬：移动模式下做不到就跳过，复制模式整项复制
@@ -1894,6 +1980,12 @@ var Importer = (function () {
         return;
       }
       setPathEntry(asset, folderPath, '存储路径');
+      if (importedNames.length) {
+        /* 记进 downloadedFiles：既让详情页认出「这是本体」，也让下载按钮立刻显示「重新下载」 */
+        asset.downloadedFiles = uniq((asset.downloadedFiles || []).concat(importedNames.filter(Boolean)));
+        asset.downloaded = true;
+        if (!asset.downloadedAt) asset.downloadedAt = nowISO();
+      }
       try {
         pathEditor.setValue(asset.paths);
       } catch (e) { console.warn('路径登记失败', e); }
@@ -1911,6 +2003,144 @@ var Importer = (function () {
    * → 已购订单页的下载文件。成功后打 autoFilled.versions 避免每次打开都重抓；404/410 记已下架。
    */
   var autoEnrichBusy = false;
+
+  /* ---------------- 自动补全的限流 ----------------
+   * 「打开详情 / 编辑页就自己联网」这条路上，一个商品要 1 次 JSON + 1 次商品页 HTML + N 次订单页。
+   * 更糟的是失败时不会锁（autoFilled.versions 没写上），于是每开一次详情就整轮重跑 ——
+   * 反复点开几十次就是几十轮请求，很容易被 BOOTH 当爬虫。四层约束：
+   *   ① 开关：设置里可以整体关掉自动补全；
+   *   ② Cookie：目标站没存 Cookie 就不跑 —— 读不到订单页，商品页那几次请求纯属浪费；
+   *   ③ 冷却：同一条素材自动补全失败后逐次翻倍（20 分钟 → 40 → 80 … 最长 6 小时）；
+   *   ④ 排队：两次自动补全之间至少隔 4 秒，不会并发。
+   * 手动按钮（强制联网填充 / 重新解析 / 批量）不受这里约束，那是用户明确要求的。
+   */
+  var AUTO_TRY_LS = 'vrclib.autoEnrich.tried.v1';
+  var AUTO_COOLDOWN_MS = 20 * 60 * 1000;
+  var AUTO_COOLDOWN_MAX = 6 * 60 * 60 * 1000;
+  var AUTO_GAP_MS = 4000;
+  var autoLastAt = 0;
+
+  function autoTriedMap() {
+    try {
+      var m = JSON.parse(localStorage.getItem(AUTO_TRY_LS) || '{}');
+      return (m && typeof m === 'object') ? m : {};
+    } catch (e) { return {}; }
+  }
+  function autoTriedSave(m) {
+    try {
+      var keys = Object.keys(m);
+      if (keys.length > 300) {                       // 这张表不该无限长
+        keys.sort(function (x, y) { return (m[x].at || 0) - (m[y].at || 0); });
+        keys.slice(0, keys.length - 300).forEach(function (k) { delete m[k]; });
+      }
+      localStorage.setItem(AUTO_TRY_LS, JSON.stringify(m));
+    } catch (e) {}
+  }
+  function autoUrlOf(a) {
+    var link = (a.links || []).map(function (l) { return String((l && l.url) || '').trim(); }).filter(isHttpUrl)[0] || '';
+    if (link) return link;
+    var iid = String(a.itemId || '').trim();
+    if (!iid) return '';
+    return (a.source === 'gumroad' ? 'https://gumroad.com/l/' : 'https://booth.pm/ja/items/') + iid;
+  }
+  /** 这条素材现在能不能自动补全。why 只用于调试日志，不弹给用户。 */
+  function autoEnrichGate(a, opts) {
+    opts = opts || {};
+    if (!a || !a.id) return { ok: false, why: 'no-asset' };
+    if (!opts.ignoreSetting && App.settings.autoVariantFetch === false) return { ok: false, why: 'off' };
+    var probe = autoUrlOf(a);
+    if (!probe) return { ok: false, why: 'no-url' };
+    if (!Fetchers.hasCred(probe)) return { ok: false, why: 'no-cookie' };
+    var rec = autoTriedMap()[a.id];
+    var at = (rec && typeof rec === 'object') ? (Number(rec.at) || 0) : (Number(rec) || 0);
+    var n = (rec && typeof rec === 'object') ? (Number(rec.n) || 1) : 1;
+    var cool = Math.min(AUTO_COOLDOWN_MS * Math.pow(2, Math.max(0, n - 1)), AUTO_COOLDOWN_MAX);
+    if (at && Date.now() - at < cool) return { ok: false, why: 'cooldown', retryAt: at + cool, tries: n };
+    return { ok: true };
+  }
+  /* ---------------- 导入时按「名字里的商品编号」解析 ----------------
+   * 下载下来的素材常常是 `[5058951]-オフショルケーブルニットワンピース` 或者纯数字目录，
+   * 编号本身就把商品页指出来了，没必要让用户再手动粘一遍链接。导入完成后按编号抓一次
+   * 商品页，等价于在详情页「解析并补充」里填 ID 点按钮 —— 但静默、串行、带间隔。
+   *
+   * 与上面的 autoEnrichBoothAsset 分工不同：那个补「版本与变体」，要 Cookie 与冷却；
+   * 这里只抓公开商品页补标题 / 标签 / 图集 / 价格这些，导入是用户主动发起的，不吃冷却。
+   * 仍然限流：一次导入几十项时，1.2~1.8 秒的随机间隔，别把站点打急。 */
+  var PARSE_GAP_MS = 1200;
+  var parseBusyUntil = 0;
+
+  function parseGapWait() {
+    var now = Date.now();
+    var wait = Math.max(0, parseBusyUntil - now) + (PARSE_GAP_MS + Math.random() * 600);
+    parseBusyUntil = now + wait;
+    return wait;
+  }
+
+  /** 按商品编号解析一次并补进素材。永不 reject（导入不能因为联网失败变红），
+   *  返回 { ok, changed:[] , reason }。 */
+  function autoParseBoothById(asset, id) {
+    if (!asset || !id) return Promise.resolve({ ok: false, reason: 'no-id' });
+    if (App.settings && App.settings.autoParseOnImport === false) return Promise.resolve({ ok: false, reason: 'off' });
+    var url = 'https://booth.pm/ja/items/' + String(id).replace(/[^\d]/g, '');
+    if (!/\/items\/\d+$/.test(url)) return Promise.resolve({ ok: false, reason: 'bad-id' });
+
+    return new Promise(function (r) { setTimeout(r, parseGapWait()); }).then(function () {
+      return Fetchers.fetchInfoTimed(url, { forceNetwork: true, noCache: true }, 12000);
+    }).then(function (info) {
+      if (!info || info.__failed) return { ok: false, reason: (info && info.reason) || 'fetch-failed' };
+      /* 拿回来的必须是同一个商品：编号写错 / 已下架时，页面可能是别的商品或 404 壳页，
+       * 把它的标题写进来等于把这条素材变成另一个商品。 */
+      var gotId = String(info.itemId || '').trim();
+      if (gotId && gotId !== String(id)) return { ok: false, reason: 'id-mismatch' };
+      if (!info.originalTitle || /(^|\s)(404|not found|page not found|不存在)(\s|$)/i.test(info.originalTitle)) {
+        return { ok: false, reason: 'not-found' };
+      }
+      var before = null;
+      try { before = JSON.parse(JSON.stringify(asset)); } catch (e) { before = null; }
+      var res = { changed: [] };
+      try { res = Tools.applyShopInfo(asset, info, false) || res; } catch (e) {
+        if (typeof console !== 'undefined' && console.warn) console.warn('[import] 合并商品信息失败：' + ((e && e.message) || e));
+      }
+      /* 商品页链接补一条：详情页「链接」里能直接点开，下次重新解析也有落点 */
+      if (!asset.links) asset.links = [];
+      var hasLink = asset.links.some(function (l) {
+        return String((l && l.url) || '').replace(/[?#].*$/, '').replace(/\/+$/, '').toLowerCase() === url.toLowerCase();
+      });
+      if (!hasLink) asset.links.push({ url: url, label: (info.shop || 'BOOTH 商品') });
+      if (!asset.itemId) asset.itemId = String(id);
+      if (!asset.source || asset.source === 'other') asset.source = 'booth';
+
+      return App.save(asset, { prev: before || undefined }).then(function (saved) {
+        return { ok: true, asset: saved || asset, changed: (res && res.changed) || [] };
+      });
+    }).catch(function (e) {
+      if (typeof console !== 'undefined' && console.warn) console.warn('[import] 自动解析失败（' + id + '）：' + ((e && e.message) || e));
+      return { ok: false, reason: (e && e.message) || String(e) };
+    });
+  }
+
+  /** 记一次「试过了」。要在发请求之前调：中途失败也算试过，否则一关一开就重来。 */
+  function markAutoTried(id) {    if (!id) return;
+    var m = autoTriedMap();
+    var rec = m[id];
+    var n = ((rec && typeof rec === 'object') ? (Number(rec.n) || 0) : (rec ? 1 : 0)) + 1;
+    m[id] = { at: Date.now(), n: n };
+    autoTriedSave(m);
+  }
+  function clearAutoTried(id) {
+    var m = autoTriedMap();
+    if (!m[id]) return;
+    delete m[id];
+    autoTriedSave(m);
+  }
+  /** 排队取一个发送空位：两次自动补全之间至少隔 AUTO_GAP_MS */
+  function takeAutoSlot() {
+    var now = Date.now();
+    var gap = Math.max(0, autoLastAt + AUTO_GAP_MS - now);
+    autoLastAt = now + gap;
+    return gap ? new Promise(function (r) { setTimeout(r, gap); }) : Promise.resolve();
+  }
+
   function autoEnrichBoothAsset(a) {
     if (!a || a.source !== 'booth' || a.delisted) return Promise.resolve(a);
     // 免费素材没有「已购变体」可补；「未购买」不算免费 —— 它的 0 只是没有已购变体，
@@ -1922,9 +2152,14 @@ var Importer = (function () {
     var url = (a.links || []).filter(function (l) { return isHttpUrl(l.url); })[0];
     var itemUrl = url ? url.url : (a.itemId ? 'https://booth.pm/ja/items/' + a.itemId : '');
     if (!itemUrl) return Promise.resolve(a);
+    var gate = autoEnrichGate(a);
+    if (!gate.ok) return Promise.resolve(a);        // 关掉了 / 没 Cookie / 还在冷却
     autoEnrichBusy = true;
+    markAutoTried(a.id);
 
-    return Fetchers.fetchInfo(itemUrl, { forceNetwork: true, noCache: false }).then(function (info) {
+    return takeAutoSlot().then(function () {
+      return Fetchers.fetchInfo(itemUrl, { forceNetwork: true, noCache: false });
+    }).then(function (info) {
       if (!info || info.__failed) {
         var tried = (info && info.tried) || [];
         var gone = (info && (info.status === 404 || info.status === 410)) || tried.some(function (t) { return t && /HTTP (404|410)\b/.test(String(t.error || '')); });
@@ -2030,6 +2265,7 @@ var Importer = (function () {
           });
           a.versions = existing;
           a.autoFilled.versions = true;
+          clearAutoTried(a.id);            // 成功已锁定，冷却记录可以扔了
         } else if (Array.isArray(info2.versions) && info2.versions.length) {
           var have = {};
           (a.versions || []).forEach(function (v) { if (v.name) have[v.name] = 1; });
@@ -2088,9 +2324,14 @@ var Importer = (function () {
     var url = (a.links || []).filter(function (l) { return isHttpUrl(l.url); })[0];
     var itemUrl = url ? url.url : '';
     if (!itemUrl) return Promise.resolve(a);
+    var gate = autoEnrichGate(a);
+    if (!gate.ok) return Promise.resolve(a);        // 关掉了 / 没 Cookie / 还在冷却
     autoEnrichBusy = true;
+    markAutoTried(a.id);
 
-    return Fetchers.fetchInfo(itemUrl, { forceNetwork: true, noCache: false }).then(function (info) {
+    return takeAutoSlot().then(function () {
+      return Fetchers.fetchInfo(itemUrl, { forceNetwork: true, noCache: false });
+    }).then(function (info) {
       if (!info || info.__failed) {
         var tried = (info && info.tried) || [];
         var gone = (info && (info.status === 404 || info.status === 410)) || tried.some(function (t) { return t && /HTTP (404|410)\b/.test(String(t.error || '')); });
@@ -2164,6 +2405,7 @@ var Importer = (function () {
           });
           a.versions = existing;
           a.autoFilled.versions = true;
+          clearAutoTried(a.id);            // 成功已锁定，冷却记录可以扔了
         } else if (Array.isArray(info2.versions) && info2.versions.length) {
           var have = {};
           (a.versions || []).forEach(function (v) { if (v.name) have[v.name] = 1; });
@@ -2296,7 +2538,7 @@ var Importer = (function () {
         log('\u{1F4E6} 共 ' + entries.length + ' 个心愿单商品，逐项抓取完整信息 …');
         var created = 0, updated = 0, failed = 0;
         var chain2 = Promise.resolve();
-        entries.forEach(function (e) {
+        entries.forEach(function (e, ei) {
           chain2 = chain2.then(function () {
             var url = 'https://booth.pm/ja/items/' + e.item.id;
             return Fetchers.fetchInfo(url, { forceNetwork: true, onLog: function () {} }).then(function (info) {
@@ -2319,6 +2561,9 @@ var Importer = (function () {
             }).catch(function (err) {
               failed++;
               log('\u26A0 导入失败 ' + (e.item && e.item.id) + '：' + (err && err.message));
+            }).then(function () {
+              /* 心愿单动辄上百个，逐个抓也要留出人味儿（800~1300ms） */
+              if (ei < entries.length - 1) return new Promise(function (r) { setTimeout(r, 800 + Math.random() * 500); });
             });
           });
         });
@@ -2452,7 +2697,9 @@ var Importer = (function () {
     parseGumroadItemOrderLinks: parseGumroadItemOrderLinks, parseGumroadOrder: parseGumroadOrder, parseOrderPage: parseOrderPage,
     applyOrderFilesToVersion: applyOrderFilesToVersion, mergeShopVariants: mergeShopVariants, mergeItemInfo: mergeItemInfo,
     syncLibraryDialog: syncLibraryDialog, autoEnrichBoothAsset: autoEnrichBoothAsset,
+    autoParseBoothById: autoParseBoothById,
     autoEnrichGumroadAsset: autoEnrichGumroadAsset,
+    autoEnrichGate: autoEnrichGate, autoEnrichTouch: markAutoTried, autoEnrichClear: clearAutoTried,
     wishlistDialog: wishlistDialog,
     autoEnrichBusy: function () { return autoEnrichBusy; }
   };

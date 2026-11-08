@@ -635,12 +635,6 @@ body.scrolling .grid .card *:hover { filter: none !important; transition: none !
 .ribbon-gift { background: linear-gradient(180deg, #b06ef5, #8b4bd0); }
 .ribbon-oss { background: linear-gradient(180deg, #58a6ff, #1f6feb); }   /* 开源（GitHub） */
 .chip-oss { border-color: #58a6ff; color: #58a6ff; }
-/* 封面右下角发布 / 上架日期 */
-.cover-date {
-  position: absolute; right: 6px; bottom: 30px; z-index: 3;
-  padding: 1px 7px; border-radius: 20px; background: rgba(0,0,0,.55); color: #fff;
-  font-size: 10.5px; pointer-events: none;
-}
 .fav-btn {
   position: absolute; right: 6px; top: 6px; width: 26px; height: 26px; border-radius: 50%;
   border: 0; background: rgba(0,0,0,.42); color: #fff; cursor: pointer; font-size: 14px;
@@ -683,6 +677,10 @@ body.scrolling .grid .card *:hover { filter: none !important; transition: none !
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: top;
 }
 .card-tags .tag-more { flex: 0 0 auto; max-width: none; }
+/* 角色 chip：能放几枚由 JS 按卡片内宽算好（见 cardOf），这里只保证不被 flex 压扁、
+ * 单个超长名字用省略号兜底，末尾的 +N 永远完整可见。 */
+.card-avatars .chip-av { flex: 0 0 auto; max-width: 100%; }
+.card-avatars .chip-more { flex: 0 0 auto; }
 
 .chip {
   display: inline-flex; align-items: center; gap: 3px; font-size: 11px; padding: 1px 8px;
@@ -901,6 +899,13 @@ body.scrolling .grid .card *:hover { filter: none !important; transition: none !
 .detail-cover img { width: 100%; height: 100%; object-fit: contain; }
 .detail-actions { display: flex; flex-direction: column; gap: 7px; margin-top: 12px; }
 .detail-title { margin: 0 0 4px; font-size: 20px; line-height: 1.35; }
+/* 详情标题可点开改名：给足反馈（悬停描边 + 铅笔光标），否则没人知道它能点 */
+.detail-title-edit {
+  cursor: text; border-radius: 6px; padding: 1px 5px; margin: -1px 0 3px -5px;
+  transition: var(--tr);
+}
+.detail-title-edit:hover { background: var(--bg-3); box-shadow: inset 0 0 0 1px var(--border-2); }
+.detail-title-input { width: 100%; height: 32px; font-size: 18px; font-weight: 700; }
 .detail-subtitle { color: var(--text-3); font-size: 13px; margin-bottom: 10px; }
 .detail-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
 .kv-list { display: flex; flex-direction: column; gap: 2px; }
@@ -1359,14 +1364,84 @@ button.chip-ver-off:hover { border-color: var(--primary); color: var(--text); }
 .detail-tab:hover { border-color: var(--primary); color: var(--text); }
 .detail-tab.on { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); }
 .detail-tab-num { font-variant-numeric: tabular-nums; opacity: .8; }
-/* 本地文件行：文件名占满，右边一个「在文件夹中显示」 */
-.local-file-row .path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 本地文件在「版本」里登记过的，行尾挂一个小标签 */
+/* ---- 本地文件页：一行一个文件，长名字截断，不许换行 ----
+ * 文件名最长能到 80 多个字符（商店原名 + 版本后缀），换行会让「在文件夹中显示」掉到第二行，
+ * 列表立刻散了。所以整行 nowrap，只有文件名这一格参与收缩 + 省略号。 */
+.local-head { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; min-width: 0; }
+.local-head .local-dir {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11.5px;
+}
+.local-head .btn { flex: 0 0 auto; }
+.local-file-row { flex-wrap: nowrap; min-width: 0; }
+.local-file-row .local-name {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.local-size {
+  flex: 0 0 auto; min-width: 56px; text-align: right;
+  font-size: 11.5px; color: var(--text-dim); font-variant-numeric: tabular-nums;
+}
+.local-open { flex: 0 0 auto; }
+/* 行尾的删除入口（删错文件用）：只留图标+两个字，别把文件名挤没 */
+.local-del { flex: 0 0 auto; padding-left: 6px; padding-right: 6px; font-size: 11px; }
+/* 本地文件在「版本」里登记过的，行尾挂一个小标签（也只是提示，长了照样截断） */
 .local-ver {
-  flex: 0 0 auto; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 0 1 auto; max-width: 108px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 11px; line-height: 18px; padding: 0 8px; border-radius: 9px;
   background: var(--primary-soft); color: var(--primary);
 }
+/* 本体 / 额外文件的分组标题：中间一条分隔线，让人一眼看出这是两组 */
+.local-group {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: var(--text-dim);
+}
+.local-group-sep { margin-top: 4px; padding-top: 10px; border-top: 1px dashed var(--border-2); }
+.local-group-name { font-weight: 700; color: var(--text-2); letter-spacing: .3px; }
+.local-group-num {
+  font-variant-numeric: tabular-nums; font-size: 11px; line-height: 17px;
+  padding: 0 7px; border-radius: 9px; background: var(--bg-3); border: 1px solid var(--border-2);
+}
+.local-group-hint { font-size: 11px; opacity: .72; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.local-group .grow { flex: 1 1 auto; }
+/* 本体文件缺失：常驻在两个切页之上，不能当成一闪而过的 Toast */
+.local-miss-box {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 9px 11px; border-radius: var(--radius);
+  border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--border-2));
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+.local-miss-title { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; color: var(--warn); }
+.local-miss-list { display: flex; flex-direction: column; gap: 3px; }
+.local-miss-row { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; }
+.local-miss-ver {
+  flex: 0 1 auto; max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-dim);
+}
+.local-miss-name {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-2); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--warn) 70%, transparent);
+}
+.local-miss-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.local-miss-hint { font-size: 11.5px; color: var(--text-dim); }
+/* 缺失行尾的「移除记录」：低调一点，别和「快速补充」抢主次 */
+.local-miss-del {
+  flex: 0 0 auto; height: 22px; padding: 0 7px; font-size: 11.5px; line-height: 20px;
+  color: var(--text-dim);
+}
+.local-miss-del:hover { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--border-2)); }
+.local-fill-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.local-fill-info { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.local-fill-info .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 整个分组都是拖放区：把文件拖到另一组 = 改判本体 / DLC（拖错一次不用去改记录） */
+.local-group-box { position: relative; border-radius: var(--radius); transition: var(--tr); }
+.local-group-box.drop-ok {
+  outline: 1.5px dashed var(--primary);
+  outline-offset: 3px;
+  background: var(--primary-soft);
+}
+.local-file-row[draggable='true'] { cursor: grab; }
+.local-file-row[draggable='true']:active { cursor: grabbing; }
+.local-file-row.drag-src { opacity: .45; }
 /* 拖到卡片上：这张卡会接住文件（放进这一条素材）。
  * 光描边不够——封面偏亮的卡片几乎看不出高亮，所以再压一层暗色遮罩 + 白色虚线框，
  * 和拖到空白处那层（body.dragging）用同一套视觉语言。 */

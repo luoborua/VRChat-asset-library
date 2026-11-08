@@ -92,6 +92,44 @@ function isAbsoluteWinPath(p) {
   var s = normalizeWinPath(p);
   return /^[A-Za-z]:[\\/]/.test(s) || /^[A-Za-z]:$/.test(s) || /^\\\\/.test(s);
 }
+
+/**
+ * 图片文件（封面 / 预览图 / 截图）。
+ * 本地文件对账时一律跳过：它们是封面与图集的附属物，不该在「额外文件 / DLC」里占一行，
+ * 删掉一张预览图也不该被当成「本体缺失」。
+ */
+function isImageFileName(name) {
+  return /\.(png|jpe?g|webp|gif|bmp|avif|ico|tga|tiff?|heic|jfif|svg)$/i.test(String(name || '').trim());
+}
+/**
+ * 从素材名 / 文件名里认出 BOOTH 商品编号。
+ * 下载站的落地命名五花八门，能用同一套规则吃下的就这几类：
+ *   `[5058951]-オフショルケーブルニットワンピース`、`(5058951) xxx`、`【5058951】xxx`、
+ *   `5058951_衣装`、`5058951-xxx`、以及整个名字就是 `5058951`。
+ * 只认 5~9 位纯数字：版本号（带小数点）、4 位年份、8 位日期（20240101）都不算编号，
+ * 否则 `2024-01-05 衣装` 这种会被当成商品页去请求。
+ */
+function boothIdFromName(name) {
+  var s = String(name == null ? '' : name).trim();
+  if (!s) return '';
+  /* 去掉扩展名：`5058951.zip` 也要能认出来。只截 2~5 位的常见后缀，
+   * 免得把「5058951_A案」里的点当成扩展名分隔。 */
+  s = s.replace(/\.(zip|rar|7z|unitypackage|txt|url|png|jpe?g|webp|gif|bmp)$/i, '').trim();
+  if (!s) return '';
+  function usable(d) {
+    if (!/^\d{5,9}$/.test(d)) return false;
+    /* 8 位日期（20240101 / 19991231）是「上架日期」味的目录名，不是商品号 */
+    if (/^(19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$/.test(d)) return false;
+    return true;
+  }
+  if (usable(s)) return s;                                        // 整个名字就是编号
+  var m = s.match(/^[\[\(（【]\s*(\d{5,9})\s*[\]\)）】]/);          // [5058951]-xxx / (5058951) xxx
+  if (m && usable(m[1])) return m[1];
+  m = s.match(/^(\d{5,9})(?=[\s\-_.]|$)/);                        // 5058951_xxx / 5058951 xxx
+  if (m && usable(m[1])) return m[1];
+  return '';
+}
+
 function concatUnique(arr1, arr2, keyFn) {
   var seen = Object.create(null), out = [];
   (arr1 || []).concat(arr2 || []).forEach(function (v) {

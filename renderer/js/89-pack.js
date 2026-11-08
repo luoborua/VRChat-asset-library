@@ -596,6 +596,62 @@ var Packer = (function () {
       }
       return null;
     }
+
+    /* ---- 拖到卡片上 = 放进这一条素材（卡片内除封面区以外的任意位置） ---- */
+    var markedCard = null;
+    function cardOf(e) {
+      var el = e && e.target;
+      while (el && el.nodeType === 1) {
+        if (el.classList && el.classList.contains('card') && el.dataset && el.dataset.id) return el;
+        el = el.parentNode;
+      }
+      return null;
+    }
+    function assetOfCard(card) {
+      var id = card && card.dataset && card.dataset.id;
+      if (!id) return null;
+      return (App.assets || []).filter(function (x) { return x.id === id; })[0] || null;
+    }
+    function markCard(card, asset) {
+      if (markedCard === card) return;
+      unmarkCard();
+      markedCard = card;
+      if (!card) return;
+      var title = String((asset && (asset.title || asset.originalTitle)) || '这条素材');
+      card.classList.add('card-drop');
+      card.setAttribute('data-drop-title', '放进「' + title + '」');
+      /* 半透明遮罩压在整张卡上：只描边时，封面亮一点的卡片几乎看不出高亮，
+       * 用户会以为「拖到卡片」和「拖到空白处」是同一件事。 */
+      var mask = document.createElement('div');
+      mask.className = 'card-drop-mask';
+      var ico = document.createElement('div');
+      ico.className = 'card-drop-ico';
+      ico.textContent = '\u{1F4E5}';
+      var main = document.createElement('div');
+      main.className = 'card-drop-main';
+      main.textContent = '放进这条素材';
+      var sub = document.createElement('div');
+      sub.className = 'card-drop-sub';
+      sub.textContent = title;
+      var hint = document.createElement('div');
+      hint.className = 'card-drop-hint';
+      hint.textContent = '附加文件 · 新版本 · 换封面';
+      mask.appendChild(ico);
+      mask.appendChild(main);
+      mask.appendChild(sub);
+      mask.appendChild(hint);
+      card.appendChild(mask);
+      /* 卡片矮的时候（列表视图 / 小窗口）四行挤不下，只留主副两行 */
+      if (card.clientHeight && card.clientHeight < 150) mask.classList.add('compact');
+    }
+    function unmarkCard() {
+      if (!markedCard) return;
+      markedCard.classList.remove('card-drop');
+      markedCard.removeAttribute('data-drop-title');
+      var old = markedCard.querySelector('.card-drop-mask');
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+      markedCard = null;
+    }
     function show(text) {
       document.body.setAttribute('data-drop-hint', text || HINT);
       document.body.classList.add('dragging');
@@ -605,6 +661,7 @@ var Packer = (function () {
       document.body.classList.remove('dragging');
       document.body.removeAttribute('data-drop-hint');
       unmarkCover();
+      unmarkCard();
     }
 
     /* dragover 在鼠标移动时持续触发，所以用「400ms 没新事件」判断离开了窗口，
@@ -630,6 +687,20 @@ var Packer = (function () {
         return;
       }
       unmarkCover();
+
+      /* 悬停在卡片上：这批文件是「放进这一条素材」（DLC / 新版本 / 换封面），不是新建素材 */
+      var cardEl = modalBlocked() ? null : cardOf(e);
+      var cardAsset = cardEl ? assetOfCard(cardEl) : null;
+      if (cardAsset) {
+        markCard(cardEl, cardAsset);
+        document.body.classList.remove('dragging');
+        document.body.removeAttribute('data-drop-hint');
+        try { e.dataTransfer.dropEffect = 'copy'; } catch (err) {}
+        if (hideTimer) clearTimeout(hideTimer);
+        hideTimer = setTimeout(hide, 400);
+        return;
+      }
+      unmarkCard();
 
       try { e.dataTransfer.dropEffect = modalBlocked() ? 'none' : 'copy'; } catch (err) {}
       show(modalBlocked() ? '先关掉当前窗口，再松开导入' : HINT);
@@ -667,10 +738,6 @@ var Packer = (function () {
 
       if (modalBlocked()) { Toast.warn('还有窗口开着，请先关掉它再拖入素材', 4200); return; }
 
-      /* 允许新拖入替换掉自己开着的预览，避免两个预览叠在一起 */
-      if (packModal) { try { Modal.close(packModal); } catch (err) {} packModal = null; }
-      if (typeof DropImport !== 'undefined') DropImport.close();
-
       var items = [];
       for (var i = 0; i < files.length; i++) {
         var f = files[i];
@@ -680,6 +747,21 @@ var Packer = (function () {
         items.push({ path: p, name: nm, size: Number(f.size) || 0, file: f, isDir: false });
       }
       if (!items.length) { Toast.err('没拿到文件路径，请改用「导入 → 从文件导入」', 6000); return; }
+
+      /* 落在某张卡片上：放进这一条素材（附加文件 / 新版本 / 换封面），由弹窗里选 */
+      var cardEl = cardOf(e);
+      var cardAsset = cardEl ? assetOfCard(cardEl) : null;
+      if (cardAsset && typeof DropImport !== 'undefined' && DropImport.openIntoCard) {
+        Promise.resolve(DropImport.openIntoCard(cardAsset, items)).catch(function (err) {
+          Toast.err('没能放进素材：' + ((err && err.message) || err), 8000);
+        });
+        return;
+      }
+
+      /* 允许新拖入替换掉自己开着的预览，避免两个预览叠在一起 */
+      if (packModal) { try { Modal.close(packModal); } catch (err) {} packModal = null; }
+      if (typeof DropImport !== 'undefined') DropImport.close();
+
       if (typeof FS === 'undefined' || !FS.host) {
         Toast.warn('当前环境不支持拖拽导入，请用「导入」菜单里的入口', 6000);
         return;

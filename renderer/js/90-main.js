@@ -164,9 +164,9 @@ function bindEvents() {
       var i = order.indexOf(App.settings.cardSize || 'm');
       App.settings.cardSize = order[(i + 1) % 3];
       App.page = 1;
-      /* 换了尺寸，「一屏能放几张」必须重新量：先清空，让 updateFitSize 用新尺寸再算一次。
-       * 不清空的话会拿旧尺寸的张数先画一帧，观感是闪一下。 */
-      App.fitPageSize = 0;
+      /* 换了尺寸，「一屏能放几张」必须重新量 —— 但这里不清零：先按旧张数画一帧，
+       * fitGrid 量完新行高会自动把 App.fitPageSize 校正过来。
+       * 清零的话首帧会按兜底的 24 张画一遍，一眼就能看出闪。 */
       App.saveSettings();
       UI.renderMain();
       UI.scrollTopInstant();
@@ -353,18 +353,33 @@ document.addEventListener('keydown', function (e) {
      * 覆盖层的显隐与 dragleave 判定统一交给 Packer：此处另挂 dragleave 会在鼠标移入子元素时误清掉提示层。 */
     if (typeof Packer !== 'undefined' && Packer.installDropZone) Packer.installDropZone();
 
-    // 窗口宽度变化时按新宽度重新分栏（防抖）
+    // 窗口尺寸变化时重新分栏 / 重算一屏容量（防抖）
+    /* 高度变了也要重算：一屏放几行是按内容区高度算的，只看列数会让窗口拉高后仍按旧行数分页 */
     var resizeTimer = null;
     var lastCols = UI.masonryColumnCount();
+    var lastMainH = (document.querySelector('.main') || {}).clientHeight || 0;
     window.addEventListener('resize', function () {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(function () {
         var cols = UI.masonryColumnCount();
-        if (cols === lastCols) return;   // 列数没变：CSS 自己会重排，不必重绘整页
+        var h = (document.querySelector('.main') || {}).clientHeight || 0;
+        /* 高度差异小于 24px 不会跨行，没必要重绘整页 */
+        if (cols === lastCols && Math.abs(h - lastMainH) < 24) return;
         lastCols = cols;
+        lastMainH = h;
         UI.renderMain();
       }, 150);
     });
+
+    /* 分页条要跟着「卡片区」居中。侧栏收放走的是 CSS 过渡（宽度 220ms 动画），
+     * 中途不会触发 resize 也不重绘，所以单独盯 .main 的尺寸 —— 每帧只写一个 CSS 变量。 */
+    var mainEl = document.querySelector('.main');
+    if (mainEl) {
+      UI.syncPagerX();
+      if (typeof ResizeObserver !== 'undefined') {
+        new ResizeObserver(function () { UI.syncPagerX(); }).observe(mainEl);
+      }
+    }
   }
 
   /** 导入方式选择菜单 */

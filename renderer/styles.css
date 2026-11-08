@@ -407,13 +407,15 @@ body.sidebar-hidden .sidebar { width: 0; flex-basis: 0; padding-left: 0; padding
  * 也别把主区钉成固定像素高（--content-h + flex 列）：窗口一改高就露白，交给 flex 分配。 */
 .main {
   flex: 1 1 auto; min-width: 0; min-height: 0;
-  /* 底部留白要盖过分页条：它 fixed 在视口底（42 高 + 18 下边距），
-   * 只留 40 的话最后一行卡片会被压在它下面。 */
-  padding: 14px 16px 72px;
+  /* 底部留白只在真有分页条时加（见下方 body.has-pager）：分页条 fixed 在视口底，
+   * 恒留 72px 会让「一页就装得下」的情况平白多出一截空白。 */
+  padding: 14px 16px 16px;
   overflow-y: auto;
   /* 滚动条常驻占位：卡片宽度不随"这一页会不会出滚动条"变化，否则一多一少就跳列数 */
   scrollbar-gutter: stable;
 }
+/* 分页条 fixed 在视口底（42 高 + 18 下边距）：只在有分页时把内容顶上去 */
+body.has-pager .main { padding-bottom: 72px; }
 
 /* ---------------- 侧栏 ---------------- */
 .side-stat { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
@@ -534,7 +536,8 @@ select.input, .toolbar select {
  * 贡献行高 → 行被均分压扁：先是封面被挤成一条，改完 flex 之后又轮到正文被挤成 0（标题/标签消失）。
  * 行高由最高的那张卡撑出来，同一行的其它卡靠 align-items:stretch 对齐。 */
 .grid .card { width: 100%; height: 100%; }
-body.has-pager #grid { padding-bottom: 76px; }
+/* 分页条的底部留白由 .main 的 has-pager 负责；这里再加一层会让每页凭空长 76px，
+ * 一屏正好铺满的分页方式下会变成「差一行就要滚动」。 */
 
 .card {
   position: relative; background: var(--bg-2); border: 1px solid var(--border);
@@ -1136,8 +1139,11 @@ body.scrolling .grid .card *:hover { filter: none !important; transition: none !
 .gallery-item:hover { border-color: var(--primary); transform: scale(1.06); }
 .gallery-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
+/* 分页条居中在「卡片区」里，不是整个窗口：左边还有页签栏 + 侧栏，用 left:50% 会明显偏左。
+ * --pager-x 由 UI.syncPagerX() 按 .main 的实际矩形写入（侧栏收放、窗口缩放都跟着变）；
+ * fixed 定位只能吃视口坐标，所以这里不能写成 calc(50% - 侧栏宽度)。 */
 .pager {
-  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+  position: fixed; left: var(--pager-x, 50%); bottom: 18px; transform: translateX(-50%);
   z-index: 65; margin: 0; padding: 6px 10px;
   display: flex; align-items: center; justify-content: center; gap: 6px; flex-wrap: nowrap;
   background: var(--bg-2); border: 1px solid var(--border); border-radius: 999px;
@@ -1145,6 +1151,9 @@ body.scrolling .grid .card *:hover { filter: none !important; transition: none !
   opacity: .32; transition: opacity .18s, box-shadow .18s;
 }
 .pager:hover, .pager:focus-within { opacity: 1; box-shadow: 0 12px 30px rgba(0,0,0,.26); }
+/* 内容超出视口时（一屏容量的「探出一点」，见 UI.fitGrid 的 TOL），最后一排会从分页条底下
+ * 钻过去。半透明的胶囊压在半张卡上会透出卡片，看着像渲染坏了 —— 这时把胶囊做成实心。 */
+body.pager-overflow .pager { opacity: 1; }
 .pager-gap { color: var(--text-3); padding: 0 2px; }
 
 .badge-free { background: rgba(24,160,105,.9); }
@@ -1338,6 +1347,55 @@ button.chip-ver-off:hover { border-color: var(--primary); color: var(--text); }
 .path-copy { cursor: pointer; transition: var(--tr); }
 .path-copy:hover { border-color: var(--primary); color: var(--text); }
 .detail-stack { display: flex; flex-direction: column; gap: 10px; }
+/* 「版本与下载」的两个切页：链接（远端）/ 本地文件（磁盘实况） */
+.detail-tabs { display: flex; gap: 6px; }
+.detail-tab {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 11px; border-radius: 999px;
+  border: 1px solid var(--border-2); background: transparent; color: var(--text-dim);
+  font: inherit; font-size: 12px; line-height: 1.5; cursor: pointer;
+  transition: var(--tr);
+}
+.detail-tab:hover { border-color: var(--primary); color: var(--text); }
+.detail-tab.on { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); }
+.detail-tab-num { font-variant-numeric: tabular-nums; opacity: .8; }
+/* 本地文件行：文件名占满，右边一个「在文件夹中显示」 */
+.local-file-row .path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 本地文件在「版本」里登记过的，行尾挂一个小标签 */
+.local-ver {
+  flex: 0 0 auto; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; line-height: 18px; padding: 0 8px; border-radius: 9px;
+  background: var(--primary-soft); color: var(--primary);
+}
+/* 拖到卡片上：这张卡会接住文件（放进这一条素材）。
+ * 光描边不够——封面偏亮的卡片几乎看不出高亮，所以再压一层暗色遮罩 + 白色虚线框，
+ * 和拖到空白处那层（body.dragging）用同一套视觉语言。 */
+.card.card-drop {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary), 0 12px 28px rgba(0, 0, 0, .42);
+  transform: translateY(-2px);
+}
+.card-drop-mask {
+  position: absolute; inset: 0; z-index: 7;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px;
+  padding: 12px 10px; text-align: center;
+  /* 先压暗，再兑一点主色：纯黑在深色主题里和卡片本身分不开，
+   * 带一点主色才能一眼看出「这张卡被选中了」。color-mix 不支持时退回纯暗。 */
+  background: rgba(8, 10, 15, .76);
+  background: color-mix(in srgb, var(--primary) 18%, rgba(8, 10, 15, .8));
+  border: 2px dashed rgba(255, 255, 255, .62); border-radius: var(--radius);
+  color: #fff; pointer-events: none;
+}
+.card-drop-ico { font-size: 22px; line-height: 1; opacity: .95; }
+.card-drop-main { font-size: 14px; font-weight: 700; letter-spacing: .5px; }
+.card-drop-sub {
+  max-width: 100%; font-size: 12px; color: rgba(255, 255, 255, .84);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.card-drop-hint { font-size: 11px; color: rgba(255, 255, 255, .62); letter-spacing: .3px; }
+/* 卡片很矮时（列表视图 / 小窗口）只留最关键的两行 */
+.card-drop-mask.compact .card-drop-ico,
+.card-drop-mask.compact .card-drop-hint { display: none; }
 .detail-actions .btn { justify-content: flex-start; }
 .detail-actions .btn-lg { height: 40px; font-size: 14px; font-weight: 700; }
 /* 详情页：头（左封面 + 右标题/按钮）+ 详细内容两列 */

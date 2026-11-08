@@ -74,6 +74,7 @@ var Store = (function () {
       special:     !!v.special,        // 许可证/readme 等免费特殊变体：只展示名称，不计商品价
       files:    files,
       isLatest: !!v.isLatest,
+      local:    !!v.local,     // 本地登记（拖进卡片/手动放入）：没有订单链接，不能算「未购买变体」
       addedAt:  v.addedAt || nowISO()
     };
   }

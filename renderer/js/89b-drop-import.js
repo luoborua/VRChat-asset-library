@@ -86,6 +86,29 @@ var DropImport = (function () {
     return /\.vrcpack$/i.test(String(name || ''));
   }
 
+  /** 从菜单选文件时没有 File 对象，封面按磁盘路径读成 Blob（drop 场景直接用 File） */
+  function coverBlobFromPath(p) {
+    if (!p) return Promise.resolve(null);
+    var ext = extOf(p);
+    var mime = ext === 'png' ? 'image/png'
+      : ext === 'webp' ? 'image/webp'
+      : ext === 'gif' ? 'image/gif'
+      : ext === 'bmp' ? 'image/bmp' : 'image/jpeg';
+    if (FS.host.bytesSupported && FS.host.bytesSupported()) {
+      return FS.host.readBytes(p).then(function (bytes) {
+        return new Blob([bytes], { type: mime });
+      }).catch(function () { return null; });
+    }
+    return FS.host.readFileBase64(p).then(function (r) {
+      var b64 = String((r && (r.dataBase64 || r.base64)) || '');
+      if (!b64) return null;
+      var bin = atob(b64);
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new Blob([bytes], { type: mime });
+    }).catch(function () { return null; });
+  }
+
   /* ---------------- 把拖入项整理成「素材候选」 ---------------- */
 
   /**
@@ -449,29 +472,6 @@ var DropImport = (function () {
       });
     }
 
-    /** 从菜单选文件时没有 File 对象，封面按磁盘路径读成 Blob（drop 场景直接用 File） */
-    function coverBlobFromPath(p) {
-      if (!p) return Promise.resolve(null);
-      var ext = extOf(p);
-      var mime = ext === 'png' ? 'image/png'
-        : ext === 'webp' ? 'image/webp'
-        : ext === 'gif' ? 'image/gif'
-        : ext === 'bmp' ? 'image/bmp' : 'image/jpeg';
-      if (FS.host.bytesSupported && FS.host.bytesSupported()) {
-        return FS.host.readBytes(p).then(function (bytes) {
-          return new Blob([bytes], { type: mime });
-        }).catch(function () { return null; });
-      }
-      return FS.host.readFileBase64(p).then(function (r) {
-        var b64 = String((r && (r.dataBase64 || r.base64)) || '');
-        if (!b64) return null;
-        var bin = atob(b64);
-        var bytes = new Uint8Array(bin.length);
-        for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        return new Blob([bytes], { type: mime });
-      }).catch(function () { return null; });
-    }
-
     /* 目标目录撞名时自动换成 _2、_3…并提示一句：直接 mkdir 会复用已有目录，
        同名文件被静默覆盖，两条素材还指向同一个 path。 */
     function importOne(g) {
@@ -632,6 +632,266 @@ var DropImport = (function () {
     return Promise.resolve(true);
   }
 
+  /* ---------------- 拖到卡片：放进某一条素材 ---------------- */
+
+  /** 目标目录里重名就换成 _2、_3…；不覆盖用户已有的文件 */
+  function freeName(dir, name) {
+    function taken(k) { return k === 'file' || k === 'dir'; }
+    return FS.host.exists(joinWinPath(dir, [name])).then(function (kind) {
+      if (!taken(kind)) return name;
+      var ext = (/\.[^.]+$/.exec(name) || [''])[0];
+      var stem = ext ? name.slice(0, name.length - ext.length) : name;
+      var n = 2;
+      function step() {
+        if (n > 500) return stem + '_' + Date.now() + ext;
+        var cand = stem + '_' + n + ext;
+        return FS.host.exists(joinWinPath(dir, [cand])).then(function (k) {
+          if (!taken(k)) return cand;
+          n++;
+          return step();
+        });
+      }
+      return step();
+    }).catch(function () { return name; });
+  }
+
+  /** 版本名默认值：文件名里的 v1.2 优先，否则用去扩展名的名字 */
+  function defaultVerName(name) {
+    var stem = stemOf(name);
+    return guessVersion(stem) || stem || String(name || '');
+  }
+
+  /**
+   * 「放进这条素材」：拖到卡片上松手时打开。
+   * 同一批文件既可能只是补个 DLC，也可能是新版本，还会是换封面 —— 由用户当场选，
+   * 程序不猜（猜错就是把版本结构弄乱，事后很难还原）。
+   */
+  function openIntoCard(asset, items) {
+    if (!asset) return Promise.resolve(false);
+    if (busy) { Toast.warn('上一批还在导入，请稍等'); return Promise.resolve(false); }
+    var list = (items || []).filter(function (it) { return it && it.name; });
+    if (!list.length) return Promise.resolve(false);
+
+    var packs = list.filter(function (it) { return looksPack(it.name); });
+    if (packs.length) {
+      Toast.warn('「' + packs[0].name + '」是整包导入的素材包，请拖到卡片以外的空白处，按「导入素材包」处理', 7200);
+      return Promise.resolve(false);
+    }
+    if (current) close();                      // 手上还开着的导入预览，换成本次操作
+
+    var allImg = list.every(function (it) { return !it.isDir && isImage(it.name); });
+    var state = {
+      mode: allImg ? 'cover' : 'attach',
+      verName: list.length === 1 ? defaultVerName(list[0].name) : '',
+      copied: [],
+      renamed: [],
+      failed: [],
+      done: false
+    };
+
+    /* ---- 头部：放进哪一条 ---- */
+    var head = el('div', { class: 'pack-summary' }, [
+      el('div', {}, [
+        el('b', { text: '放进「' + (asset.title || asset.originalTitle || '未命名') + '」' }),
+        el('span', { class: 'pack-dim', text: ' · ' + App.categoryLabel(asset.category || 'other')
+          + (Store.fileIdOf(asset) ? ' · 编号 ' + Store.fileIdOf(asset) : '') })
+      ]),
+      el('div', { class: 'pack-dim', text: '文件会复制进这条素材自己的目录，源文件不动。同名文件自动改名，不会覆盖。' })
+    ]);
+
+    var fileBox = el('div', { class: 'di-files' }, list.map(function (it) {
+      return el('div', {
+        class: 'di-file',
+        title: it.path || it.name,
+        text: '· ' + it.name + (it.size ? '　' + fmtSize(it.size) : '') + '　' + typeLabel(it.name, it.isDir)
+      });
+    }));
+
+    /* ---- 去向 ---- */
+    var radioName = 'diInto_' + Date.now();
+    var verRow = el('div', { class: 'pack-sec', style: { display: 'none' } }, [
+      el('div', { class: 'pack-label', text: '版本名' }),
+      el('input', {
+        class: 'input', type: 'text', value: state.verName, placeholder: '例如 v1.2 / DLC / 通常版',
+        oninput: function () { state.verName = this.value; }
+      }),
+      el('div', { class: 'field-hint', text: '只影响「版本与下载」里这条的标题，随时可以在编辑页改。' })
+    ]);
+
+    function optionRow(value, title, dim) {
+      var input = el('input', {
+        type: 'radio', name: radioName, checked: state.mode === value,
+        onchange: function () {
+          if (!this.checked) return;
+          state.mode = value;
+          verRow.style.display = (value === 'version' && list.length === 1) ? '' : 'none';
+        }
+      });
+      return el('label', { class: 'pack-check' }, [
+        input,
+        el('span', {}, [el('b', { text: title }), el('span', { class: 'pack-dim', text: ' —— ' + dim })])
+      ]);
+    }
+
+    var optRows = [
+      optionRow('attach', '作为附加文件', 'DLC / 补丁 / 说明书等：只放进素材目录，版本结构不动'),
+      optionRow('version', '作为新版本', '同时登记进「版本」，最新的那个排在最前，旧的自动收进历史版本')
+    ];
+    if (allImg) optRows.push(optionRow('cover', '设为封面', '只换封面图，不把图片复制进素材目录'));
+
+    var optBox = el('div', { class: 'pack-sec' }, [el('div', { class: 'pack-label', text: '这批文件怎么算' })].concat(optRows));
+    if (list.length > 1 && state.mode === 'version') {
+      verRow.style.display = 'none';           // 多文件各按自己的文件名当版本名
+    }
+    if (state.mode === 'version' && list.length === 1) verRow.style.display = '';
+
+    var prog = el('div', { class: 'pack-prog', style: { display: 'none' } });
+    function setProg(text, pct) {
+      prog.style.display = '';
+      prog.innerHTML = '';
+      prog.appendChild(el('div', { class: 'pack-prog-text', text: text }));
+      if (typeof pct === 'number') {
+        prog.appendChild(el('div', { class: 'pack-prog-bar' }, [
+          el('i', { style: { width: Math.max(0, Math.min(100, pct)) + '%' } })
+        ]));
+      }
+    }
+
+    var btnRow = el('div', { class: 'btn-row' });
+    var okBtn = el('button', { class: 'btn btn-primary', onclick: run }, '放进这条素材');
+
+    /* ---- 落盘并写记录 ---- */
+    function applyRecord(mode) {
+      var bytes = state.copied.reduce(function (s, f) { return s + (f.size || 0); }, 0);
+      asset.downloaded = true;
+      asset.downloadedAt = nowISO();
+      asset.fileSize = (Number(asset.fileSize) || 0) + bytes;
+      var df = (asset.downloadedFiles || []).slice();
+      state.copied.forEach(function (f) { if (df.indexOf(f.name) < 0) df.push(f.name); });
+      asset.downloadedFiles = df;
+
+      if (mode === 'version') {
+        var vs = (asset.versions || []).slice();
+        vs.forEach(function (v) { v.isLatest = false; });
+        state.copied.forEach(function (f) {
+          vs.push({
+            name: (state.copied.length === 1 && String(state.verName || '').trim())
+              ? String(state.verName).trim()
+              : defaultVerName(f.srcName || f.name),
+            fileName: f.name,
+            size: f.size || 0,
+            isLatest: true,
+            local: true,                       // 本地登记：没有订单链接，不该算「未购买变体」
+            note: '本地导入',
+            addedAt: nowISO()
+          });
+        });
+        asset.versions = vs;
+      }
+      return App.save(asset);
+    }
+
+    function runCover() {
+      var img = list.filter(function (it) { return !it.isDir && isImage(it.name); })[0];
+      if (!img) throw new Error('这批文件里没有图片');
+      setProg('正在设置封面…', 30);
+      var srcP = img.file ? Promise.resolve(img.file) : coverBlobFromPath(img.path);
+      return srcP.then(function (blob) {
+        if (!blob) throw new Error('读不到图片内容');
+        return App.setCoverFromBlob(asset, blob);
+      }).then(function () {
+        setProg('封面已更新', 100);
+        finish('封面已更新：' + (asset.title || asset.id), 'ok');
+      });
+    }
+
+    function runFiles() {
+      return FS.hostEnsure().then(function (ok) {
+        if (!ok) throw new Error('程序后端未就绪，暂时写不进素材目录（请重启程序）');
+        if (typeof Importer === 'undefined' || !Importer.ensureStoragePathQuiet) {
+          throw new Error('缺少存储路径模块');
+        }
+        return Importer.ensureStoragePathQuiet(asset);
+      }).then(function (dir) {
+        if (!dir) throw new Error('这条素材还没有存储目录，自动创建也失败了（检查设置里的素材库根目录）');
+        setProg('准备复制 ' + list.length + ' 个文件…', 0);
+        var chain = Promise.resolve();
+        list.forEach(function (it, i) {
+          chain = chain.then(function () {
+            if (!it.path) { state.failed.push(it.name + '：拿不到磁盘路径'); return null; }
+            setProg('正在复制 ' + (i + 1) + '/' + list.length + '：' + it.name, (i / list.length) * 100);
+            return freeName(dir, it.name).then(function (target) {
+              return FS.host.copy(it.path, joinWinPath(dir, [target])).then(function () {
+                state.copied.push({ name: target, srcName: it.name, size: it.size || 0 });
+                if (target !== it.name) state.renamed.push(it.name + ' → ' + target);
+              });
+            }).catch(function (e) {
+              state.failed.push(it.name + '：' + ((e && e.message) || e));
+            });
+          });
+        });
+        return chain.then(function () {
+          if (!state.copied.length) throw new Error('一个文件都没复制进去：' + (state.failed[0] || '未知原因'));
+          return applyRecord(state.mode);
+        }).then(function () {
+          var nameList = state.copied.map(function (f) { return f.name; });
+          try { UI.renderAll(); } catch (e) {}
+          if (App.detailAssetId === asset.id && typeof Modals !== 'undefined' && Modals.refreshAfterChange) {
+            try { Modals.refreshAfterChange(asset, { keepModal: true }); } catch (e) {}
+          }
+          var tail = state.failed.length ? ('；' + state.failed.length + ' 个没进去（见下）') : '';
+          setProg((state.mode === 'version' ? '已作为新版本放入 ' : '已放入 ') + state.copied.length
+            + ' 个文件' + (state.renamed.length ? '，重名已改名' : '') + tail, 100);
+          if (state.failed.length) {
+            prog.appendChild(el('div', { class: 'pack-warn', text: state.failed.slice(0, 5).join('；') }));
+          }
+          finish('已放进「' + (asset.title || asset.id) + '」：' + nameList.slice(0, 3).join('、')
+            + (nameList.length > 3 ? ' 等 ' + nameList.length + ' 个' : ''), state.failed.length ? 'warn' : 'ok');
+        });
+      });
+    }
+
+    function finish(msg, kind) {
+      state.done = true;
+      busy = false;
+      btnRow.innerHTML = '';
+      btnRow.appendChild(el('span', { class: 'grow' }));
+      btnRow.appendChild(el('button', { class: 'btn btn-primary', onclick: function () { close(); } }, '完成'));
+      if (kind === 'ok') Toast.ok(msg, 6000);
+      else Toast.warn(msg, 7000);
+    }
+
+    function run() {
+      if (busy || state.done) return;
+      busy = true;
+      okBtn.disabled = true;
+      state.copied = []; state.renamed = []; state.failed = [];
+      var job;
+      try { job = (state.mode === 'cover') ? runCover() : runFiles(); }
+      catch (e) { job = Promise.reject(e); }
+      Promise.resolve(job).catch(function (e) {
+        busy = false;
+        okBtn.disabled = false;
+        setProg('失败：' + ((e && e.message) || e), 0);
+        Toast.err('没放进去：' + ((e && e.message) || e), 8000);
+      });
+    }
+
+    btnRow.appendChild(el('span', { class: 'grow' }));
+    btnRow.appendChild(el('button', { class: 'btn', onclick: function () { close(); } }, '取消'));
+    btnRow.appendChild(okBtn);
+
+    var body = el('div', { class: 'pack-body' }, [head, fileBox, optBox, verRow, prog, btnRow]);
+    var handle = Modal.open({
+      title: '放进这条素材',
+      size: 'md',
+      body: [body],
+      onClose: function () { if (current === handle) current = null; }
+    });
+    current = handle;
+    return Promise.resolve(true);
+  }
+
   /* ---------------- 从菜单选文件（和拖入同一套预览） ---------------- */
 
   function pickFiles() {
@@ -662,6 +922,7 @@ var DropImport = (function () {
 
   return {
     open: open,
+    openIntoCard: openIntoCard,
     close: close,
     isOpen: isOpen,
     isTop: isTop,

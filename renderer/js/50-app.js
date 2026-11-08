@@ -2274,9 +2274,8 @@ var App = {
   },
 
   /** 分页（pageSize=0 表示不分页） */
-  /** 每页数量跟着卡片大小换算，保证一页占的面积大致等于中号 24 张：
-   *  小 34（170px 宽）/ 中 24（220px）/ 大 15（290px），允许少量浮动。
-   *  fitPageSize 由 UI.updateFitSize() 在「铺满一屏」模式下写入，为 0 时用上面的映射兜底。 */
+  /** 每页张数由 UI.fitGrid 量出「一屏能放几张」（rows × cols）后写入 fitPageSize；
+   *  fitPageSize 为 0 时（还没量过、列表视图）用下面按卡片大小写的兜底值。 */
   fitPageSize: 0,
   pageSizeFor: function () {
     if (App.fitPageSize > 0) return App.fitPageSize;
@@ -3281,50 +3280,131 @@ var UI = {
   },
 
   /* ---------------- 一屏容量 ----------------
-   * 设计目标是内容区固定一屏高、卡片正好铺满、超出的翻页：
-   * 画完后量一次可用高度、行高与实际列数 → rows × cols 写进 App.fitPageSize。
-   * 注意这里没有内层滚动容器，只是普通流式布局 + overflow:hidden；
-   * 别改成 position:fixed 的滚动框，那会让合成器卡死。
-   * 该模式当前未启用（每页仍按写死的张数），改用它前需确认能接受「一屏十来张、只能翻页」。 */
-  updateFitSize: function (grid) {
-    if (!grid || UI._fitBusy) return;
-    if (grid.classList.contains('list-view')) { App.fitPageSize = 0; return; }   // 列表视图维持原分页
-    var first = grid.children[0];
-    if (!first || !first.offsetHeight) return;
+   * 目标：每页尽量铺满一屏，不用滚动就能看全，分页条落在页面底部。
+   *
+   * 做法：画完这一页后**逐张**量「这张卡的下沿落在哪」。完整落在可视区里的都留下，
+   * 第一张探出可视区的卡以及它后面的卡一起翻到下一页 —— 按「张」切，不按「行」切。
+   * 而且允许最后一排探出去一点（见下面的 TOL）：一屏只剩小半行时，为了那点像素
+   * 把整排推到下一页，底部空得更多。真正「整排都在屏幕外」的才翻下去。
+   *
+   * 为什么不再按行估算：卡片内容多少不一，同一行会被最高的那张撑高，一屏常常剩
+   * 大半行的高度；整行丢到下一页，底部就空一大片（用户原话「卡片没塞满」）。
+   * 按实测位置切之后，那点余量能再放一排就再放一排。
+   *
+   * 反方向也要能长回来：窗口拉高 / 列数变多 / 卡片变小之后，旧张数会明显少于一屏，
+   * 所以「一页画满且全都放得下」时按实测行高再补整数行 —— 这一段是估算，
+   * 多补了下一帧量出来会自己收回去（收敛，不会来回抖）。 */
+  fitGrid: function (grid, pi) {
+    if (!grid || !pi || UI._fitBusy) return;
+    /* 列表视图一行就 92px，一屏能放六七条，翻页比滚动更烦 —— 维持原来的分页方式 */
+    if (App.settings.view === 'list') { App.fitPageSize = 0; return; }
+    var cards = grid.children;
+    if (!cards.length) return;
+    var main = document.querySelector('.main');
+    if (!main) return;
+
     var cs = getComputedStyle(grid);
     var gap = parseFloat(cs.rowGap || cs.gap || '14') || 14;
     var cols = (cs.gridTemplateColumns || '').split(' ').filter(function (x) { return x && x !== 'none'; }).length || 1;
-    /* 可用高度必须扣掉 padding：分页条那 76px 的底部留白就在 grid 的 padding 里，
-     * 用 clientHeight 会把它也当成能放卡片的空间 → 多算一行 → 最后一行被 overflow 切掉。 */
-    var padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
-    var availH = grid.clientHeight - padY;
-    if (!availH) return;
-    /* 行高不再「量卡片」（量到的是被压过的高度，越量越扁），而是直接算：
-     *   封面 = 卡宽 × 3/4（4:3 写死在 CSS 里，不会变）
-     *   正文 = .card-body 的 scrollHeight（不受挤压影响，永远是内容真实高度）
-     * 然后把 grid-auto-rows 钉死成这个高度 —— 行高从此没有「被网格压扁」的余地。 */
-    var cardW = first.getBoundingClientRect().width || 0;
-    var bodyEl = first.querySelector('.card-body');
-    var bodyH = bodyEl ? bodyEl.scrollHeight : 0;
-    if (!cardW || !bodyH) return;
-    var rowH = Math.round(cardW * 3 / 4) + bodyH + 2;      // +2 给上下边框（内容需要的高度）
-    var rows = Math.max(1, Math.floor((availH + gap) / (rowH + gap)));
-    /* 行数定了之后，把剩余高度平均分给这几行：卡片正好铺满一屏，不多留一条空带。
-     * 封面高度固定 4:3 不吃拉伸，多出来的高度全部落进 .card-body（flex:1），
-     * 所以是「卡变高、图不变形」，不是把图拉长。 */
-    var rowFit = Math.floor((availH - (rows - 1) * gap) / rows);
-    grid.style.gridAutoRows = Math.max(rowH, rowFit) + 'px';
-    /* 兜底：四舍五入 / 边框 / 缩放比例都可能差一两像素，真放不下就少排一行，宁可空一行也别切卡 */
-    while (rows > 1 && rows * rowH + (rows - 1) * gap > availH + 1) rows--;
-    var size = rows * cols;
-    if (size < 1 || size === App.fitPageSize) return;
+
+    var size = Math.max(1, Number(pi.size) || 0);
+    var total = (pi.all || []).length;
+    var shown = cards.length;                 // 这一页实际画出来几张
+
+    var ms = getComputedStyle(main);
+    var borderT = parseFloat(ms.borderTopWidth) || 0;
+    var mrect = main.getBoundingClientRect();
+    var scrolled = main.scrollTop;
+    /* 卡片下沿换算成「滚动内容坐标」（从 padding 盒顶算）。用 rect 差 + scrollTop，
+     * 与当前滚到哪无关 —— 否则页面滚一下，量出来的可用张数就变了。 */
+    function bottomOf(node) {
+      return node.getBoundingClientRect().bottom - mrect.top - borderT + scrolled;
+    }
+    var PAD_NOPAGER = 16, PAD_PAGER = 72;     // 与 styles.css 的 .main / body.has-pager .main 对齐
+    /* 允许最后一行「探出」一点点：一屏只剩小半行时，为了那几十像素把整排卡推到下一页，
+     * 底部反而空得更多。探出来的部分滚一下就看见了，再往下的行才翻页。
+     * 上限取「1/3 行高」且不超过 56px —— 再多就变成每页都要滚一大截了。 */
+    var rowProbe = 0;
+    for (var p = 0; p < Math.min(shown, cols); p++) {
+      var ph = cards[p].getBoundingClientRect().height;
+      if (ph > rowProbe) rowProbe = ph;
+    }
+    var TOL = Math.round(Math.min(rowProbe * 0.35, 56)) || 0;
+    /* 可视区下沿（同一套内容坐标）：clientHeight 含 padding，要把底部留白扣掉 */
+    function fitCount(padB) {
+      var limit = main.clientHeight - padB + TOL;   // +TOL：允许最后一排探出去一点
+      var n = 0;
+      for (var i = 0; i < shown; i++) {
+        if (bottomOf(cards[i]) <= limit) n = i + 1;
+        else break;                            // 网格按 DOM 顺序排，后面只会更低
+      }
+      return n;
+    }
+    /* 要不要给分页条留位置，取决于「不留时够不够装下全部」；两个都量，
+     * 判定用不留位置的容量，这样不会出现「加了分页条→少一张→又不加分页条」的来回横跳。 */
+    var nNoPager = fitCount(PAD_NOPAGER);
+    var single = total <= nNoPager;
+    var pb = single ? PAD_NOPAGER : PAD_PAGER;
+    var fit = single ? nNoPager : fitCount(PAD_PAGER);
+    var cap;
+
+    if (shown < size) {
+      /* 这一页没画满（最后一页）：放得下就什么都别改 —— 拿不满的一页去量容量，
+       * 量出来的永远等于「已经画出来的张数」，会把每页张数越算越小。
+       * 只有真的溢出了才收一下（例：首帧按兜底 24 张画，而一屏只放得下 16 张）。 */
+      if (fit >= shown) return;
+      cap = fit;
+    } else {
+      cap = fit;
+      /* 这一页画满了、而且全都放得下 —— 说明还有余量，往回收一点空间： */
+      if (cap === shown) {
+        /* 1) 最后一行没排满：同一排的卡不额外占高度，补满它几乎不花空间 */
+        var rest = shown % cols;
+        if (rest) cap += cols - rest;
+        /* 2) 下面还够一整行（含行距）才继续加，半个行高不加，免得来回抖 */
+        var rowH = 0;
+        for (var k = Math.max(0, shown - cols); k < shown; k++) {
+          var h = cards[k].getBoundingClientRect().height;
+          if (h > rowH) rowH = h;
+        }
+        if (rowH > 0) {
+          var spare = (main.clientHeight - pb + TOL) - bottomOf(cards[shown - 1]);
+          var addRows = Math.floor((spare + gap) / (rowH + gap));
+          if (addRows > 0) cap += addRows * cols;
+        }
+      }
+    }
+    /* 再挤也得留一整行：比一行还少就没法看了（窗口高度小于一行时才会到这） */
+    size = Math.max(cols, cap);
+    if (size === App.fitPageSize) return;
+
+    /* 换每页张数时保住当前看的位置，而不是甩回第一页 */
+    var offset = ((pi.page || 1) - 1) * (pi.size || size);
     App.fitPageSize = size;
     UI._fitBusy = true;
     requestAnimationFrame(function () {
       UI._fitBusy = false;
-      App.page = 1;
+      App.page = Math.floor(offset / size) + 1;
       UI.renderAll();
     });
+  },
+
+  /** 分页条要居中在「卡片区」里，而不是整个窗口：左边还有页签栏和侧栏，
+   *  写死 left:50% 会明显偏左。把 .main 的中心写进 --pager-x（fixed 只能用视口坐标）。 */
+  syncPagerX: function () {
+    var main = document.querySelector('.main');
+    if (!main) return;
+    var r = main.getBoundingClientRect();
+    if (!r.width) return;
+    document.documentElement.style.setProperty('--pager-x', Math.round(r.left + r.width / 2) + 'px');
+  },
+
+  /** 内容比视口高（会滚一点）时给 body 挂个类：分页条改成实心，
+   *  否则半透明的胶囊压在半张卡上，卡片会从底下透出来，看着像渲染坏了。 */
+  syncPagerOverflow: function () {
+    var main = document.querySelector('.main');
+    if (!main) return;
+    document.body.classList.toggle('pager-overflow', main.scrollHeight - main.clientHeight > 2);
   },
 
   /** 只刷新多选计数（拖选 / 多选单击的热路径用，不跑全库 filter 与强制布局以外的任何东西） */
@@ -3426,7 +3506,11 @@ var UI = {
 
     /* 不自建分栏：列数交给 CSS grid 按「容器宽度 / 固定卡宽」算 ——
      * 收起侧栏就自动多排几列，卡片尺寸不变；同一行里最高的卡决定行高，其余撑满这一行。 */
-    var doneCb = function () { if (opts && opts.onDone) opts.onDone(); };
+    var doneCb = function () {
+      UI.fitGrid(grid, pi);          // 画完才知道一行多高、一屏放得下几行
+      UI.syncPagerOverflow();        // 内容比视口高时，分页条要改成实心（否则卡片从它底下透出来）
+      if (opts && opts.onDone) opts.onDone();
+    };
     /* 按 id 复用已有卡片节点，只重建内容真的变了的：每张新 <img> 都要重新走一次
      * vrcasset 请求与解码，整页重建还会让所有卡重播入场动画。
      * 指纹相同就把原节点搬回新位置（图片不重新解码、请求数为 0），只有新建的卡才播动画。 */
@@ -3504,6 +3588,7 @@ var UI = {
     var box = $('#pager'); if (!box) return;
     box.innerHTML = '';
     document.body.classList.toggle('has-pager', !!(pi && pi.pages > 1));
+    UI.syncPagerX();                       // 居中在卡片区（侧栏收放后要重算）
     if (!pi || pi.pages <= 1) { box.style.display = 'none'; return; }
     box.style.display = '';
     function go(n) { App.page = n; UI.renderMain(); UI.scrollToSmooth(0); }

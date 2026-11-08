@@ -307,7 +307,9 @@ var Modals = {
     // 已购买 = 该版本有 BOOTH / Gumroad 订单（下载页）链接；许可证/readme 等免费特殊变体单独展示在已购与未购买之间
     function isPurchasedVer(v) { return !!(v.orderUrl && v.orderUrl.trim()) && !v.special; }
     var purchasedVer = (a.versions || []).filter(isPurchasedVer);
-    var unpurchasedVer = (a.versions || []).filter(function (v) { return !isPurchasedVer(v) && !v.special; });
+    /* 本地登记的版本（拖进卡片 / 手动放入）没有订单链接，不能被列成「未购买」——
+     * 那是商品侧的概念，混进来会让人以为还要去买一份。 */
+    var unpurchasedVer = (a.versions || []).filter(function (v) { return !isPurchasedVer(v) && !v.special && !v.local; });
     function purchasedPriceLabel(sum, cur) {
       if (!sum) return '';
       var sym = cur === 'JPY' ? '\u00A5' : (cur === 'USD' ? '$' : (cur === 'EUR' ? '\u20AC' : '\u00A5'));
@@ -1134,6 +1136,96 @@ var Modals = {
         try { Modals.detail(a.id); } catch (e) {}
       }, function (e) { Toast.err('保存失败：' + ((e && e.message) || e)); });
     }
+    /* 「版本与下载」分两个切页：链接（远端，保持原样）/ 本地文件（点开才扫磁盘）。
+     * 素材以本地文件为主时，这一块原本只剩一两行路径，等于看不到自己手上有哪些文件。 */
+    var localPane = el('div', { class: 'detail-stack', style: { display: 'none' } });
+    var localLoaded = false;
+    var localNum = el('span', { class: 'detail-tab-num', text: '' });
+    var linkFileCount = Object.keys(seenUrl).length;
+    var linkNum = el('span', { class: 'detail-tab-num', text: String(linkFileCount) });
+    var tabLink = el('button', { class: 'detail-tab', type: 'button' }, ['链接', linkNum]);
+    var tabLocal = el('button', { class: 'detail-tab', type: 'button' }, ['本地文件', localNum]);
+    var linkPane = el('div', { class: 'detail-stack' }, [activeTotalNode, verSectionNode, dlNode, licenseNode, unpurchasedNode, pathNode]);
+
+    function pickTab(local) {
+      tabLink.classList.toggle('on', !local);
+      tabLocal.classList.toggle('on', local);
+      linkPane.style.display = local ? 'none' : '';
+      localPane.style.display = local ? '' : 'none';
+      if (local) loadLocalPane();
+    }
+    tabLink.addEventListener('click', function () { pickTab(false); });
+    tabLocal.addEventListener('click', function () { pickTab(true); });
+
+    function loadLocalPane() {
+      if (localLoaded) return;
+      localLoaded = true;
+      localPane.innerHTML = '';
+      var dir = App.primaryLocalPath(a);
+      if (!dir) {
+        localNum.textContent = '0';
+        localPane.appendChild(el('div', { class: 'multi-empty', text: '这条素材还没有本地路径。用编辑页的「导入已有文件 / 文件夹」补一份，或把文件拖到卡片上。' }));
+        return;
+      }
+      localPane.appendChild(el('div', { class: 'field-hint', text: '正在读取 ' + dir + ' …' }));
+      FS.hostEnsure().then(function (ok) {
+        if (!ok) throw new Error('程序后端未就绪，暂时读不到本地文件');
+        return FS.host.scan(dir, 1);
+      }).then(function (entries) {
+        /* 只看这一层：素材目录是平的，子目录里的文件不混进来 */
+        var files = (entries || []).filter(function (e) {
+          return e && e.kind === 'file' && String(e.rel || e.name).indexOf('\\') < 0;
+        });
+        localNum.textContent = String(files.length);
+        localPane.innerHTML = '';
+        if (!files.length) {
+          localPane.appendChild(el('div', { class: 'multi-empty', text: '目录里还没有文件：' + dir }));
+          return;
+        }
+        /* 记录里有、磁盘上没有：如实列出来，别让人以为文件还在 */
+        var recorded = uniq((a.downloadedFiles || []).map(String).concat((a.versions || []).reduce(function (acc, v) {
+          return acc.concat((v.files || []).map(function (f) { return String((f && f.name) || ''); }));
+        }, []))).filter(Boolean);
+        var onDisk = Object.create(null);
+        files.forEach(function (e) { onDisk[String(e.name).toLowerCase()] = 1; });
+        var missing = recorded.filter(function (n) { return !onDisk[String(n).toLowerCase()]; });
+        files.sort(function (x, y) { return (y.mtime || 0) - (x.mtime || 0); });   // 最近放进来的排最前
+        /* 磁盘上的文件 → 它在「版本」里叫什么：拖进卡片时选了「作为新版本」的才有 */
+        var verOfFile = Object.create(null);
+        (a.versions || []).forEach(function (v) {
+          var names = (v.files || []).map(function (f) { return String((f && f.name) || ''); });
+          if (v.fileName) names.push(String(v.fileName));
+          names.forEach(function (n) { if (n) verOfFile[n.toLowerCase()] = String(v.name || ''); });
+        });
+        localPane.appendChild(el('div', { class: 'link-list' }, files.map(function (e) {
+          var vn = verOfFile[String(e.name).toLowerCase()];
+          return el('div', { class: 'link-row local-file-row' }, [
+            el('code', { class: 'path', title: e.name }, e.name + (e.size ? '  ·  ' + fmtSize(e.size) : '')),
+            vn ? el('span', { class: 'local-ver', title: '在版本里登记为：' + vn, text: vn }) : null,
+            el('button', { class: 'btn btn-xs', onclick: function () { FS.openPath(dir); } }, ICONS.label('\u{1F4C2} 在文件夹中显示'))
+          ]);
+        })));
+        if (missing.length) {
+          localPane.appendChild(el('div', { class: 'field-hint', text: '\u26A0 记录里有 ' + missing.length + ' 个文件在磁盘上找不到：'
+            + missing.slice(0, 4).join('、') + (missing.length > 4 ? ' …' : '') }));
+        }
+        localPane.appendChild(el('div', { class: 'field-hint', text: '共 ' + files.length + ' 个文件，合计 '
+          + fmtSize(files.reduce(function (s, e) { return s + (e.size || 0); }, 0)) + '；按修改时间倒序。' }));
+      }).catch(function (e) {
+        localPane.innerHTML = '';
+        localNum.textContent = '\u2014';
+        localPane.appendChild(el('div', { class: 'field-hint', text: '读取失败：' + ((e && e.message) || e) }));
+      });
+    }
+
+    var versionsPane = el('div', { class: 'detail-stack' }, [
+      el('div', { class: 'detail-tabs' }, [tabLink, tabLocal]),
+      linkPane, localPane
+    ]);
+    /* 一条链接都没有、但有本地路径 → 直接停在「本地文件」，省一次点击 */
+    if (!linkFileCount && (a.paths || []).length) pickTab(true);
+    else tabLink.classList.add('on');
+
     var content = el('div', { class: 'detail-content-wrap' }, [
       el('div', { class: 'detail-content-head' }, [ICONS.make('box', { size: 15 }), el('span', { text: '详细信息' })]),
       linkEnrichBlock(),
@@ -1146,7 +1238,7 @@ var Modals = {
         ]),
         // 右栏：版本与下载 + 图集 + 备注
         el('div', { class: 'detail-col' }, [
-          section('版本与下载', el('div', { class: 'detail-stack' }, [activeTotalNode, verSectionNode, dlNode, licenseNode, unpurchasedNode, pathNode]), fetchOrderBtn),
+          section('版本与下载', versionsPane, fetchOrderBtn),
           section('备注', a.note ? el('div', { class: 'note-box' }, [el('span', { text: a.note })]) : null)
         ])
       ])
